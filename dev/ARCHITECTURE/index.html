@@ -1,0 +1,1445 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Modular MLOps in Rust — from data ingestion to edge devices, one block at a time.">
+      
+      
+      
+        <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/ARCHITECTURE/">
+      
+      
+        <link rel="prev" href="../SPEC/">
+      
+      
+        <link rel="next" href="../adr/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/mallops-logo.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
+    
+    
+      
+        <title>Architecture - mallops</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <script>
+    // Material renders Mermaid inside a *closed* shadow root. Force it open so
+    // docs/javascripts/mermaid-zoom.js can copy the rendered diagram.
+    (() => {
+      const attach = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function (init) {
+        return attach.call(this, { ...init, mode: "open" });
+      };
+    })();
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="brown" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#mallops-architecture" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="mallops" class="md-header__button md-logo" aria-label="mallops" data-md-component="logo">
+      
+  <img src="../assets/mallops-logo-dark.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mallops
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Architecture
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="brown" data-md-color-accent="deep-orange"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="brown" data-md-color-accent="deep-orange"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/bighands2304/mallops" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    bighands2304/mallops
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="mallops" class="md-nav__button md-logo" aria-label="mallops" data-md-component="logo">
+      
+  <img src="../assets/mallops-logo-dark.svg" alt="logo">
+
+    </a>
+    mallops
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/bighands2304/mallops" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    bighands2304/mallops
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../SPEC/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Specification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-workspace-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Workspace layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-core-abstractions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Core abstractions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-execution-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Execution model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-plugin-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Plugin model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-artifact-store-and-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Artifact store and lineage
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Artifact store and lineage">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-artifact-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Artifact store
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Lineage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Serving
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-edge-and-federated-learning-v04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Edge and federated learning (v0.4)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-cross-cutting-concerns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Cross-cutting concerns
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decisions (ADR)
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Decisions (ADR)
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Decision Records
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0001-modular-workspace/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0001 — Modular Cargo workspace
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0002-arrow-default-interchange/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0002 — Arrow/Parquet as default (not mandatory) data interchange
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0003-plugins-wasm-and-grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0003 — Plugins via WASM components and external processes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0004-agnostic-artifacts-and-flavors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0004 — Format-agnostic artifacts with flavors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0005-gitflow-and-release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0005 — GitFlow branching and automated releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0006-store-and-lineage-contracts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0006 — Artifact store and lineage: contracts in the core, implementations pluggable
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.rs/mallops-core" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-workspace-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Workspace layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-core-abstractions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Core abstractions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-execution-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Execution model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-plugin-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Plugin model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-artifact-store-and-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Artifact store and lineage
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Artifact store and lineage">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-artifact-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Artifact store
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Lineage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Serving
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-edge-and-federated-learning-v04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Edge and federated learning (v0.4)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-cross-cutting-concerns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Cross-cutting concerns
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/bighands2304/mallops/edit/dev/docs/ARCHITECTURE.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="mallops-architecture">mallops — Architecture<a class="headerlink" href="#mallops-architecture" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p>Companion to <a href="../SPEC/">SPEC.md</a>. Decisions are recorded in <a href="../adr/">adr/</a>.</p>
+</blockquote>
+<h2 id="1-overview">1. Overview<a class="headerlink" href="#1-overview" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart LR
+    subgraph User
+        Y[mallops.yaml]
+        L[Rust code]
+    end
+    subgraph Core["mallops-core"]
+        P[Config parser + validator]
+        G[DAG builder]
+        R[Runtime / scheduler]
+        REG[Block registry]
+        S[(ArtifactStore trait&lt;br/&gt;local · memory)]
+        LIN[Lineage events&lt;br/&gt;JSON sink]
+    end
+    subgraph Backends["Optional backends"]
+        RS3[(S3 / GCS / Azure)]
+        LS[SQLite · OpenLineage · MLflow]
+    end
+    S -.-&gt; RS3
+    LIN -.-&gt; LS
+    subgraph Blocks
+        STD[mallops-std&lt;br/&gt;feature-gated]
+        RS[User Rust blocks]
+        W[WASM components]
+        X[External process&lt;br/&gt;gRPC / CLI]
+    end
+    Y --&gt; P --&gt; G --&gt; R
+    L --&gt; G
+    REG --&gt; R
+    R &lt;--&gt; S
+    R --&gt; LIN --&gt; S
+    STD &amp; RS --&gt; REG
+    W &amp; X --&gt; REG</code></pre>
+<p>The core knows only three things: <strong>blocks</strong>, <strong>artifacts</strong>, and <strong>the graph</strong> between them. Everything ML-specific lives in blocks.</p>
+<p>Store and lineage are not blocks: blocks are <em>nodes</em> of the DAG, while store and lineage act on <em>every edge</em>. The core owns their <strong>contracts</strong> and a minimal default; every real backend is optional (<a href="../adr/0006-store-and-lineage-contracts/">ADR-0006</a>).</p>
+<h2 id="2-workspace-layout">2. Workspace layout<a class="headerlink" href="#2-workspace-layout" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>mallops/
+├── crates/
+│   ├── mallops-core/   # traits, artifacts, store &amp; lineage contracts, config, runtime
+│   ├── mallops-cli/    # `mallops` binary              (v0.1)
+│   ├── mallops-std/    # standard blocks, feature-gated (v0.1)
+│   └── mallops-edge/   # edge agent + FL aggregator     (v0.4)
+├── docs/
+└── examples/
+</code></pre></div>
+<p>Crates are created only when implemented. Splitting <code>mallops-std</code> into per-stage crates is deferred until compile times or dependency weight demand it (<a href="../adr/0001-modular-workspace/">ADR-0001</a>).</p>
+<table>
+<thead>
+<tr>
+<th>Crate</th>
+<th>Depends on</th>
+<th>Heavy deps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mallops-core</code></td>
+<td>—</td>
+<td><code>tokio</code>, <code>serde</code>, <code>blake3</code>, <code>tracing</code></td>
+</tr>
+<tr>
+<td><code>mallops-std</code></td>
+<td>core</td>
+<td>per feature: <code>arrow</code>, <code>polars</code>, <code>linfa</code>, <code>ort</code>, <code>axum</code>, <code>object_store</code> (<code>store-s3</code>, <code>store-gcs</code>, <code>store-azure</code>), <code>rusqlite</code> (<code>lineage-sqlite</code>), …</td>
+</tr>
+<tr>
+<td><code>mallops-cli</code></td>
+<td>core, std</td>
+<td><code>clap</code></td>
+</tr>
+<tr>
+<td><code>mallops-edge</code></td>
+<td>core, std (subset)</td>
+<td><code>tonic</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-core-abstractions">3. Core abstractions<a class="headerlink" href="#3-core-abstractions" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="sd">/// Static description of a block: identity, I/O ports, config schema.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">BlockSpec</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">,</span><span class="w">            </span><span class="c1">// "std/train.external"</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">stage</span><span class="p">:</span><span class="w"> </span><span class="nc">Stage</span><span class="p">,</span><span class="w">                </span><span class="c1">// Ingest, Preprocess, Train, …</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Port</span><span class="o">&gt;</span><span class="p">,</span><span class="w">           </span><span class="c1">// name + accepted kind/formats/flavors</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">outputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Port</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">config_schema</span><span class="p">:</span><span class="w"> </span><span class="nc">schemars</span><span class="p">::</span><span class="n">Schema</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="cp">#[async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Block</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">spec</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BlockSpec</span><span class="p">;</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Context</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nc">Inputs</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">Outputs</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="sd">/// Given to each block during execution.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Context</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">run_id</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">workdir</span><span class="p">:</span><span class="w"> </span><span class="nc">PathBuf</span><span class="p">,</span><span class="w">            </span><span class="c1">// scratch dir, also mounted for external blocks</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">store</span><span class="p">:</span><span class="w"> </span><span class="nc">Arc</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">ArtifactStore</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">config</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w">   </span><span class="c1">// the block's `with:` section, already validated</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">span</span><span class="p">:</span><span class="w"> </span><span class="nc">tracing</span><span class="p">::</span><span class="n">Span</span><span class="p">,</span>
+<span class="p">}</span>
+<span class="c1">// Blocks never touch lineage: the runtime records it around `run()`.</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Artifact</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="nc">ArtifactId</span><span class="p">,</span><span class="w">              </span><span class="c1">// BLAKE3 of manifest + payload</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">manifest</span><span class="p">:</span><span class="w"> </span><span class="nc">Manifest</span><span class="p">,</span><span class="w">          </span><span class="c1">// kind, format, flavor, signature, metadata, parents</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Serving uses one more trait, implemented by backend crates/plugins and selected by <code>flavor</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Predictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">flavors</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">];</span><span class="w">                       </span><span class="c1">// e.g. ["onnx"], ["sklearn-pickle"]</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">load</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">pkg</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Artifact</span><span class="p">,</span><span class="w"> </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Context</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">Loaded</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>No ML type appears in core signatures: tensors and dataframes are payload files or plugin-internal types. This is what keeps mallops library-agnostic (<a href="../adr/0004-agnostic-artifacts-and-flavors/">ADR-0004</a>).</p>
+<h2 id="4-execution-model">4. Execution model<a class="headerlink" href="#4-execution-model" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>sequenceDiagram
+    participant CLI
+    participant Core as Runtime
+    participant Store
+    participant B as Block
+    CLI-&gt;&gt;Core: run(mallops.yaml)
+    Core-&gt;&gt;Core: parse, validate schemas &amp; port compatibility, topo-sort
+    loop each ready node (parallel when independent)
+        Core-&gt;&gt;Core: cache key = hash(block id, version, config, input artifact ids)
+        alt cache hit
+            Core-&gt;&gt;Store: reuse outputs
+        else
+            Core-&gt;&gt;B: run(ctx, inputs)
+            B-&gt;&gt;Store: put(payload, manifest)
+            Store--&gt;&gt;B: ArtifactId
+            B--&gt;&gt;Core: outputs
+        end
+        Core-&gt;&gt;Core: emit lineage event → sinks
+    end
+    Core--&gt;&gt;CLI: run summary</code></pre>
+<ul>
+<li>Scheduler: <code>tokio</code> tasks, bounded concurrency (<code>--jobs</code>).</li>
+<li>Failure: a failed node cancels its descendants; other branches finish. Re-running resumes from cache.</li>
+<li>Quality gates are blocks that return an error (stop) or a <code>skip</code> signal for downstream nodes.</li>
+</ul>
+<h2 id="5-plugin-model">5. Plugin model<a class="headerlink" href="#5-plugin-model" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TB
+    R[Runtime] --&gt; N[Native Rust block&lt;br/&gt;compile-time, inventory]
+    R --&gt; W[WASM component&lt;br/&gt;wasmtime, sandboxed]
+    R --&gt; X[External process&lt;br/&gt;gRPC or CLI contract]
+    X --&gt; PY[Python / R / Julia / containers]</code></pre>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Use when</th>
+<th>Isolation</th>
+<th>Overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Native</td>
+<td>Rust, performance critical</td>
+<td>none</td>
+<td>zero</td>
+</tr>
+<tr>
+<td>WASM</td>
+<td>portable, untrusted, light compute</td>
+<td>strong</td>
+<td>low</td>
+</tr>
+<tr>
+<td>External</td>
+<td>other languages, GPUs, heavy frameworks</td>
+<td>process/container</td>
+<td>process spawn + IPC</td>
+</tr>
+</tbody>
+</table>
+<p>The <strong>external CLI contract</strong> is the simplest: mallops writes <code>inputs.json</code> (artifact paths + manifests) and <code>config.json</code> into the workdir, runs the command, and collects files declared in <code>outputs.json</code>. Any language can implement it in a few lines. The gRPC variant adds long-lived workers and streaming. See <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</p>
+<h2 id="6-artifact-store-and-lineage">6. Artifact store and lineage<a class="headerlink" href="#6-artifact-store-and-lineage" title="Permanent link">&para;</a></h2>
+<p>Two kinds of "storage" exist and must not be confused:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Data storage blocks</th>
+<th>Artifact store</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What</td>
+<td>Persist user data to lakes, DBs, feature stores</td>
+<td>Hand artifacts from one block to the next</td>
+</tr>
+<tr>
+<td>Where in the DAG</td>
+<td>A node</td>
+<td>Every edge</td>
+</tr>
+<tr>
+<td>In the core</td>
+<td>No (<code>mallops-std</code> / plugins)</td>
+<td>Contract + <code>local</code> and <code>memory</code> impls</td>
+</tr>
+<tr>
+<td>Optional</td>
+<td>Yes</td>
+<td>The backend is; the mechanism is not</td>
+</tr>
+</tbody>
+</table>
+<h3 id="61-artifact-store">6.1 Artifact store<a class="headerlink" href="#61-artifact-store" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">ArtifactStore</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">put</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">manifest</span><span class="p">:</span><span class="w"> </span><span class="nc">Manifest</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">ArtifactId</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">Artifact</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="sd">/// Materialize the payload locally (no-op for `local`, download for remote).</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">fetch</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">,</span><span class="w"> </span><span class="n">dest</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">PathBuf</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">exists</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>Core implementations: <code>LocalStore</code> (filesystem, default, <code>./.mallops</code>) and <code>MemoryStore</code> (ephemeral; tests and throwaway runs).</li>
+<li>Optional: <code>ObjectStore</code> adapter over the <code>object_store</code> crate (S3, GCS, Azure) behind <code>mallops-std</code> features; anything else as a plugin.</li>
+<li>What depends on it: data hand-off between nodes and processes, caching (cache key → output ids), resume after failure, model registry (v0.2).</li>
+<li>Layout: <code>artifacts/&lt;hash&gt;/…</code>, <code>registry/&lt;model&gt;/&lt;version&gt;.json</code> (v0.2).</li>
+</ul>
+<h3 id="62-lineage">6.2 Lineage<a class="headerlink" href="#62-lineage" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">LineageEvent</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RunStarted</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">pipeline_hash</span><span class="p">:</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">git_commit</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">host</span><span class="p">:</span><span class="w"> </span><span class="nc">HostInfo</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">BlockStarted</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">block</span><span class="p">:</span><span class="w"> </span><span class="nc">BlockRef</span><span class="p">,</span><span class="w"> </span><span class="n">config_hash</span><span class="p">:</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ArtifactId</span><span class="o">&gt;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">ArtifactProduced</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">artifact</span><span class="p">:</span><span class="w"> </span><span class="nc">ArtifactId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">BlockFinished</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">:</span><span class="w"> </span><span class="nc">Status</span><span class="p">,</span><span class="w"> </span><span class="n">duration</span><span class="p">:</span><span class="w"> </span><span class="nc">Duration</span><span class="p">,</span><span class="w"> </span><span class="n">cached</span><span class="p">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">RunFinished</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">:</span><span class="w"> </span><span class="nc">Status</span><span class="w"> </span><span class="p">},</span>
+<span class="p">}</span>
+
+<span class="cp">#[async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">LineageSink</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">record</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">event</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">LineageEvent</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">()</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>The runtime is the only producer: it alone sees the whole graph. Blocks stay unaware of lineage.</li>
+<li>Core sink: <code>JsonSink</code>, writing <code>runs/&lt;run-id&gt;/lineage.json</code> into the artifact store.</li>
+<li>Optional sinks: SQLite (queryable), OpenLineage (Marquez, DataHub…), MLflow — <code>mallops-std</code> features or plugins.</li>
+<li>Zero or more sinks; <code>lineage: off</code> disables it. A failing sink logs a warning and never fails the run.</li>
+<li>Caching does <strong>not</strong> depend on lineage: it uses artifact hashes in the store.</li>
+</ul>
+<h2 id="7-serving">7. Serving<a class="headerlink" href="#7-serving" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart LR
+    C[Client] --&gt;|HTTP/gRPC| S[mallops serve]
+    S --&gt; T[Preprocess transform&lt;br/&gt;from package]
+    T --&gt; P{Predictor by flavor}
+    P --&gt; O[ort]
+    P --&gt; TR[tract]
+    P --&gt; CA[candle]
+    P --&gt; EXT[external Python worker]
+    S --&gt; M[metrics / logs]</code></pre>
+<h2 id="8-edge-and-federated-learning-v04">8. Edge and federated learning (v0.4)<a class="headerlink" href="#8-edge-and-federated-learning-v04" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TB
+    subgraph Cloud
+        AGG[FL aggregator]
+        REGI[Model registry]
+        COL[Metrics collector]
+    end
+    subgraph Edge["Edge node (mallops-edge)"]
+        SV[Local serving]
+        LT[Local training]
+        BUF[Metrics buffer]
+    end
+    REGI -- signed model pull --&gt; SV
+    AGG -- global weights --&gt; LT
+    LT -- weight deltas only --&gt; AGG
+    SV --&gt; BUF -- push when online --&gt; COL
+    COL -- drift alert --&gt; RT[Retrain trigger]</code></pre>
+<ul>
+<li>Transport: gRPC (<code>tonic</code>) with mTLS; nodes initiate connections (NAT-friendly).</li>
+<li>Aggregation strategies are blocks (FedAvg default); privacy techniques plug in at the aggregator.</li>
+<li>Model weights exchanged in whatever format the flavor defines; the aggregator delegates averaging to a flavor-aware plugin.</li>
+</ul>
+<h2 id="9-cross-cutting-concerns">9. Cross-cutting concerns<a class="headerlink" href="#9-cross-cutting-concerns" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Choice</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Errors</td>
+<td><code>thiserror</code> in libraries, <code>anyhow</code> only in the CLI</td>
+</tr>
+<tr>
+<td>Logging/tracing</td>
+<td><code>tracing</code>; OpenTelemetry exporter behind a feature</td>
+</tr>
+<tr>
+<td>Config</td>
+<td><code>serde</code> + <code>serde_yaml</code> + <code>schemars</code></td>
+</tr>
+<tr>
+<td>Async</td>
+<td><code>tokio</code></td>
+</tr>
+<tr>
+<td>CLI</td>
+<td><code>clap</code> derive</td>
+</tr>
+<tr>
+<td>Testing</td>
+<td>unit tests per crate, integration tests running example pipelines, <code>insta</code> snapshots for CLI output</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../SPEC/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Specification">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Specification
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../adr/" class="md-footer__link md-footer__link--next" aria-label="Next: Architecture Decision Records">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Architecture Decision Records
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 The mallops contributors — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "search.suggest", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.2/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

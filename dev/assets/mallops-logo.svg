@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="86 98 216 216" width="216" height="216">
+  <style>.l{stroke:#3A2A22}@media (prefers-color-scheme:dark){.l{stroke:#F3E6D6}}</style>
+  <line x1="282" y1="118" x2="100" y2="300" stroke="#3A2A22" stroke-width="4" stroke-linecap="round" class="l"/>
+  <g transform="rotate(-45 150 250)">
+    <rect x="118" y="212" width="64" height="76" rx="22" fill="#F6D2A8"/>
+  </g>
+  <g transform="rotate(-45 200 200)">
+    <rect x="168" y="162" width="64" height="76" rx="22" fill="#EE9D5C"/>
+  </g>
+  <g transform="rotate(-45 250 150)">
+    <rect x="218" y="112" width="64" height="76" rx="22" fill="#D9652A"/>
+  </g>
+  <path d="M238.68 183.94 A28.71 28.71 0 0 1 238.69 224.54 L252.09 236 L265.49 224.54 A28.71 28.71 0 0 1 257.09 204.24 A18.43 18.43 0 0 1 262.49 191.21 L269.76 183.94 L254.2 175 Z" fill="#D9652A"/>
+  <g transform="rotate(-45 252.09 233.73)">
+    <rect x="236.09" y="217.73" width="32" height="32" rx="10.9" fill="#D9652A"/>
+  </g>
+</svg>

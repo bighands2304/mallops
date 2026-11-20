@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug, triage]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened?"
+      description: "Include the expected behaviour."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: "Steps to reproduce"
+      description: "Minimal `mallops.yaml` or code snippet."
+      render: yaml
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "mallops version"
+      placeholder: "mallops --version"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: "OS / architecture"
+      placeholder: "macOS 15 aarch64"
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs"
+      render: shell

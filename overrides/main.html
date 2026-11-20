@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  <script>
+    // Material renders Mermaid inside a *closed* shadow root. Force it open so
+    // docs/javascripts/mermaid-zoom.js can copy the rendered diagram.
+    (() => {
+      const attach = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function (init) {
+        return attach.call(this, { ...init, mode: "open" });
+      };
+    })();
+  </script>
+{% endblock %}

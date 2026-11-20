@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, "release/**", "hotfix/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "${{ steps.msrv.outputs.version }}" }
+      - uses: Swatinem/rust-cache@v2
+      # `+toolchain` overrides rust-toolchain.toml.
+      - run: cargo +${{ steps.msrv.outputs.version }} check --workspace --locked
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # Developer Certificate of Origin: every non-bot, non-merge commit in a PR
+  # must carry a Signed-off-by trailer matching its author.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Check Signed-off-by
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          fail=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author="$(git show -s --format='%an <%ae>' "$c")"
+            case "$author" in *"[bot]"*) continue ;; esac
+            if ! git show -s --format=%B "$c" | grep -qiF "Signed-off-by: $author"; then
+              echo "::error::$(git show -s --format='%h %s' "$c") is missing 'Signed-off-by: $author'"
+              fail=1
+            fi
+          done
+          if [ "$fail" = 1 ]; then
+            echo "Sign off your commits: git rebase --signoff $BASE && git push --force-with-lease"
+            echo "See https://developercertificate.org and CONTRIBUTING.md"
+            exit 1
+          fi
+
+  # Single required status check for branch protection.
+  ci-ok:
+    if: always()
+    needs: [fmt, clippy, test, msrv, docs, deny, dco]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo ok

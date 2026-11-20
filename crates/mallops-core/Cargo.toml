@@ -1,0 +1,15 @@
+[package]
+name = "mallops-core"
+description = "Core traits, artifacts and runtime of the mallops MLOps framework"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true

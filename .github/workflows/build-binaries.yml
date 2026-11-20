@@ -1,0 +1,51 @@
+name: Build binaries
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, ext: .exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.tag }}" }
+      # ponytail: no-op until crates/mallops-cli exists.
+      - name: Check for CLI crate
+        id: cli
+        shell: bash
+        run: echo "exists=$([ -f crates/mallops-cli/Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.cli.outputs.exists == 'true'
+        with: { targets: "${{ matrix.target }}" }
+      - name: Build and upload
+        if: steps.cli.outputs.exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: mallops-${{ inputs.tag }}-${{ matrix.target }}
+        run: |
+          cargo build --release --locked -p mallops-cli --target ${{ matrix.target }}
+          mkdir "$NAME"
+          cp "target/${{ matrix.target }}/release/mallops${{ matrix.ext }}" LICENSE README.md "$NAME/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "$NAME.zip" "$NAME" && asset="$NAME.zip"
+          else
+            tar czf "$NAME.tar.gz" "$NAME" && asset="$NAME.tar.gz"
+          fi
+          gh release upload "${{ inputs.tag }}" "$asset" --clobber

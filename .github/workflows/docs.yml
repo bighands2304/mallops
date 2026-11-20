@@ -1,0 +1,65 @@
+name: Docs
+
+# PRs: strict build (broken links fail).  Push on dev: deploy /dev/.
+# Releases: called by release.yml to deploy /X.Y/ and move the `latest` alias.
+on:
+  pull_request:
+    paths: ["docs/**", "overrides/**", "mkdocs.yml", "CONTRIBUTING.md"]
+  push:
+    branches: [dev]
+    paths: ["docs/**", "overrides/**", "mkdocs.yml", "CONTRIBUTING.md"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: false
+
+env:
+  NO_MKDOCS_2_WARNING: "1"
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+      - run: pip install -r docs/requirements.txt
+
+      - name: Build (strict)
+        # When called from release.yml, event_name is still 'pull_request': check the tag too.
+        if: github.event_name == 'pull_request' && !inputs.tag
+        run: mkdocs build --strict
+
+      - name: Deploy
+        if: github.event_name != 'pull_request' || inputs.tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages --depth=1 || true
+          if [ -n "$TAG" ]; then
+            minor=$(echo "${TAG#v}" | cut -d. -f1,2)
+            mike deploy --push --update-aliases "$minor" latest
+            mike set-default --push latest
+          else
+            mike deploy --push dev
+            # Until the first release, the site root points to dev.
+            mike list | grep -q latest || mike set-default --push dev
+          fi

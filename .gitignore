@@ -1,0 +1,7 @@
+/target
+.mallops/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+/site

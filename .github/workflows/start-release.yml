@@ -1,0 +1,70 @@
+name: Start release
+
+# Cuts release/X.Y.Z from dev, bumps the version, updates CHANGELOG.md
+# and opens the PR into main. Pushing the branch publishes the first beta.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump (ignored for the very first release, which ships the current version)
+        type: choice
+        options: [patch, minor, major]
+        default: minor
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          # A PAT/App token is needed so the pushed branch and PR trigger other workflows.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Compute next version
+        id: v
+        run: |
+          cur=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*')" ]; then
+            echo "version=$cur" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          IFS=. read -r major minor patch <<< "$cur"
+          case "${{ inputs.bump }}" in
+            major) major=$((major+1)); minor=0; patch=0 ;;
+            minor) minor=$((minor+1)); patch=0 ;;
+            patch) patch=$((patch+1)) ;;
+          esac
+          echo "version=$major.$minor.$patch" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump version
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.v.outputs.version }}"/' Cargo.toml
+          cargo update --workspace
+
+      - uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag v${{ steps.v.outputs.version }}
+        env:
+          OUTPUT: CHANGELOG.md
+
+      - name: Create branch and PR
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "release/$V"
+          git commit -am "chore(release): v$V"
+          git push -u origin "release/$V"
+          gh pr create --base main --head "release/$V" \
+            --title "chore(release): v$V" \
+            --body "Release v$V. Each push to this branch publishes a \`v$V-beta.N\` pre-release. Merge with **Create a merge commit**."

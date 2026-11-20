@@ -1,0 +1,33 @@
+name: Block proposal
+description: Propose a new standard block or plugin
+labels: [block, triage]
+body:
+  - type: dropdown
+    id: stage
+    attributes:
+      label: "Stage"
+      options: [ingest, storage, preprocess, train, model-engineering, evaluate, package, versioning, deploy, serve, monitor, retrain, edge, other]
+    validations:
+      required: true
+  - type: input
+    id: id
+    attributes:
+      label: "Block id"
+      placeholder: "std/ingest.kafka"
+  - type: textarea
+    id: io
+    attributes:
+      label: "Inputs / outputs"
+      description: "Artifact kinds, formats, flavors."
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: "Example config (with:)"
+      render: yaml
+  - type: dropdown
+    id: kind
+    attributes:
+      label: "Implementation"
+      options: ["native Rust (mallops-std)", "external plugin", "WASM"]

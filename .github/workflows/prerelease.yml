@@ -1,0 +1,37 @@
+name: Pre-release (beta)
+
+on:
+  push:
+    branches: ["release/**"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease-${{ github.ref }}
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Create next beta pre-release
+        id: t
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          n=$(( $(git tag -l "v$v-beta.*" | wc -l) + 1 ))
+          tag="v$v-beta.$n"
+          gh release create "$tag" --target "$GITHUB_SHA" --prerelease \
+            --title "$tag" --generate-notes
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: tag
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}

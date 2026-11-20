@@ -1,0 +1,85 @@
+name: Release
+
+# Runs when a release/* or hotfix/* PR is merged into main.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    if: >-
+      github.event.pull_request.merged &&
+      (startsWith(github.head_ref, 'release/') || startsWith(github.head_ref, 'hotfix/'))
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Read version
+        id: v
+        run: |
+          tag="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if git rev-parse -q --verify "refs/tags/$tag"; then
+            echo "::error::$tag already exists — bump the version in Cargo.toml"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: orhun/git-cliff-action@v4
+        id: notes
+        with:
+          config: cliff.toml
+          args: --unreleased --tag ${{ steps.v.outputs.tag }} --strip header
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.v.outputs.tag }}" --target main --latest \
+            --title "${{ steps.v.outputs.tag }}" --notes-file "${{ steps.notes.outputs.changelog }}"
+
+  binaries:
+    needs: release
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+
+  docs:
+    needs: release
+    uses: ./.github/workflows/docs.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish crates
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish --workspace --locked
+
+  back-merge:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open back-merge PR main → dev
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          gh pr create -R "$GITHUB_REPOSITORY" --base dev --head main \
+            --title "chore: back-merge ${{ needs.release.outputs.tag }} into dev" \
+            --body "Merge with **Create a merge commit** so the release tag is reachable from dev." \
+            || echo "Nothing to back-merge."

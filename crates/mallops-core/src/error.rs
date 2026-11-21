@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::StoreError;
+
 /// Error type returned by `mallops-core` operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -26,4 +28,8 @@ pub enum Error {
         /// The supported schema version ([`Manifest::SCHEMA_VERSION`](crate::Manifest::SCHEMA_VERSION)).
         expected: u32,
     },
+
+    /// An [`ArtifactStore`](crate::ArtifactStore) operation failed.
+    #[error("artifact store error: {0}")]
+    Store(#[from] StoreError),
 }

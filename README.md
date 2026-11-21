@@ -24,7 +24,7 @@
 
 ## Why mallops
 
-- **Every MLOps step is a block** — ingestion, storage, preprocessing, training, model engineering, evaluation, packaging, versioning, deploy, serving, monitoring, retrain. Add, remove or replace any of them.
+- **Every MLOps step is a block** — ingestion, data storage, preprocessing, training, model engineering, evaluation, packaging, versioning, deploy, serving, monitoring, retrain. Add, remove or replace any of them.
 - **Bring any model, any library** — ONNX, safetensors, TorchScript, pickle, GGUF, XGBoost, your own format. Train in Rust, Python, or anything that runs in a process.
 - **Three ways to use it** — as a Rust library, with plugins (WASM or external processes in any language), or standalone with a YAML file and the `mallops` CLI.
 - **Edge-ready** — local serving, distributed monitoring and federated learning on devices (planned v0.4).
@@ -37,16 +37,21 @@ version: 1
 name: churn-classifier
 blocks:
   raw:      { use: std/ingest.csv, with: { path: data/customers.csv } }
-  features: { use: std/preprocess.tabular, in: { data: raw.dataset }, with: { target: churned } }
+  features: { use: std/preprocess.tabular, in: { data: raw.dataset },
+              with: { target: churned, steps: [{ split: { test: 0.2, seed: 42 } }] } }
   model:    { use: std/train.external, in: { train: features.train },
               with: { command: [python, train.py], flavor: sklearn-pickle } }
   eval:     { use: std/evaluate.classification, in: { model: model.model, test: features.test },
               with: { gate: { metric: f1, min: 0.8 } } }
-  serve:    { use: std/serve.http, in: { model: model.model }, with: { port: 8080 } }
+  package:  { use: std/package,
+              in: { model: model.model, preprocess: features.transform, metrics: eval.metrics } }
+serve:
+  package: package.package
+  port: 8080
 ```
 
 ```sh
-mallops validate && mallops run && mallops serve
+mallops validate && mallops run && mallops serve --trust-unsafe-flavors
 ```
 
 ```mermaid

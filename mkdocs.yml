@@ -73,5 +73,6 @@ nav:
       - adr/0004-agnostic-artifacts-and-flavors.md
       - adr/0005-gitflow-and-release.md
       - adr/0006-store-and-lineage-contracts.md
+      - adr/0007-core-contracts-revision.md
   - Contributing: contributing.md
   - API reference: https://docs.rs/mallops-core

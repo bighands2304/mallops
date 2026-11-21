@@ -4,15 +4,18 @@ on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened]
 
-permissions:
-  pull-requests: read
+permissions: {}
 
 jobs:
   conventional:
+    permissions:
+      pull-requests: read
     runs-on: ubuntu-latest
-    # Merge-commit PRs (release → main, main → dev) are exempt.
-    if: ${{ !startsWith(github.head_ref, 'release/') && github.head_ref != 'main' }}
+    # Merge-commit PRs from this repo (release → main, main → dev) are exempt.
+    if: >-
+      !(github.event.pull_request.head.repo.full_name == github.repository &&
+        (startsWith(github.head_ref, 'release/') || github.head_ref == 'main'))
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017 # v5.5.3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

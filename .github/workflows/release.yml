@@ -6,23 +6,24 @@ on:
     types: [closed]
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   release:
     if: >-
       github.event.pull_request.merged &&
       (startsWith(github.head_ref, 'release/') || startsWith(github.head_ref, 'hotfix/'))
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.v.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Read version
         id: v
@@ -33,7 +34,7 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - uses: orhun/git-cliff-action@v4
+      - uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         id: notes
         with:
           config: cliff.toml
@@ -42,44 +43,64 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          NOTES_FILE: ${{ steps.notes.outputs.changelog }}
         run: |
-          gh release create "${{ steps.v.outputs.tag }}" --target main --latest \
-            --title "${{ steps.v.outputs.tag }}" --notes-file "${{ steps.notes.outputs.changelog }}"
+          gh release create "$TAG" --target main --latest \
+            --title "$TAG" --notes-file "$NOTES_FILE"
 
   binaries:
     needs: release
+    permissions:
+      contents: write
     uses: ./.github/workflows/build-binaries.yml
     with:
       tag: ${{ needs.release.outputs.tag }}
 
   docs:
     needs: release
+    permissions:
+      contents: write
     uses: ./.github/workflows/docs.yml
     with:
       tag: ${{ needs.release.outputs.tag }}
 
   publish:
     needs: release
+    permissions:
+      contents: read
+    environment: release
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-        with: { ref: main }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
       - name: Publish crates
-        if: env.CARGO_REGISTRY_TOKEN != ''
-        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN not set; skipping publish."
+            exit 0
+          fi
+          cargo publish --workspace --locked
 
   back-merge:
     needs: release
+    permissions:
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - name: Open back-merge PR main → dev
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
         run: |
           gh pr create -R "$GITHUB_REPOSITORY" --base dev --head main \
-            --title "chore: back-merge ${{ needs.release.outputs.tag }} into dev" \
+            --title "chore: back-merge $TAG into dev" \
             --body "Merge with **Create a merge commit** so the release tag is reachable from dev." \
             || echo "Nothing to back-merge."

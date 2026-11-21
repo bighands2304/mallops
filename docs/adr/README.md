@@ -10,3 +10,4 @@ Format: [MADR](https://adr.github.io/madr/) light. One decision per file, number
 | [0004](0004-agnostic-artifacts-and-flavors.md) | Format-agnostic artifacts with flavors | Accepted |
 | [0005](0005-gitflow-and-release.md) | GitFlow branching and automated releases | Accepted |
 | [0006](0006-store-and-lineage-contracts.md) | Artifact store and lineage: contracts in the core, implementations pluggable | Accepted |
+| [0007](0007-core-contracts-revision.md) | Core contracts revision before v0.1 implementation | Accepted |

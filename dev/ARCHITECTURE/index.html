@@ -773,6 +773,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0007-core-contracts-revision/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0007 — Core contracts revision before v0.1 implementation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1067,14 +1095,14 @@
 <tr>
 <th>Crate</th>
 <th>Depends on</th>
-<th>Heavy deps</th>
+<th>Dependencies</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>mallops-core</code></td>
 <td>—</td>
-<td><code>tokio</code>, <code>serde</code>, <code>blake3</code>, <code>tracing</code></td>
+<td>Core allowlist: <code>tokio</code>, <code>serde</code>, <code>serde_json</code>, <code>blake3</code>, <code>tracing</code>, <code>thiserror</code>, <code>ulid</code>, <code>tempfile</code>; optional features: <code>yaml</code> (<code>yaml_serde</code>, default), <code>schema</code> (<code>schemars</code>) (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>)</td>
 </tr>
 <tr>
 <td><code>mallops-std</code></td>
@@ -1084,7 +1112,7 @@
 <tr>
 <td><code>mallops-cli</code></td>
 <td>core, std</td>
-<td><code>clap</code></td>
+<td><code>clap</code>, <code>anyhow</code></td>
 </tr>
 <tr>
 <td><code>mallops-edge</code></td>
@@ -1094,43 +1122,79 @@
 </tbody>
 </table>
 <h2 id="3-core-abstractions">3. Core abstractions<a class="headerlink" href="#3-core-abstractions" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><span class="sd">/// Static description of a block: identity, I/O ports, config schema.</span>
+<p>Extensible public structs and enums are marked <code>#[non_exhaustive]</code> with dedicated constructors/builders so new fields and variants remain semver-compatible toward 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</p>
+<div class="highlight"><pre><span></span><code><span class="sd">/// Static description of a block: identity, version, I/O ports, optional config schema.</span>
+<span class="cp">#[non_exhaustive]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">BlockSpec</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">,</span><span class="w">            </span><span class="c1">// "std/train.external"</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">stage</span><span class="p">:</span><span class="w"> </span><span class="nc">Stage</span><span class="p">,</span><span class="w">                </span><span class="c1">// Ingest, Preprocess, Train, …</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Port</span><span class="o">&gt;</span><span class="p">,</span><span class="w">           </span><span class="c1">// name + accepted kind/formats/flavors</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="nc">Cow</span><span class="o">&lt;'</span><span class="nb">static</span><span class="p">,</span><span class="w"> </span><span class="kt">str</span><span class="o">&gt;</span><span class="p">,</span><span class="w">               </span><span class="c1">// "std/train.external"</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">version</span><span class="p">:</span><span class="w"> </span><span class="nc">Cow</span><span class="o">&lt;'</span><span class="nb">static</span><span class="p">,</span><span class="w"> </span><span class="kt">str</span><span class="o">&gt;</span><span class="p">,</span><span class="w">          </span><span class="c1">// "0.1.0" (included in cache key &amp; lineage)</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">stage</span><span class="p">:</span><span class="w"> </span><span class="nc">Stage</span><span class="p">,</span><span class="w">                        </span><span class="c1">// Ingest, Preprocess, Train, …</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Port</span><span class="o">&gt;</span><span class="p">,</span><span class="w">                   </span><span class="c1">// name + accepted kind/formats/flavors</span>
 <span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">outputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Port</span><span class="o">&gt;</span><span class="p">,</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">config_schema</span><span class="p">:</span><span class="w"> </span><span class="nc">schemars</span><span class="p">::</span><span class="n">Schema</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">config_schema</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="c1">// decoupled from `schemars`</span>
 <span class="p">}</span>
 
-<span class="cp">#[async_trait]</span>
+<span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">BlockOutcome</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Produced</span><span class="p">(</span><span class="n">OutputDrafts</span><span class="p">),</span><span class="w">                  </span><span class="c1">// runtime commits drafts to ArtifactStore</span>
+<span class="w">    </span><span class="n">Skipped</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">reason</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">outputs</span><span class="p">:</span><span class="w"> </span><span class="nc">OutputDrafts</span><span class="w"> </span><span class="p">},</span>
+<span class="p">}</span>
+
+<span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">CachePolicy</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Deterministic</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">extra_hash</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Digest</span><span class="o">&gt;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">Uncacheable</span><span class="p">,</span>
+<span class="p">}</span>
+
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Block</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">spec</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BlockSpec</span><span class="p">;</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Context</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nc">Inputs</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">Outputs</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">spec</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">BlockSpec</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">validate_config</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">config</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nb">Ok</span><span class="p">(())</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">resolve_ports</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">config</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">ResolvedPorts</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="cm">/* default: spec ports */</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">cache_policy</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Context</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">Pin</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">Future</span><span class="o">&lt;</span><span class="n">Output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">CachePolicy</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">'</span><span class="nb">_</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Context</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nc">Inputs</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">Pin</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">Future</span><span class="o">&lt;</span><span class="n">Output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">BlockOutcome</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">'</span><span class="nb">_</span><span class="o">&gt;&gt;</span><span class="p">;</span>
 <span class="p">}</span>
 
-<span class="sd">/// Given to each block during execution.</span>
+<span class="sd">/// Given to each block during execution (runtime instruments `run()` with a tracing span).</span>
+<span class="cp">#[non_exhaustive]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Context</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">run_id</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">workdir</span><span class="p">:</span><span class="w"> </span><span class="nc">PathBuf</span><span class="p">,</span><span class="w">            </span><span class="c1">// scratch dir, also mounted for external blocks</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">workdir</span><span class="p">:</span><span class="w"> </span><span class="nc">PathBuf</span><span class="p">,</span><span class="w">                    </span><span class="c1">// scratch dir, also mounted for external blocks</span>
 <span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">store</span><span class="p">:</span><span class="w"> </span><span class="nc">Arc</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">ArtifactStore</span><span class="o">&gt;</span><span class="p">,</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">config</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w">   </span><span class="c1">// the block's `with:` section, already validated</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">span</span><span class="p">:</span><span class="w"> </span><span class="nc">tracing</span><span class="p">::</span><span class="n">Span</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">config</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w">           </span><span class="c1">// `with:` with `${env:…}` resolved; NEVER contains secrets</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">cancel</span><span class="p">:</span><span class="w"> </span><span class="nc">CancelToken</span><span class="p">,</span><span class="w">                 </span><span class="c1">// cooperative cancellation (`watch::Receiver&lt;bool&gt;`)</span>
+<span class="w">    </span><span class="c1">// plus secret resolver:</span>
+<span class="w">    </span><span class="c1">// pub fn secret(&amp;self, name: &amp;str) -&gt; Result&lt;Secret, Error&gt;</span>
+<span class="w">    </span><span class="c1">// pub fn config_as&lt;T: DeserializeOwned&gt;(&amp;self) -&gt; Result&lt;T, Error&gt;</span>
 <span class="p">}</span>
-<span class="c1">// Blocks never touch lineage: the runtime records it around `run()`.</span>
+<span class="c1">// Blocks never touch lineage and never call `store.put()` for outputs:</span>
+<span class="c1">// the runtime commits outputs, injects `parents`, validates ports, and emits lineage events.</span>
 
+<span class="cp">#[non_exhaustive]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Artifact</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="nc">ArtifactId</span><span class="p">,</span><span class="w">              </span><span class="c1">// BLAKE3 of manifest + payload</span>
-<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">manifest</span><span class="p">:</span><span class="w"> </span><span class="nc">Manifest</span><span class="p">,</span><span class="w">          </span><span class="c1">// kind, format, flavor, signature, metadata, parents</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="nc">ArtifactId</span><span class="p">,</span><span class="w">                      </span><span class="c1">// validated 32-byte canonical BLAKE3 digest</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">manifest</span><span class="p">:</span><span class="w"> </span><span class="nc">Manifest</span><span class="p">,</span><span class="w">                  </span><span class="c1">// schema_version, kind, format, flavor, io_schema, metadata, parents</span>
+<span class="p">}</span>
+
+<span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">ArtifactKind</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Dataset</span><span class="p">,</span><span class="w"> </span><span class="n">Features</span><span class="p">,</span><span class="w"> </span><span class="n">Transform</span><span class="p">,</span><span class="w"> </span><span class="n">Model</span><span class="p">,</span><span class="w"> </span><span class="n">Metrics</span><span class="p">,</span><span class="w"> </span><span class="n">Package</span><span class="p">,</span><span class="w"> </span><span class="n">Blob</span><span class="w"> </span><span class="p">}</span>
+
+<span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">Error</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Config</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
+<span class="w">    </span><span class="n">Validation</span><span class="p">(</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ValidationError</span><span class="o">&gt;</span><span class="p">),</span>
+<span class="w">    </span><span class="n">Store</span><span class="p">(</span><span class="n">StoreError</span><span class="p">),</span>
+<span class="w">    </span><span class="n">Runtime</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
+<span class="w">    </span><span class="n">Cancelled</span><span class="p">,</span>
+<span class="w">    </span><span class="n">Secret</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
+<span class="w">    </span><span class="n">InvalidArtifactId</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
+<span class="w">    </span><span class="n">InvalidPath</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
+<span class="w">    </span><span class="n">Block</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="p">:</span><span class="w"> </span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">std</span><span class="p">::</span><span class="n">error</span><span class="p">::</span><span class="n">Error</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="o">&gt;</span><span class="w"> </span><span class="p">},</span>
 <span class="p">}</span>
 </code></pre></div>
-<p>Serving uses one more trait, implemented by backend crates/plugins and selected by <code>flavor</code>:</p>
-<div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
-<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Predictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">flavors</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">];</span><span class="w">                       </span><span class="c1">// e.g. ["onnx"], ["sklearn-pickle"]</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">load</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">pkg</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Artifact</span><span class="p">,</span><span class="w"> </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Context</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">Loaded</span><span class="o">&gt;&gt;</span><span class="p">;</span>
-<span class="p">}</span>
-</code></pre></div>
+<ul>
+<li><strong>Secrets (<code>Secret</code>)</strong>: opaque newtype whose <code>Debug</code>/<code>Display</code> renders <code>"***"</code> and which does not implement <code>Serialize</code>. Resolved on demand via <code>ctx.secret("NAME")</code> (backed in v0.1 by <code>MALLOPS_SECRET_&lt;NAME&gt;</code> env vars) and excluded from <code>config.json</code>, cache keys, <code>config_hash</code>, logs, and lineage.</li>
+<li><strong><code>Predictor</code> placement</strong>: in v0.1, the minimal <code>Predictor</code> / <code>LoadedPredictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>; see <a href="#7-serving">§7 Serving</a>) and will be promoted to <code>mallops-core</code> before 1.0 once validated across backends (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
+</ul>
 <p>No ML type appears in core signatures: tensors and dataframes are payload files or plugin-internal types. This is what keeps mallops library-agnostic (<a href="../adr/0004-agnostic-artifacts-and-flavors/">ADR-0004</a>).</p>
 <h2 id="4-execution-model">4. Execution model<a class="headerlink" href="#4-execution-model" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>sequenceDiagram
@@ -1139,28 +1203,29 @@
     participant Store
     participant B as Block
     CLI-&gt;&gt;Core: run(mallops.yaml)
-    Core-&gt;&gt;Core: parse, validate schemas &amp; port compatibility, topo-sort
+    Core-&gt;&gt;Core: parse, validate config &amp; resolved ports, topo-sort
     loop each ready node (parallel when independent)
-        Core-&gt;&gt;Core: cache key = hash(block id, version, config, input artifact ids)
+        Core-&gt;&gt;B: cache_policy(ctx)
+        Core-&gt;&gt;Core: cache key = hash(block id, version, config_hash, input ids, extra_hash)
         alt cache hit
-            Core-&gt;&gt;Store: reuse outputs
+            Core-&gt;&gt;Store: reuse outputs (from cache/&lt;key&gt;)
         else
-            Core-&gt;&gt;B: run(ctx, inputs)
-            B-&gt;&gt;Store: put(payload, manifest)
-            Store--&gt;&gt;B: ArtifactId
-            B--&gt;&gt;Core: outputs
+            Core-&gt;&gt;B: run(ctx, inputs) [instrumented with node span]
+            B--&gt;&gt;Core: BlockOutcome (Produced drafts | Skipped)
+            Core-&gt;&gt;Store: put(manifest + parents, payload)
+            Store--&gt;&gt;Core: ArtifactId
         end
         Core-&gt;&gt;Core: emit lineage event → sinks
     end
     Core--&gt;&gt;CLI: run summary</code></pre>
 <ul>
-<li>Scheduler: <code>tokio</code> tasks, bounded concurrency (<code>--jobs</code>).</li>
-<li>Failure: a failed node cancels its descendants; other branches finish. Re-running resumes from cache.</li>
-<li>Quality gates are blocks that return an error (stop) or a <code>skip</code> signal for downstream nodes.</li>
+<li>Scheduler: <code>tokio</code> tasks, bounded concurrency (<code>--jobs</code>), <code>spawn_blocking</code> for heavy CPU/hashing/filesystem work, cooperative <code>CancelToken</code> (+ <code>kill_on_drop</code> for external child processes).</li>
+<li>Failure and skipping: a failed node cancels its descendants; a <code>BlockOutcome::Skipped</code> (e.g. a failed quality gate) skips downstream nodes that require its outputs and records <code>Status::Skipped</code> in lineage. Independent branches still finish. Re-running resumes from cache.</li>
+<li>Batch DAG only: <code>serve</code> is not a batch DAG node. <code>mallops run</code> executes <code>blocks:</code> and produces a <code>package</code> artifact; <code>mallops serve</code> consumes that package separately (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 </ul>
 <h2 id="5-plugin-model">5. Plugin model<a class="headerlink" href="#5-plugin-model" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>flowchart TB
-    R[Runtime] --&gt; N[Native Rust block&lt;br/&gt;compile-time, inventory]
+    R[Runtime] --&gt; N[Native Rust block&lt;br/&gt;explicit registry in v0.1]
     R --&gt; W[WASM component&lt;br/&gt;wasmtime, sandboxed]
     R --&gt; X[External process&lt;br/&gt;gRPC or CLI contract]
     X --&gt; PY[Python / R / Julia / containers]</code></pre>
@@ -1177,24 +1242,27 @@
 <tr>
 <td>Native</td>
 <td>Rust, performance critical</td>
-<td>none</td>
+<td>none (trusted)</td>
 <td>zero</td>
 </tr>
 <tr>
 <td>WASM</td>
 <td>portable, untrusted, light compute</td>
-<td>strong</td>
+<td>strong (sandboxed, post-v0.1)</td>
 <td>low</td>
 </tr>
 <tr>
 <td>External</td>
 <td>other languages, GPUs, heavy frameworks</td>
-<td>process/container</td>
+<td>process/container (trusted, not a sandbox)</td>
 <td>process spawn + IPC</td>
 </tr>
 </tbody>
 </table>
-<p>The <strong>external CLI contract</strong> is the simplest: mallops writes <code>inputs.json</code> (artifact paths + manifests) and <code>config.json</code> into the workdir, runs the command, and collects files declared in <code>outputs.json</code>. Any language can implement it in a few lines. The gRPC variant adds long-lived workers and streaming. See <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</p>
+<ul>
+<li><strong>Explicit registry in v0.1</strong>: <code>BlockRegistry</code> is an explicit, instance-local map populated via <code>registry.register(...)</code> (with <code>mallops_std::register_std(&amp;mut registry)</code> called by <code>mallops-cli</code>). This supersedes compile-time <code>inventory</code> registration from <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a> for v0.1 to avoid linker stripping and global test state (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
+<li><strong>External CLI contract</strong>: mallops materializes read-only inputs into the workdir, writes <code>inputs.json</code> (materialized paths + manifests) and <code>config.json</code> (never containing secrets; secrets pass only via explicit env allowlist), runs <code>command</code> via <code>argv</code> (never <code>sh -c</code>), and collects output files declared in <code>outputs.json</code> after validating every path with <code>RelPath</code> and rejecting symlinks. The gRPC variant adds long-lived workers and streaming. See <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</li>
+</ul>
 <h2 id="6-artifact-store-and-lineage">6. Artifact store and lineage<a class="headerlink" href="#6-artifact-store-and-lineage" title="Permanent link">&para;</a></h2>
 <p>Two kinds of "storage" exist and must not be confused:</p>
 <table>
@@ -1229,52 +1297,104 @@
 </tbody>
 </table>
 <h3 id="61-artifact-store">6.1 Artifact store<a class="headerlink" href="#61-artifact-store" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
-<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">ArtifactStore</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">put</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">manifest</span><span class="p">:</span><span class="w"> </span><span class="nc">Manifest</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">ArtifactId</span><span class="o">&gt;</span><span class="p">;</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">Artifact</span><span class="o">&gt;</span><span class="p">;</span>
-<span class="w">    </span><span class="sd">/// Materialize the payload locally (no-op for `local`, download for remote).</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">fetch</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">,</span><span class="w"> </span><span class="n">dest</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">PathBuf</span><span class="o">&gt;</span><span class="p">;</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">exists</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">;</span>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">ArtifactStore</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Immutable content-addressed artifacts (ArtifactId = canonical BLAKE3 digest)</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">put</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">manifest</span><span class="p">:</span><span class="w"> </span><span class="nc">Manifest</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="nc">PayloadSource</span><span class="o">&lt;'</span><span class="nb">_</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">ArtifactId</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Artifact</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="sd">/// Materialize the payload into `dest` (copy/read-only materialization locally; download + verify remotely).</span>
+<span class="w">    </span><span class="sd">/// Never returns a writable path inside the store itself.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">fetch</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">,</span><span class="w"> </span><span class="n">dest</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">PathBuf</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">verify</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">exists</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ArtifactId</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="kt">bool</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Auxiliary metadata keyed by validated RelPath (cache index, lineage.json, v0.2 registry)</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">put_meta</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">RelPath</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="kt">u8</span><span class="p">])</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">get_meta</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">RelPath</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">list_meta</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">prefix</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">RelPath</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">RelPath</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">delete_meta</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">RelPath</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
 <span class="p">}</span>
 </code></pre></div>
 <ul>
+<li>Validated types: <code>ArtifactId</code> (strict 64 lowercase hex) and <code>RelPath</code> (normalized POSIX UTF-8 relative path, no <code>..</code>, no root prefixes) prevent path traversal across all store operations.</li>
+<li>Immutability: <code>put</code> writes atomically (temp dir + idempotent rename), rejects symlinks and special files, and marks stored payloads read-only on <code>LocalStore</code> (<code>0444</code> files / <code>0555</code> dirs where supported). <code>fetch</code> always materializes into <code>dest</code> so no block can mutate stored artifacts in place.</li>
 <li>Core implementations: <code>LocalStore</code> (filesystem, default, <code>./.mallops</code>) and <code>MemoryStore</code> (ephemeral; tests and throwaway runs).</li>
 <li>Optional: <code>ObjectStore</code> adapter over the <code>object_store</code> crate (S3, GCS, Azure) behind <code>mallops-std</code> features; anything else as a plugin.</li>
-<li>What depends on it: data hand-off between nodes and processes, caching (cache key → output ids), resume after failure, model registry (v0.2).</li>
-<li>Layout: <code>artifacts/&lt;hash&gt;/…</code>, <code>registry/&lt;model&gt;/&lt;version&gt;.json</code> (v0.2).</li>
+<li>What depends on it: data hand-off between nodes and processes, caching (<code>cache/&lt;key&gt;.json</code>), resume via cached re-runs, <code>JsonSink</code> (<code>runs/&lt;run-id&gt;/lineage.json</code>), and model registry (v0.2).</li>
+<li>Layout: <code>artifacts/&lt;hash&gt;/…</code>, <code>cache/&lt;key&gt;.json</code>, <code>runs/&lt;run-id&gt;/lineage.json</code>, <code>registry/&lt;model&gt;/&lt;version&gt;.json</code> (v0.2).</li>
 </ul>
 <h3 id="62-lineage">6.2 Lineage<a class="headerlink" href="#62-lineage" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">LineageEvent</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="n">RunStarted</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">pipeline_hash</span><span class="p">:</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">git_commit</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">host</span><span class="p">:</span><span class="w"> </span><span class="nc">HostInfo</span><span class="w"> </span><span class="p">},</span>
-<span class="w">    </span><span class="n">BlockStarted</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">block</span><span class="p">:</span><span class="w"> </span><span class="nc">BlockRef</span><span class="p">,</span><span class="w"> </span><span class="n">config_hash</span><span class="p">:</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ArtifactId</span><span class="o">&gt;</span><span class="w"> </span><span class="p">},</span>
-<span class="w">    </span><span class="n">ArtifactProduced</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">artifact</span><span class="p">:</span><span class="w"> </span><span class="nc">ArtifactId</span><span class="w"> </span><span class="p">},</span>
-<span class="w">    </span><span class="n">BlockFinished</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">:</span><span class="w"> </span><span class="nc">Status</span><span class="p">,</span><span class="w"> </span><span class="n">duration</span><span class="p">:</span><span class="w"> </span><span class="nc">Duration</span><span class="p">,</span><span class="w"> </span><span class="n">cached</span><span class="p">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">},</span>
-<span class="w">    </span><span class="n">RunFinished</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">:</span><span class="w"> </span><span class="nc">Status</span><span class="w"> </span><span class="p">},</span>
+<div class="highlight"><pre><span></span><code><span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">LineageEvent</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RunStarted</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span>
+<span class="w">        </span><span class="n">timestamp</span><span class="p">:</span><span class="w"> </span><span class="nc">Timestamp</span><span class="p">,</span>
+<span class="w">        </span><span class="n">pipeline_hash</span><span class="p">:</span><span class="w"> </span><span class="nc">Digest</span><span class="p">,</span>
+<span class="w">        </span><span class="n">git_commit</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">        </span><span class="n">host</span><span class="p">:</span><span class="w"> </span><span class="nc">HostInfo</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="n">BlockStarted</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span>
+<span class="w">        </span><span class="n">timestamp</span><span class="p">:</span><span class="w"> </span><span class="nc">Timestamp</span><span class="p">,</span>
+<span class="w">        </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="w">        </span><span class="n">block</span><span class="p">:</span><span class="w"> </span><span class="nc">BlockRef</span><span class="p">,</span>
+<span class="w">        </span><span class="n">block_version</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="w">        </span><span class="n">config_hash</span><span class="p">:</span><span class="w"> </span><span class="nc">Digest</span><span class="p">,</span>
+<span class="w">        </span><span class="n">seed</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="kt">u64</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">        </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ArtifactId</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="n">ArtifactProduced</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">timestamp</span><span class="p">:</span><span class="w"> </span><span class="nc">Timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">artifact</span><span class="p">:</span><span class="w"> </span><span class="nc">ArtifactId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">BlockFinished</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span>
+<span class="w">        </span><span class="n">timestamp</span><span class="p">:</span><span class="w"> </span><span class="nc">Timestamp</span><span class="p">,</span>
+<span class="w">        </span><span class="n">node</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="w">        </span><span class="n">status</span><span class="p">:</span><span class="w"> </span><span class="nc">Status</span><span class="p">,</span><span class="w"> </span><span class="c1">// Succeeded | Failed | Skipped | Cancelled</span>
+<span class="w">        </span><span class="n">duration</span><span class="p">:</span><span class="w"> </span><span class="nc">Duration</span><span class="p">,</span>
+<span class="w">        </span><span class="n">cached</span><span class="p">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="n">RunFinished</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">run</span><span class="p">:</span><span class="w"> </span><span class="nc">RunId</span><span class="p">,</span><span class="w"> </span><span class="n">timestamp</span><span class="p">:</span><span class="w"> </span><span class="nc">Timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">:</span><span class="w"> </span><span class="nc">Status</span><span class="w"> </span><span class="p">},</span>
 <span class="p">}</span>
 
-<span class="cp">#[async_trait]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">LineageSink</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">record</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">event</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">LineageEvent</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">()</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">record</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">event</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">LineageEvent</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
 <span class="p">}</span>
 </code></pre></div>
 <ul>
 <li>The runtime is the only producer: it alone sees the whole graph. Blocks stay unaware of lineage.</li>
-<li>Core sink: <code>JsonSink</code>, writing <code>runs/&lt;run-id&gt;/lineage.json</code> into the artifact store.</li>
+<li>Core sink: <code>JsonSink</code>, writing <code>runs/&lt;run-id&gt;/lineage.json</code> through <code>ArtifactStore::put_meta</code>.</li>
 <li>Optional sinks: SQLite (queryable), OpenLineage (Marquez, DataHub…), MLflow — <code>mallops-std</code> features or plugins.</li>
 <li>Zero or more sinks; <code>lineage: off</code> disables it. A failing sink logs a warning and never fails the run.</li>
-<li>Caching does <strong>not</strong> depend on lineage: it uses artifact hashes in the store.</li>
+<li>Caching does <strong>not</strong> depend on lineage: it uses artifact hashes and <code>cache/&lt;key&gt;.json</code> in the store.</li>
 </ul>
 <h2 id="7-serving">7. Serving<a class="headerlink" href="#7-serving" title="Permanent link">&para;</a></h2>
+<p>Serving runs outside the batch DAG via <code>mallops serve [package-id]</code> (using the package artifact produced by <code>mallops run</code> or configured in the top-level <code>serve:</code> section of <code>mallops.yaml</code>).</p>
 <pre class="mermaid"><code>flowchart LR
     C[Client] --&gt;|HTTP/gRPC| S[mallops serve]
     S --&gt; T[Preprocess transform&lt;br/&gt;from package]
     T --&gt; P{Predictor by flavor}
+    P --&gt; LF[linfa]
     P --&gt; O[ort]
     P --&gt; TR[tract]
     P --&gt; CA[candle]
     P --&gt; EXT[external Python worker]
     S --&gt; M[metrics / logs]</code></pre>
+<p>In v0.1, the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) before promotion to <code>mallops-core</code> ahead of 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">PredictInput</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Json</span><span class="p">(</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">),</span>
+<span class="w">    </span><span class="n">Bytes</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">content_type</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="w"> </span><span class="p">},</span>
+<span class="p">}</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Predictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">flavors</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">];</span><span class="w">                       </span><span class="c1">// e.g. ["linfa-logistic"], ["sklearn-pickle"]</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">executes_code</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="p">;</span><span class="w">                    </span><span class="c1">// true for pickle/joblib/torchscript</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">load</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">pkg</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Artifact</span><span class="p">,</span><span class="w"> </span><span class="n">workdir</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">input</span><span class="p">:</span><span class="w"> </span><span class="nc">PredictInput</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict_batch</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Flavors where <code>executes_code()</code> is <code>true</code> are rejected by <code>mallops serve</code> unless <code>--trust-unsafe-flavors</code> is explicitly enabled.</p>
 <h2 id="8-edge-and-federated-learning-v04">8. Edge and federated learning (v0.4)<a class="headerlink" href="#8-edge-and-federated-learning-v04" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>flowchart TB
     subgraph Cloud
@@ -1308,7 +1428,7 @@
 <tbody>
 <tr>
 <td>Errors</td>
-<td><code>thiserror</code> in libraries, <code>anyhow</code> only in the CLI</td>
+<td><code>thiserror</code> in libraries (<code>mallops_core::Error</code>), <code>anyhow</code> only in the CLI</td>
 </tr>
 <tr>
 <td>Logging/tracing</td>
@@ -1316,7 +1436,7 @@
 </tr>
 <tr>
 <td>Config</td>
-<td><code>serde</code> + <code>serde_yaml</code> + <code>schemars</code></td>
+<td><code>serde</code> + <code>serde_json</code> + <code>yaml_serde</code> (<code>yaml</code> feature) + optional <code>schemars</code> (<code>schema</code> feature)</td>
 </tr>
 <tr>
 <td>Async</td>

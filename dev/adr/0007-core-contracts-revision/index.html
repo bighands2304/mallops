@@ -1,0 +1,1269 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Modular MLOps in Rust — from data ingestion to edge devices, one block at a time.">
+      
+      
+      
+        <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/adr/0007-core-contracts-revision/">
+      
+      
+        <link rel="prev" href="../0006-store-and-lineage-contracts/">
+      
+      
+        <link rel="next" href="../../contributing/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/mallops-logo.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
+    
+    
+      
+        <title>0007 — Core contracts revision before v0.1 implementation - mallops</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <script>
+    // Material renders Mermaid inside a *closed* shadow root. Force it open so
+    // docs/javascripts/mermaid-zoom.js can copy the rendered diagram.
+    (() => {
+      const attach = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function (init) {
+        return attach.call(this, { ...init, mode: "open" });
+      };
+    })();
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="brown" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#0007-core-contracts-revision-before-v01-implementation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="mallops" class="md-header__button md-logo" aria-label="mallops" data-md-component="logo">
+      
+  <img src="../../assets/mallops-logo-dark.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mallops
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              0007 — Core contracts revision before v0.1 implementation
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="brown" data-md-color-accent="deep-orange"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="brown" data-md-color-accent="deep-orange"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/bighands2304/mallops" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    bighands2304/mallops
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="mallops" class="md-nav__button md-logo" aria-label="mallops" data-md-component="logo">
+      
+  <img src="../../assets/mallops-logo-dark.svg" alt="logo">
+
+    </a>
+    mallops
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/bighands2304/mallops" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    bighands2304/mallops
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../SPEC/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Specification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decisions (ADR)
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Decisions (ADR)
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Decision Records
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0001-modular-workspace/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0001 — Modular Cargo workspace
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0002-arrow-default-interchange/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0002 — Arrow/Parquet as default (not mandatory) data interchange
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0003-plugins-wasm-and-grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0003 — Plugins via WASM components and external processes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0004-agnostic-artifacts-and-flavors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0004 — Format-agnostic artifacts with flavors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0005-gitflow-and-release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0005 — GitFlow branching and automated releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0006-store-and-lineage-contracts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0006 — Artifact store and lineage: contracts in the core, implementations pluggable
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0007 — Core contracts revision before v0.1 implementation
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0007 — Core contracts revision before v0.1 implementation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Context
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decisions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Decisions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#d1-canonical-artifactid-encoding-without-produced_by" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D1 — Canonical ArtifactId encoding without produced_by
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d2-explicit-mallops-core-dependency-allowlist-yaml-parser-and-schema-isolation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D2 — Explicit mallops-core dependency allowlist, YAML parser, and schema isolation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d3-immutable-artifactstore-validated-artifactidrelpath-and-auxiliary-metadata-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D3 — Immutable ArtifactStore, validated ArtifactId/RelPath, and auxiliary metadata API
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d4-core-signatures-blockspec-block-context-error-non_exhaustive-transform-io_schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D4 — Core signatures (BlockSpec, Block, Context, Error, #[non_exhaustive], Transform, io_schema)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d5-serve-outside-the-batch-dag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D5 — serve outside the batch DAG
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d6-minimal-predictor-contract-in-mallops-std-for-v01" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D6 — Minimal Predictor contract in mallops-std for v0.1
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d7-explicit-trust-model-and-corrected-nfr-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D7 — Explicit Trust model and corrected NFR-4
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d8-explicit-blockregistry-in-v01-no-inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D8 — Explicit BlockRegistry in v0.1 (no inventory)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consequences
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.rs/mallops-core" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Context
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decisions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Decisions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#d1-canonical-artifactid-encoding-without-produced_by" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D1 — Canonical ArtifactId encoding without produced_by
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d2-explicit-mallops-core-dependency-allowlist-yaml-parser-and-schema-isolation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D2 — Explicit mallops-core dependency allowlist, YAML parser, and schema isolation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d3-immutable-artifactstore-validated-artifactidrelpath-and-auxiliary-metadata-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D3 — Immutable ArtifactStore, validated ArtifactId/RelPath, and auxiliary metadata API
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d4-core-signatures-blockspec-block-context-error-non_exhaustive-transform-io_schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D4 — Core signatures (BlockSpec, Block, Context, Error, #[non_exhaustive], Transform, io_schema)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d5-serve-outside-the-batch-dag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D5 — serve outside the batch DAG
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d6-minimal-predictor-contract-in-mallops-std-for-v01" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D6 — Minimal Predictor contract in mallops-std for v0.1
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d7-explicit-trust-model-and-corrected-nfr-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D7 — Explicit Trust model and corrected NFR-4
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d8-explicit-blockregistry-in-v01-no-inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D8 — Explicit BlockRegistry in v0.1 (no inventory)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consequences
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/bighands2304/mallops/edit/dev/docs/adr/0007-core-contracts-revision.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="0007-core-contracts-revision-before-v01-implementation">0007 — Core contracts revision before v0.1 implementation<a class="headerlink" href="#0007-core-contracts-revision-before-v01-implementation" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Status: Accepted · 2026-11-21</li>
+<li>Partially supersedes: <a href="../0003-plugins-wasm-and-grpc/">0003</a> (compile-time <code>inventory</code> registration; plugin isolation table), <a href="../0004-agnostic-artifacts-and-flavors/">0004</a> (<code>Predictor</code> placement in v0.1; manifest fields)</li>
+<li>Refines: <a href="../0001-modular-workspace/">0001</a>, <a href="../0006-store-and-lineage-contracts/">0006</a></li>
+</ul>
+<h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
+<p>A pre-implementation design review of <a href="../../SPEC/">SPEC.md</a>, <a href="../../ARCHITECTURE/">ARCHITECTURE.md</a>, and the existing ADRs uncovered eight structural defects in <code>mallops-core</code> contracts that would cause cascading breaking changes as soon as v0.1 development starts:</p>
+<ol>
+<li>Including <code>produced_by.run</code> inside the hashed <code>Manifest</code> breaks content addressing, deduplication, and caching; the hash framing itself was unspecified.</li>
+<li><code>NFR-7</code> restricted <code>mallops-core</code> to four crates while core features require additional infrastructure crates, <code>serde_yaml</code> is archived upstream, and <code>schemars::Schema</code> leaked into public signatures.</li>
+<li><code>ArtifactStore</code> lacked real immutability on <code>LocalStore</code>, validated ID/path types, and an API for auxiliary metadata (cache index, <code>lineage.json</code>, model registry).</li>
+<li>Core trait and struct signatures (<code>Block</code>, <code>BlockSpec</code>, <code>Context</code>, <code>Manifest</code>, <code>LineageEvent</code>, <code>Error</code>) were missing versioning, skip outcomes, cancellation, secret isolation, runtime-managed output commits, <code>#[non_exhaustive]</code>, <code>ArtifactKind::Transform</code>, and an unambiguous I/O schema field name.</li>
+<li><code>serve</code> was modeled both as a batch DAG node and as a standalone CLI command.</li>
+<li><code>Predictor</code> was placed in <code>mallops-core</code> before being validated against real backends and out of dependency order with <code>evaluate</code>.</li>
+<li>No explicit trust model existed for executable YAML pipelines, code-executing model flavors, or actual plugin isolation boundaries.</li>
+<li>Compile-time <code>inventory</code> registration is fragile under LTO/cross-compilation, breaks test isolation, and adds unnecessary complexity for v0.1.</li>
+</ol>
+<h2 id="decisions">Decisions<a class="headerlink" href="#decisions" title="Permanent link">&para;</a></h2>
+<h3 id="d1-canonical-artifactid-encoding-without-produced_by">D1 — Canonical <code>ArtifactId</code> encoding without <code>produced_by</code><a class="headerlink" href="#d1-canonical-artifactid-encoding-without-produced_by" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Remove <code>produced_by</code> (and all run-specific or timestamp fields) from the content-addressed <code>Manifest</code>. Per-run provenance (<code>run</code>, <code>node</code>, <code>artifact</code>) is recorded exclusively in <code>LineageEvent::ArtifactProduced</code>.
+- Define a canonical, cross-platform encoding for <code>ArtifactId</code> using BLAKE3 with domain separation (<code>blake3::derive_key("mallops artifact v1")</code>):
+  1. Serialize the canonical <code>Manifest</code> (<code>schema_version</code>, <code>kind</code>, <code>format</code>, <code>flavor</code>, <code>io_schema</code>, <code>parents</code>, <code>metadata</code>) as canonical JSON with sorted object keys (<code>BTreeMap</code> / RFC 8785) and <code>parents</code> sorted lexicographically by <code>ArtifactId</code>; feed <code>u64::to_le_bytes(manifest_bytes.len()) || manifest_bytes</code>.
+  2. Feed <code>u64::to_le_bytes(file_count)</code> followed by each payload file sorted bytewise by its validated POSIX UTF-8 relative path (<code>RelPath</code>, <code>/</code> separators): <code>len(path) || path || len(content) || blake3(content)</code> (all lengths as <code>u64</code> little-endian).
+- Represent <code>ArtifactId</code> as a 32-byte BLAKE3 digest formatted as 64 lowercase hexadecimal characters.</p>
+<p><strong>Rationale:</strong>
+Because <code>produced_by.run</code> changes on every execution, hashing it made two identical deterministic runs produce different <code>ArtifactId</code>s, breaking <code>NFR-2</code>, <code>FR-STO-4</code> (content deduplication), and downstream caching. Domain separation, length-prefixed framing, canonical JSON key ordering, and POSIX path normalization prevent hash-boundary collisions and guarantee identical digests across Linux, macOS, and Windows.</p>
+<h3 id="d2-explicit-mallops-core-dependency-allowlist-yaml-parser-and-schema-isolation">D2 — Explicit <code>mallops-core</code> dependency allowlist, YAML parser, and schema isolation<a class="headerlink" href="#d2-explicit-mallops-core-dependency-allowlist-yaml-parser-and-schema-isolation" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Amend <code>NFR-7</code> to distinguish <strong>forbidden dependency categories</strong> (no ML/tensor/dataframe libraries, no cloud SDKs, no <code>object_store</code>, no database drivers, no HTTP/gRPC servers) from an <strong>explicit core allowlist</strong>:
+  - Default core dependencies: <code>tokio</code>, <code>serde</code>, <code>serde_json</code>, <code>blake3</code>, <code>tracing</code>, <code>thiserror</code>, <code>ulid</code>, <code>tempfile</code>.
+  - Feature-gated dependencies:
+    - <code>yaml</code> (enabled by default): <code>yaml_serde</code> (<code>0.10</code>).
+    - <code>schema</code> (disabled by default): <code>schemars</code> for generating JSON Schema documents for editor completion.
+    - <code>schema-validate</code> (disabled by default): optional JSON Schema validation engine when requested, rather than compiled into default builds.
+- Remove <code>schemars::Schema</code> from <code>BlockSpec</code>'s public API; use <code>Option&lt;serde_json::Value&gt;</code> instead. In v0.1, <code>with:</code> configuration is validated by <code>Block::validate_config(&amp;self, config: &amp;serde_json::Value)</code> (typically via <code>serde::Deserialize</code>).
+- Avoid adding <code>async-trait</code> to <code>mallops-core</code> (use <code>Pin&lt;Box&lt;dyn Future + Send + '_&gt;&gt;</code> or a dual native/dyn trait pattern).</p>
+<p><strong>Rationale — YAML parser selection:</strong>
+- <code>serde_yaml</code> is archived and unmaintained upstream and depends on archived <code>unsafe-libyaml</code> (<code>RUSTSEC-2024-0449</code>), failing <code>cargo deny</code>.
+- <code>serde_yml</code> is archived and affected by an unsoundness advisory (<code>RUSTSEC-2025-0068</code>).
+- <code>serde-saphyr</code> (<code>MIT OR Apache-2.0</code>, pure Rust with <code>#![forbid(unsafe_code)]</code>, configurable resource budgets against alias bombs) is a strong future candidate, but requires MSRV Rust 1.89, which exceeds the workspace MSRV of Rust 1.85. Because the YAML parser is not exposed in <code>mallops-core</code>'s public API, migrating to <code>serde-saphyr</code> after an MSRV bump will be non-breaking.
+- <code>serde_norway</code> is a single-maintainer fork, whereas <code>yaml_serde</code> is stewarded by The YAML Organization (<code>yaml/yaml-serde</code>).
+- <strong><code>yaml_serde</code> (<code>0.10</code>)</strong> is actively maintained by The YAML Organization, dual-licensed <code>MIT OR Apache-2.0</code> (permitted by <code>deny.toml</code>), supports MSRV 1.82 (compatible with 1.85), replaces <code>unsafe-libyaml</code> with <code>libyaml-rs</code>, has no active RustSec advisories, enforces recursion depth limits, and reports line/column locations on syntax errors. Parser tests must still explicitly cover YAML alias bombs and deeply nested inputs.</p>
+<p>Keeping <code>schemars</code> out of public types protects <code>mallops-core</code> semver stability at 1.0 and keeps <code>BlockSpec</code> compatible with dynamic WASM/gRPC plugins.</p>
+<h3 id="d3-immutable-artifactstore-validated-artifactidrelpath-and-auxiliary-metadata-api">D3 — Immutable <code>ArtifactStore</code>, validated <code>ArtifactId</code>/<code>RelPath</code>, and auxiliary metadata API<a class="headerlink" href="#d3-immutable-artifactstore-validated-artifactidrelpath-and-auxiliary-metadata-api" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Introduce validated newtypes in <code>mallops-core</code>:
+  - <code>ArtifactId</code>: 32-byte digest with strict <code>FromStr</code> (exactly 64 lowercase hex chars) and no unchecked string constructor.
+  - <code>RelPath</code>: validated relative path (non-empty UTF-8, normalized <code>/</code> separators, rejecting <code>..</code>, leading <code>/</code>, Windows drive letters/backslashes, NUL bytes, and empty segments).
+- Harden <code>ArtifactStore</code> semantics:
+  - <code>put(&amp;self, manifest: Manifest, payload: PayloadSource&lt;'_&gt;) -&gt; Result&lt;ArtifactId&gt;</code> accepts a structured <code>PayloadSource</code> (<code>File</code>, <code>Dir</code>, <code>Bytes</code>, or multi-file map), writes atomically (temp directory on the same filesystem + idempotent rename), rejects symlinks and special files, and verifies canonical paths stay inside the root. <code>LocalStore::put</code> marks stored files read-only (<code>0444</code>) and directories (<code>0555</code>) where supported by the OS.
+  - <code>get(&amp;self, id: &amp;ArtifactId) -&gt; Result&lt;Option&lt;Artifact&gt;&gt;</code> avoids <code>exists</code> + <code>get</code> TOCTOU races.
+  - <code>fetch(&amp;self, id: &amp;ArtifactId, dest: &amp;Path) -&gt; Result&lt;PathBuf&gt;</code> has uniform semantics across all backends: it always materializes the payload into <code>dest</code> (read-only copy/materialization on <code>LocalStore</code>, download + integrity check on remote stores) and never returns a writable path inside the store itself.
+  - <code>verify(&amp;self, id: &amp;ArtifactId) -&gt; Result&lt;()&gt;</code> recomputes the canonical <code>ArtifactId</code> to detect corruption or tampering.
+- Add an auxiliary key-value metadata API on the store (or companion <code>MetaStore</code> contract implemented by every backend): <code>put_meta</code>, <code>get_meta</code>, <code>list_meta</code>, and <code>delete_meta</code> keyed by <code>RelPath</code>. Caching (<code>cache/&lt;key&gt;.json</code>), <code>JsonSink</code> (<code>runs/&lt;run-id&gt;/lineage.json</code>), and the v0.2 model registry (<code>registry/&lt;model&gt;/&lt;version&gt;.json</code>) all persist through this API.</p>
+<p><strong>Rationale:</strong>
+Making <code>fetch</code> a no-op on <code>LocalStore</code> allowed external blocks to mutate stored payloads in place, silently corrupting content addressing and cache integrity. Validated <code>ArtifactId</code>/<code>RelPath</code> types and symlink rejection close path-traversal and file-exfiltration vectors across <code>LocalStore</code> and external <code>outputs.json</code>. An explicit auxiliary metadata API ensures caching and <code>JsonSink</code> work identically across <code>LocalStore</code>, <code>MemoryStore</code>, and future remote stores without hardcoded filesystem paths.</p>
+<h3 id="d4-core-signatures-blockspec-block-context-error-non_exhaustive-transform-io_schema">D4 — Core signatures (<code>BlockSpec</code>, <code>Block</code>, <code>Context</code>, <code>Error</code>, <code>#[non_exhaustive]</code>, <code>Transform</code>, <code>io_schema</code>)<a class="headerlink" href="#d4-core-signatures-blockspec-block-context-error-non_exhaustive-transform-io_schema" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- <strong><code>BlockSpec</code></strong>: add <code>version: Cow&lt;'static, str&gt;</code>, use <code>Cow&lt;'static, str&gt;</code> for <code>id</code> and port/format/flavor strings, replace <code>config_schema</code> with <code>Option&lt;serde_json::Value&gt;</code>, return <code>&amp;BlockSpec</code> from <code>Block::spec(&amp;self)</code>, and add optional hooks <code>Block::validate_config(&amp;self, config: &amp;serde_json::Value)</code> and <code>Block::resolve_ports(&amp;self, config: &amp;serde_json::Value)</code> for config-driven blocks (such as <code>std/train.external</code>).
+- <strong><code>BlockOutcome</code> &amp; <code>cache_policy</code></strong>: <code>Block::run</code> returns <code>Result&lt;BlockOutcome&gt;</code> where <code>BlockOutcome</code> has <code>Produced(OutputDrafts)</code> and <code>Skipped { reason: String, outputs: OutputDrafts }</code>. Any downstream node with a required input from a skipped node is automatically skipped with <code>Status::Skipped</code> in lineage. Add <code>Block::cache_policy(&amp;self, ctx: &amp;Context) -&gt; Result&lt;CachePolicy&gt;</code> (<code>Deterministic { extra_hash: Option&lt;Digest&gt; }</code> | <code>Uncacheable</code>) so source/external blocks invalidate when local files or scripts change.
+- <strong>Runtime-owned output commits</strong>: blocks produce output drafts (<code>OutputDraft { manifest_draft, payload }</code>); the <strong>runtime</strong> commits them to <code>ArtifactStore</code>, injects <code>Manifest.parents</code> from the node's actual input <code>ArtifactId</code>s, validates outputs against resolved ports, and emits <code>LineageEvent::ArtifactProduced</code>. Blocks never call <code>store.put()</code> directly for outputs.
+- <strong><code>Context</code></strong>:
+  - Remove <code>pub span: tracing::Span</code> (the runtime wraps <code>block.run(...).instrument(node_span).await</code>).
+  - Add <code>cancel: CancelToken</code> (cooperative cancellation built on <code>tokio::sync::watch::Receiver&lt;bool&gt;</code>).
+  - Separate <code>${env:NAME}</code> (interpolated into <code>config</code> and hashed into <code>config_hash</code>) from <code>${secret:NAME}</code> (resolved on demand via <code>ctx.secret("NAME") -&gt; Result&lt;Secret&gt;</code>, backed in v0.1 by a <code>SecretProvider</code> reading <code>MALLOPS_SECRET_&lt;NAME&gt;</code>). <code>Secret</code> is an opaque newtype with redacted <code>Debug</code>/<code>Display</code> (<code>"***"</code>), does not implement <code>Serialize</code>, and is excluded from <code>config.json</code>, cache keys, <code>config_hash</code>, logs, and lineage.
+  - Provide <code>ctx.config_as::&lt;T&gt;()</code> for typed config deserialization.
+- <strong><code>mallops_core::Error</code></strong>: define a structured <code>thiserror</code> error enum (<code>Config</code>, <code>Validation</code>, <code>Store</code>, <code>Runtime</code>, <code>Cancelled</code>, <code>Secret</code>, <code>InvalidArtifactId</code>, <code>InvalidPath</code>, <code>Block { id, source }</code>).
+- <strong><code>#[non_exhaustive]</code></strong>: mark extensible public enums and structs (<code>BlockSpec</code>, <code>BlockOutcome</code>, <code>Context</code>, <code>Artifact</code>, <code>Manifest</code>, <code>ArtifactKind</code>, <code>Stage</code>, <code>LineageEvent</code>, <code>Status</code>, <code>Error</code>, <code>CachePolicy</code>, <code>PayloadSource</code>) as <code>#[non_exhaustive]</code> with dedicated constructors/builders.
+- <strong><code>ArtifactKind::Transform</code></strong>: add <code>transform</code> to <code>ArtifactKind</code> for fitted preprocessors consumed by <code>package</code> and <code>serve</code>.
+- <strong><code>Manifest.io_schema</code></strong>: rename <code>Manifest.signature</code> to <code>Manifest.io_schema</code>, reserving <code>signature</code> for cryptographic artifact signatures (<code>FR-PKG-3</code>, v0.3).
+- <strong><code>LineageEvent</code></strong>: add <code>timestamp</code>, <code>block_version</code>, <code>seed: Option&lt;u64&gt;</code>, <code>Status::Skipped</code>, and use <code>Digest</code> consistently instead of an undefined <code>Hash</code> type.</p>
+<p><strong>Rationale:</strong>
+These additions eliminate every known breaking gap between core issues (<code>#1</code>–<code>#9</code>) and downstream std/serving issues (<code>#11</code>–<code>#17</code>), prevent secret leakage and async tracing corruption, guarantee consistent <code>parents</code> and lineage events, and make the core API evolvable toward 1.0 under <code>cargo-semver-checks</code>.</p>
+<h3 id="d5-serve-outside-the-batch-dag">D5 — <code>serve</code> outside the batch DAG<a class="headerlink" href="#d5-serve-outside-the-batch-dag" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Remove <code>serve</code> from the batch DAG (<code>blocks:</code> in <code>mallops.yaml</code>). <code>mallops run</code> executes the finite batch DAG and produces a <code>package</code> artifact (gated by <code>eval</code>).
+- <code>mallops serve [package-id]</code> is a separate long-running command that consumes a <code>package</code> artifact. An optional top-level <code>serve:</code> section in <code>mallops.yaml</code> configures defaults (target package output, bind address, port) for <code>mallops serve</code> without participating in <code>mallops run</code>.</p>
+<p><strong>Rationale:</strong>
+A long-running HTTP server cannot be a normal batch DAG node: either it blocks <code>mallops run</code> indefinitely (preventing <code>RunFinished</code> and <code>mallops run &amp;&amp; mallops serve</code>) or requires ad-hoc skipping rules. Separating batch production (<code>run</code> → <code>package</code>) from online inference (<code>serve</code>) gives both commands clear, composable semantics.</p>
+<h3 id="d6-minimal-predictor-contract-in-mallops-std-for-v01">D6 — Minimal <code>Predictor</code> contract in <code>mallops-std</code> for v0.1<a class="headerlink" href="#d6-minimal-predictor-contract-in-mallops-std-for-v01" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Partially supersede <a href="../0004-agnostic-artifacts-and-flavors/">ADR-0004</a> for v0.1: keep <code>Predictor</code> (and <code>LoadedPredictor</code>) out of <code>mallops-core</code> and define a minimal contract in <code>mallops-std</code> shared by both <code>evaluate</code> and <code>serve</code> (implemented prior to <code>evaluate</code>).
+- Include <code>flavors(&amp;self) -&gt; &amp;[&amp;str]</code>, <code>executes_code(&amp;self) -&gt; bool</code>, structured payloads (<code>Json</code> and <code>Bytes</code>), and batch inference (<code>predict_batch</code>).
+- Promote <code>Predictor</code> into <code>mallops-core</code> only before <code>v1.0</code>, once validated across multiple backends (<code>linfa</code>, external Python worker, <code>ort</code>/gRPC).</p>
+<p><strong>Rationale:</strong>
+Freezing <code>Predictor</code> in <code>mallops-core</code> before implementing a single backend or gRPC/binary inference risks an early breaking change (for example, locking into JSON-only payloads). Defining it first in <code>mallops-std</code> before <code>evaluate</code> fixes the dependency inversion between <code>evaluate</code> and <code>serve</code> while keeping <code>mallops-core</code> minimal.</p>
+<h3 id="d7-explicit-trust-model-and-corrected-nfr-4">D7 — Explicit Trust model and corrected <code>NFR-4</code><a class="headerlink" href="#d7-explicit-trust-model-and-corrected-nfr-4" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Add a <strong>Trust model</strong> section to <a href="../../SPEC/">SPEC.md</a> defining explicit trust boundaries:
+  1. <code>mallops.yaml</code> is trusted executable configuration: <code>mallops run</code> executes native blocks and external commands with host privileges, whereas <code>mallops validate</code> and <code>mallops graph</code> never execute user code or external processes.
+  2. Only WASM component plugins (post-v0.1) provide sandboxing. Native Rust blocks and external CLI/gRPC processes are trusted code (external CLI blocks run via <code>argv</code> without a shell, with an allowlisted environment and isolated workdir, but are not a security sandbox).
+  3. Model flavors that execute code on deserialization (<code>pickle</code>, <code>joblib</code>, <code>sklearn-pickle</code>, <code>torchscript</code>) are flagged (<code>executes_code = true</code>). <code>mallops serve</code> refuses to load them unless explicitly opted in via <code>--trust-unsafe-flavors</code>. Non-executing formats (<code>onnx</code>, <code>safetensors</code>, <code>skops</code>) and signed packages (v0.3) are recommended.
+  4. Secrets never enter <code>Context.config</code>, <code>config.json</code>, cache keys, logs, or lineage; <code>ArtifactStore</code> enforces validated paths, symlink rejection, and read-only storage.
+- Update <code>NFR-4</code> in <a href="../../SPEC/">SPEC.md</a> to reflect these exact guarantees instead of claiming sandboxing for all plugins.</p>
+<p><strong>Rationale:</strong>
+Documenting trust boundaries up front prevents false security assumptions (especially around <code>pickle</code> serving and external commands) and ensures v0.1 CLI and store implementations enforce safe defaults from day one.</p>
+<h3 id="d8-explicit-blockregistry-in-v01-no-inventory">D8 — Explicit <code>BlockRegistry</code> in v0.1 (no <code>inventory</code>)<a class="headerlink" href="#d8-explicit-blockregistry-in-v01-no-inventory" title="Permanent link">&para;</a></h3>
+<p><strong>Decision:</strong>
+- Partially supersede <a href="../0003-plugins-wasm-and-grpc/">ADR-0003</a> for v0.1: <code>mallops-core</code> provides an explicit, instance-local <code>BlockRegistry</code> populated via <code>registry.register(...)</code>.
+- <code>mallops-std</code> exposes <code>pub fn register_std(registry: &amp;mut BlockRegistry)</code> registering all feature-enabled standard blocks; <code>mallops-cli</code> and library callers invoke it explicitly.
+- Compile-time auto-registration (such as <code>inventory</code> behind an optional feature) is deferred until post-v0.1 if multi-crate ergonomics justify its trade-offs.</p>
+<p><strong>Rationale:</strong>
+<code>inventory</code> relies on linker <code>ctor</code> sections that can be silently stripped under LTO or unused-symbol elimination, behave inconsistently across static/cross-compilation/WASM targets, introduce global state that hurts test isolation, and add an <code>unsafe</code>-containing dependency to <code>mallops-core</code>. Explicit registration is deterministic, zero-magic, and trivial for v0.1's standard library.</p>
+<h2 id="consequences">Consequences<a class="headerlink" href="#consequences" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>mallops-core</code> contracts are internally consistent across artifacts, store, blocks, config, caching, lineage, and serving before issue <code>#1</code> begins.</li>
+<li><code>mallops-core</code> remains free of ML, cloud, database, and HTTP/gRPC dependencies while gaining a realistic, auditable infrastructure allowlist.</li>
+<li><code>ArtifactId</code> digests are deterministic, cross-platform, and deduplicated across runs.</li>
+<li><code>LocalStore</code> and external blocks have enforceable immutability and path-traversal protections.</li>
+<li><code>BlockRegistry</code> is isolated and deterministic in unit and integration tests.</li>
+<li>Accepted ADRs 0001–0006 remain untouched per MADR policy; this ADR records all supersessions and refinements.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../0006-store-and-lineage-contracts/" class="md-footer__link md-footer__link--prev" aria-label="Previous: 0006 — Artifact store and lineage: contracts in the core, implementations pluggable">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                0006 — Artifact store and lineage: contracts in the core, implementations pluggable
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../../contributing/" class="md-footer__link md-footer__link--next" aria-label="Next: Contributing">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Contributing
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 The mallops contributors — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "search.suggest", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.2/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

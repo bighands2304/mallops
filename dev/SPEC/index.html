@@ -593,6 +593,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="4. Non-functional requirements">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-trust-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 Trust model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -909,6 +926,34 @@
     
   
     0006 — Artifact store and lineage: contracts in the core, implementations pluggable
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0007-core-contracts-revision/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0007 — Core contracts revision before v0.1 implementation
   
 
     
@@ -1239,6 +1284,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="4. Non-functional requirements">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-trust-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 Trust model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1346,9 +1408,9 @@
 <h3 id="11-design-principles">1.1 Design principles<a class="headerlink" href="#11-design-principles" title="Permanent link">&para;</a></h3>
 <ol>
 <li><strong>Format and library agnostic.</strong> mallops never imposes a model format, a data format or an ML library. An artifact is <em>opaque files + a manifest</em>. ONNX, safetensors, TorchScript, pickle, GGUF, XGBoost JSON, a custom binary — all first-class.</li>
-<li><strong>Everything is a block.</strong> Every lifecycle step, including storage, deploy and retrain triggers, is a replaceable block with declared inputs and outputs.</li>
+<li><strong>Everything is a block.</strong> Every lifecycle step, including data storage, deploy and retrain triggers, is a replaceable block with declared inputs and outputs (artifact store and lineage are core contracts acting on every edge; see <a href="../adr/0006-store-and-lineage-contracts/">ADR-0006</a>).</li>
 <li><strong>Small core, optional everything else.</strong> The core has no ML dependency. Standard blocks live behind Cargo feature flags.</li>
-<li><strong>Reproducible by default.</strong> Content-addressed artifacts, locked configs, recorded seeds and environment.</li>
+<li><strong>Reproducible by default.</strong> Content-addressed artifacts, recorded configs, seeds and environment.</li>
 <li><strong>Local first, scale out later.</strong> A full pipeline runs on a laptop with zero infrastructure; the same pipeline targets object storage, remote runners and edge fleets by swapping blocks.</li>
 </ol>
 <h3 id="12-non-goals">1.2 Non-goals<a class="headerlink" href="#12-non-goals" title="Permanent link">&para;</a></h3>
@@ -1423,9 +1485,9 @@
 <p><strong>a) Data storage blocks</strong> — persisting <em>user data</em> to external systems is an ordinary, optional stage.
 - FR-STO-1: blocks that write datasets/features to object stores, data lakes (Delta, Iceberg), databases and feature stores — v0.2+.</p>
 <p><strong>b) Artifact store</strong> — the internal mechanism through which blocks hand artifacts to each other. Not a block: it sits on every edge of the DAG.
-- FR-STO-2: the core defines the <code>ArtifactStore</code> contract and ships two minimal implementations: <code>local</code> (filesystem, default) and <code>memory</code> (ephemeral, for tests and throwaway runs) — v0.1.
+- FR-STO-2: the core defines the immutable <code>ArtifactStore</code> contract (plus an auxiliary metadata API for cache entries, run lineage records, and future registry entries) and ships two minimal implementations: <code>local</code> (filesystem, default) and <code>memory</code> (ephemeral, for tests and throwaway runs) — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).
 - FR-STO-3: remote backends (S3, GCS, Azure, …) are optional (<code>mallops-std</code> features or plugins) — v0.2.
-- FR-STO-4: content addressing (BLAKE3) — identical content is stored once; enables caching and resume.
+- FR-STO-4: content addressing (canonical BLAKE3 over manifest and payload, excluding run provenance) — identical content is stored once; enables caching and resume.
 - FR-STO-5: garbage collection of artifacts unreachable from retained runs — v0.2.</p>
 <h3 id="33-preprocessing-data-features">3.3 Preprocessing (data → features)<a class="headerlink" href="#33-preprocessing-data-features" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1453,7 +1515,7 @@
 </ul>
 <h3 id="37-model-packaging">3.7 Model packaging<a class="headerlink" href="#37-model-packaging" title="Permanent link">&para;</a></h3>
 <ul>
-<li>FR-PKG-1: package = model artifact + preprocessing artifacts + manifest (flavor, signature, requirements) — v0.1.</li>
+<li>FR-PKG-1: package = model artifact + preprocessing <code>transform</code> artifacts + manifest (<code>flavor</code>, <code>io_schema</code>, requirements) — v0.1.</li>
 <li>FR-PKG-2: optional OCI image output for serving — v0.2.</li>
 <li>FR-PKG-3: artifact signing (Sigstore/cosign or ed25519) — v0.3.</li>
 </ul>
@@ -1470,9 +1532,9 @@
 </ul>
 <h3 id="310-model-serving">3.10 Model serving<a class="headerlink" href="#310-model-serving" title="Permanent link">&para;</a></h3>
 <ul>
-<li>FR-SRV-1: HTTP/JSON inference server (<code>mallops serve</code>) — v0.1.</li>
+<li>FR-SRV-1: HTTP/JSON inference server (<code>mallops serve [package-id]</code>) running outside the batch DAG, consuming a <code>package</code> artifact produced by <code>mallops run</code> — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 <li>FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.</li>
-<li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (ort, tract, candle, burn, linfa, llama.cpp, external Python process…).</li>
+<li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (linfa, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) and is promoted to <code>mallops-core</code> before 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 </ul>
 <h3 id="311-monitoring-and-logging">3.11 Monitoring and logging<a class="headerlink" href="#311-monitoring-and-logging" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1523,22 +1585,31 @@
 </tr>
 <tr>
 <td>NFR-4 Security</td>
-<td>No secrets in config files (env/secret-provider references only); plugin sandboxing via WASM; signed artifacts from v0.3.</td>
+<td>Secrets only via redacted <code>${secret:NAME}</code> references (never written to <code>config.json</code>, cache keys, logs, or lineage); <code>mallops.yaml</code>, native blocks, and external processes are trusted code — sandboxing applies only to WASM plugins; unsafe code-executing model flavors require explicit opt-in at serve time; signed artifacts from v0.3.</td>
 </tr>
 <tr>
 <td>NFR-5 Observability</td>
-<td>Every run emits structured logs and a lineage record.</td>
+<td>Every run emits structured logs and, unless <code>lineage: off</code>, a lineage record.</td>
 </tr>
 <tr>
 <td>NFR-6 Stability</td>
-<td>Semantic versioning; public API of <code>mallops-core</code> frozen at 1.0. MSRV documented and tested in CI.</td>
+<td>Semantic versioning; public API of <code>mallops-core</code> frozen at 1.0 (<code>#[non_exhaustive]</code> on extensible public types). MSRV documented and tested in CI.</td>
 </tr>
 <tr>
 <td>NFR-7 Footprint</td>
-<td><code>mallops-core</code> compiles without any ML, cloud-SDK or <code>object_store</code> dependency; only <code>tokio</code>, <code>serde</code>, <code>blake3</code>, <code>tracing</code>.</td>
+<td><code>mallops-core</code> compiles without any ML, cloud-SDK, <code>object_store</code>, database, or HTTP/gRPC dependency; dependencies are restricted to the explicit allowlist (<code>tokio</code>, <code>serde</code>, <code>serde_json</code>, <code>blake3</code>, <code>tracing</code>, <code>thiserror</code>, <code>ulid</code>, <code>tempfile</code>) plus feature-gated <code>yaml</code> (<code>yaml_serde</code>, default) and <code>schema</code> (<code>schemars</code>, optional) (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</td>
 </tr>
 </tbody>
 </table>
+<h3 id="41-trust-model">4.1 Trust model<a class="headerlink" href="#41-trust-model" title="Permanent link">&para;</a></h3>
+<p>mallops enforces explicit trust boundaries (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>):</p>
+<ul>
+<li><strong>Pipeline definitions (<code>mallops.yaml</code>) are trusted code.</strong> Running <code>mallops run</code> is equivalent to executing a build script: native blocks run in-process and external blocks run arbitrary configured commands (<code>command:</code>). By contrast, <code>mallops validate</code> and <code>mallops graph</code> <strong>never</strong> execute user code or spawn external processes.</li>
+<li><strong>Plugin isolation boundaries.</strong> Only WASM component plugins (post-v0.1) execute inside a capability-restricted sandbox. Native Rust blocks have no isolation; external CLI and gRPC blocks run as host processes. In v0.1, external CLI blocks execute via <code>argv</code> (never through a shell), with an explicit allowlisted environment and an isolated workdir, but this is process hygiene rather than a security sandbox.</li>
+<li><strong>Model flavor deserialization.</strong> Formats such as <code>pickle</code>, <code>joblib</code>, <code>sklearn-pickle</code>, and <code>torchscript</code> execute arbitrary code when loaded. <code>Predictor</code> implementations declare <code>executes_code(&amp;self) -&gt; bool</code>, and <code>mallops serve</code> refuses to load code-executing flavors unless <code>--trust-unsafe-flavors</code> is explicitly passed. Prefer non-executing formats (<code>onnx</code>, <code>safetensors</code>, <code>skops</code>) and, from v0.3, cryptographically signed packages.</li>
+<li><strong>Secrets.</strong> <code>${secret:NAME}</code> references are resolved on demand through a <code>SecretProvider</code> (<code>MALLOPS_SECRET_&lt;NAME&gt;</code> environment variable in v0.1) into an opaque <code>Secret</code> newtype whose <code>Debug</code>/<code>Display</code> output is redacted (<code>"***"</code>) and which does not implement <code>Serialize</code>. Secrets never enter <code>Context.config</code>, <code>config.json</code>, cache keys, <code>config_hash</code>, logs, or lineage sinks.</li>
+<li><strong>Store integrity.</strong> <code>ArtifactId</code> (strict 64 lowercase hex chars) and <code>RelPath</code> (relative POSIX UTF-8 path with no <code>..</code> or root prefixes) are strictly validated. <code>ArtifactStore</code> rejects symlinks and special files, stores payloads read-only on <code>LocalStore</code>, and materializes copies on <code>fetch</code> so blocks can never mutate stored artifacts in place.</li>
+</ul>
 <h2 id="5-pipeline-definition-mallopsyaml">5. Pipeline definition (<code>mallops.yaml</code>)<a class="headerlink" href="#5-pipeline-definition-mallopsyaml" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
 <span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">churn-classifier</span>
@@ -1587,32 +1658,39 @@
 <span class="w">    </span><span class="nt">use</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">std/package</span>
 <span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> model</span><span class="p">:</span><span class="w"> </span><span class="nv">model.model</span><span class="p p-Indicator">,</span><span class="nt"> preprocess</span><span class="p">:</span><span class="w"> </span><span class="nv">features.transform</span><span class="p p-Indicator">,</span><span class="nt"> metrics</span><span class="p">:</span><span class="w"> </span><span class="nv">eval.metrics</span><span class="w"> </span><span class="p p-Indicator">}</span>
 
-<span class="w">  </span><span class="nt">serve</span><span class="p">:</span>
-<span class="w">    </span><span class="nt">use</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">std/serve.http</span>
-<span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> package</span><span class="p">:</span><span class="w"> </span><span class="nv">package.package</span><span class="w"> </span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="nt">with</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> port</span><span class="p">:</span><span class="w"> </span><span class="nv">8080</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="nt">serve</span><span class="p">:</span><span class="w">                   </span><span class="c1"># optional serving config read by `mallops serve` (not a DAG node)</span>
+<span class="w">  </span><span class="nt">package</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">package.package</span>
+<span class="w">  </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">127.0.0.1</span>
+<span class="w">  </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8080</span>
 </code></pre></div>
 <p>Rules:
-- <code>use</code> references a block by <code>namespace/name</code> (<code>std/…</code> built-in, <code>plugin/…</code> installed plugin, <code>wasm:path.wasm</code>, <code>grpc:host:port</code>).
+- <code>blocks:</code> defines the finite batch DAG executed by <code>mallops run</code>. Long-running serving lives in the optional top-level <code>serve:</code> section (read by <code>mallops serve</code>, never started by <code>mallops run</code>).
+- <code>use</code> references a block by <code>namespace/name</code> (<code>std/…</code> built-in in v0.1; <code>plugin/…</code>, <code>wasm:path.wasm</code>, and <code>grpc:host:port</code> are reserved for post-v0.1 plugin runtimes and fail with a clear error in v0.1).
 - <code>in</code> wires named inputs to <code>&lt;block&gt;.&lt;output&gt;</code>; this defines the DAG. Cycles are rejected.
-- <code>with</code> is block-specific config, validated against the block's JSON schema.
-- Values may reference environment variables <code>${env:NAME}</code> and secrets <code>${secret:NAME}</code>; secrets are never written to lineage.
-- A JSON Schema for the file is generated from Rust types (<code>schemars</code>) and published for editor completion.</p>
+- <code>with</code> is block-specific config, validated by <code>Block::validate_config</code> (using <code>serde</code> in v0.1; optional JSON Schema validation behind the <code>schema-validate</code> feature). Each block also supports <code>cache: false</code> to bypass caching.
+- Values may reference environment variables <code>${env:NAME}</code> (resolved into <code>config</code> and included in <code>config_hash</code>) and secrets <code>${secret:NAME}</code> (resolved on demand via <code>MALLOPS_SECRET_&lt;NAME&gt;</code> in v0.1 into a redacted <code>Secret</code>, never written to <code>config.json</code>, cache keys, logs, or lineage).
+- A JSON Schema for <code>mallops.yaml</code> can be generated via the optional <code>schema</code> feature (<code>schemars</code>) for editor completion.</p>
 <h2 id="6-artifact-contract">6. Artifact contract<a class="headerlink" href="#6-artifact-contract" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>&lt;store&gt;/artifacts/&lt;blake3-hash&gt;/
 ├── manifest.json
 └── payload/…          # any files, opaque to the core
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"schema_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"model"</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pickle"</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"flavor"</span><span class="p">:</span><span class="w"> </span><span class="s2">"sklearn-pickle"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"signature"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"inputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"age"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}],</span><span class="w"> </span><span class="nt">"outputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"churned"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"io_schema"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"inputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"age"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}],</span><span class="w"> </span><span class="nt">"outputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"churned"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}]</span><span class="w"> </span><span class="p">},</span>
 <span class="w">  </span><span class="nt">"metadata"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"framework"</span><span class="p">:</span><span class="w"> </span><span class="s2">"scikit-learn"</span><span class="p">,</span><span class="w"> </span><span class="nt">"framework_version"</span><span class="p">:</span><span class="w"> </span><span class="s2">"1.6.0"</span><span class="w"> </span><span class="p">},</span>
-<span class="w">  </span><span class="nt">"produced_by"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"run"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01J…"</span><span class="p">,</span><span class="w"> </span><span class="nt">"block"</span><span class="p">:</span><span class="w"> </span><span class="s2">"model"</span><span class="w"> </span><span class="p">},</span>
 <span class="w">  </span><span class="nt">"parents"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"&lt;hash&gt;"</span><span class="p">,</span><span class="w"> </span><span class="s2">"&lt;hash&gt;"</span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
+<p>Per-run provenance (<code>run</code>, <code>node</code>) is <strong>not</strong> part of <code>manifest.json</code>; it is recorded in <code>LineageEvent::ArtifactProduced</code> so identical deterministic runs produce identical <code>ArtifactId</code>s (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). Cryptographic signatures (<code>FR-PKG-3</code>, v0.3) are stored alongside artifacts rather than inside <code>manifest.json</code>.</p>
+<p><strong>Canonical <code>ArtifactId</code> encoding (<code>v1</code>):</strong>
+1. Initialize a BLAKE3 keyed hasher with <code>blake3::derive_key("mallops artifact v1")</code>.
+2. Serialize <code>Manifest</code> as canonical JSON (object keys sorted lexicographically, <code>parents</code> sorted lexicographically) and hash <code>u64::to_le_bytes(len) || manifest_json_bytes</code>.
+3. Collect all payload files via validated <code>RelPath</code> (relative UTF-8 POSIX paths with <code>/</code> separators, no <code>..</code>, no symlinks) sorted bytewise; hash <code>u64::to_le_bytes(file_count)</code> followed by <code>len(path) || path || len(content) || blake3(content)</code> for each file (all lengths as <code>u64</code> little-endian).
+4. Encode the 32-byte digest as 64 lowercase hexadecimal characters.</p>
 <table>
 <thead>
 <tr>
@@ -1630,7 +1708,12 @@
 <tr>
 <td><code>features</code></td>
 <td>as dataset</td>
-<td>plus optional fitted <code>transform</code> artifact</td>
+<td>preprocessed feature splits</td>
+</tr>
+<tr>
+<td><code>transform</code></td>
+<td><code>json</code>, <code>bin</code>, <code>pickle</code>, any</td>
+<td>fitted preprocessor (scaler, imputer, encoder…) reused by <code>package</code> and <code>serve</code></td>
 </tr>
 <tr>
 <td><code>model</code></td>
@@ -1654,7 +1737,29 @@
 </tr>
 </tbody>
 </table>
-<p>Inputs and outputs of blocks declare the accepted <code>kind</code> and optionally accepted <code>format</code>s / <code>flavor</code>s; <code>mallops validate</code> checks compatibility before running.</p>
+<p><strong>Model flavor code-execution safety:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Flavor / format</th>
+<th>Executes code on load?</th>
+<th>Serving default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>onnx</code>, <code>safetensors</code>, <code>linfa-*</code>, <code>xgboost-json</code>, <code>gguf</code>, <code>skops</code></td>
+<td>No</td>
+<td>Allowed</td>
+</tr>
+<tr>
+<td><code>pickle</code>, <code>joblib</code>, <code>sklearn-pickle</code>, <code>torchscript</code></td>
+<td><strong>Yes</strong></td>
+<td>Refused unless <code>--trust-unsafe-flavors</code></td>
+</tr>
+</tbody>
+</table>
+<p>Inputs and outputs of blocks declare the accepted <code>kind</code> and optionally accepted <code>format</code>s / <code>flavor</code>s; <code>mallops validate</code> checks compatibility before running (using <code>Block::resolve_ports</code> when ports depend on <code>with:</code> config).</p>
 <h2 id="7-roadmap">7. Roadmap<a class="headerlink" href="#7-roadmap" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1666,7 +1771,7 @@
 <tbody>
 <tr>
 <td><strong>v0.1</strong></td>
-<td><code>mallops-core</code> (Block trait, artifacts, <code>ArtifactStore</code> + local/memory, lineage events + JSON sink, DAG runtime, YAML), CLI (<code>init</code>, <code>validate</code>, <code>run</code>, <code>graph</code>, <code>blocks list</code>, <code>serve</code>), std blocks: ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, serve http</td>
+<td><code>mallops-core</code> (Block trait, canonical artifacts, immutable <code>ArtifactStore</code> + local/memory + auxiliary metadata, explicit <code>BlockRegistry</code>, lineage events + JSON sink, DAG runtime, YAML), CLI (<code>init</code>, <code>validate</code>, <code>run</code>, <code>graph</code>, <code>blocks list</code>, <code>serve</code>), <code>mallops-std</code> (<code>Predictor</code> contract, ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, HTTP serving)</td>
 </tr>
 <tr>
 <td>v0.2</td>

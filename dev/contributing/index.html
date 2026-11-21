@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/contributing/">
       
       
-        <link rel="prev" href="../adr/0006-store-and-lineage-contracts/">
+        <link rel="prev" href="../adr/0007-core-contracts-revision/">
       
       
       
@@ -597,6 +597,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0007-core-contracts-revision/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0007 — Core contracts revision before v0.1 implementation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1011,7 +1039,7 @@ Breaking changes: <code>feat!: …</code> or a <code>BREAKING CHANGE:</code> foo
 <div class="highlight"><pre><span></span><code>git<span class="w"> </span>rebase<span class="w"> </span>--signoff<span class="w"> </span>origin/dev<span class="w">        </span><span class="c1"># adds the trailer to every commit of the branch</span>
 git<span class="w"> </span>push<span class="w"> </span>--force-with-lease
 </code></pre></div>
-<p>The <code>dco</code> CI job blocks PRs with unsigned commits (bots and merge commits are exempt). Squash merges keep all trailers in the final commit.</p>
+<p>The <code>dco</code> CI job blocks PRs with unsigned commits and rejects merge commits in feature PRs (rebase onto <code>dev</code> instead; verified <code>dependabot[bot]</code>/<code>github-actions[bot]</code> commits and verified GitHub merge commits in release/back-merge PRs are exempt). Squash merges keep all trailers in the final commit.</p>
 <h2 id="local-checks">Local checks<a class="headerlink" href="#local-checks" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>cargo<span class="w"> </span>fmt<span class="w"> </span>--all
 cargo<span class="w"> </span>clippy<span class="w"> </span>--workspace<span class="w"> </span>--all-targets<span class="w"> </span>--all-features<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
@@ -1031,7 +1059,7 @@ mkdocs<span class="w"> </span>build<span class="w"> </span>--strict<span class="
 <li>Merge the PR with <strong>Create a merge commit</strong>. The tag, GitHub Release, binaries and crates.io publish happen automatically.</li>
 <li>Merge the auto-opened back-merge PR into <code>dev</code> (merge commit).</li>
 </ol>
-<p>Required repository secrets: <code>RELEASE_TOKEN</code> (fine-grained PAT with contents + pull-requests write, so bot-created branches/PRs trigger CI) and <code>CARGO_REGISTRY_TOKEN</code> (crates.io).</p>
+<p>Required secrets: <code>RELEASE_TOKEN</code> (repository secret, fine-grained PAT or GitHub App token with contents + pull-requests write, so bot-created branches/PRs trigger CI) and <code>CARGO_REGISTRY_TOKEN</code> (in the <code>release</code> environment, for crates.io).</p>
 <h2 id="architecture-changes">Architecture changes<a class="headerlink" href="#architecture-changes" title="Permanent link">&para;</a></h2>
 <p>Significant design changes need an ADR in <a href="https://bighands2304.github.io/mallops/latest/adr/">docs/adr/</a> submitted with or before the implementation.</p>
 <h2 id="license">License<a class="headerlink" href="#license" title="Permanent link">&para;</a></h2>
@@ -1071,7 +1099,7 @@ mkdocs<span class="w"> </span>build<span class="w"> </span>--strict<span class="
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../adr/0006-store-and-lineage-contracts/" class="md-footer__link md-footer__link--prev" aria-label="Previous: 0006 — Artifact store and lineage: contracts in the core, implementations pluggable">
+          <a href="../adr/0007-core-contracts-revision/" class="md-footer__link md-footer__link--prev" aria-label="Previous: 0007 — Core contracts revision before v0.1 implementation">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1081,7 +1109,7 @@ mkdocs<span class="w"> </span>build<span class="w"> </span>--strict<span class="
                 Previous
               </span>
               <div class="md-ellipsis">
-                0006 — Artifact store and lineage: contracts in the core, implementations pluggable
+                0007 — Core contracts revision before v0.1 implementation
               </div>
             </div>
           </a>

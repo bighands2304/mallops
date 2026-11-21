@@ -19,7 +19,7 @@ jobs:
   cut:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: dev
           fetch-depth: 0
@@ -41,14 +41,16 @@ jobs:
           esac
           echo "version=$major.$minor.$patch" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
 
       - name: Bump version
         run: |
           sed -i 's/^version = ".*"/version = "${{ steps.v.outputs.version }}"/' Cargo.toml
           cargo update --workspace
 
-      - uses: orhun/git-cliff-action@v4
+      - uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: --tag v${{ steps.v.outputs.version }}

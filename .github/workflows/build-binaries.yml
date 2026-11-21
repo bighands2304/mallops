@@ -23,16 +23,18 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-latest, ext: .exe }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { ref: "${{ inputs.tag }}" }
       # ponytail: no-op until crates/mallops-cli exists.
       - name: Check for CLI crate
         id: cli
         shell: bash
         run: echo "exists=$([ -f crates/mallops-cli/Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         if: steps.cli.outputs.exists == 'true'
-        with: { targets: "${{ matrix.target }}" }
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
       - name: Build and upload
         if: steps.cli.outputs.exists == 'true'
         shell: bash

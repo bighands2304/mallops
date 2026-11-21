@@ -1688,7 +1688,7 @@
 <p>Per-run provenance (<code>run</code>, <code>node</code>) is <strong>not</strong> part of <code>manifest.json</code>; it is recorded in <code>LineageEvent::ArtifactProduced</code> so identical deterministic runs produce identical <code>ArtifactId</code>s (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). Cryptographic signatures (<code>FR-PKG-3</code>, v0.3) are stored alongside artifacts rather than inside <code>manifest.json</code>.</p>
 <p><strong>Canonical <code>ArtifactId</code> encoding (<code>v1</code>):</strong>
 1. Initialize a BLAKE3 keyed hasher with <code>blake3::derive_key("mallops artifact v1")</code>.
-2. Serialize <code>Manifest</code> as canonical JSON (object keys sorted lexicographically, <code>parents</code> sorted lexicographically) and hash <code>u64::to_le_bytes(len) || manifest_json_bytes</code>.
+2. Serialize <code>Manifest</code> as canonical compact JSON (object keys sorted by UTF-8 byte order, numbers in <code>serde_json</code> format — not RFC 8785 — <code>io_schema: null</code> omitted as absent, and <code>parents</code> sorted lexicographically and deduplicated) and hash <code>u64::to_le_bytes(len) || manifest_json_bytes</code>.
 3. Collect all payload files via validated <code>RelPath</code> (relative UTF-8 POSIX paths with <code>/</code> separators, no <code>..</code>, no symlinks) sorted bytewise; hash <code>u64::to_le_bytes(file_count)</code> followed by <code>len(path) || path || len(content) || blake3(content)</code> for each file (all lengths as <code>u64</code> little-endian).
 4. Encode the 32-byte digest as 64 lowercase hexadecimal characters.</p>
 <table>

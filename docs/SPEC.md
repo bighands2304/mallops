@@ -237,7 +237,7 @@ Per-run provenance (`run`, `node`) is **not** part of `manifest.json`; it is rec
 
 **Canonical `ArtifactId` encoding (`v1`):**
 1. Initialize a BLAKE3 keyed hasher with `blake3::derive_key("mallops artifact v1")`.
-2. Serialize `Manifest` as canonical JSON (object keys sorted lexicographically, `parents` sorted lexicographically) and hash `u64::to_le_bytes(len) || manifest_json_bytes`.
+2. Serialize `Manifest` as canonical compact JSON (object keys sorted by UTF-8 byte order, numbers in `serde_json` format — not RFC 8785 — `io_schema: null` omitted as absent, and `parents` sorted lexicographically and deduplicated) and hash `u64::to_le_bytes(len) || manifest_json_bytes`.
 3. Collect all payload files via validated `RelPath` (relative UTF-8 POSIX paths with `/` separators, no `..`, no symlinks) sorted bytewise; hash `u64::to_le_bytes(file_count)` followed by `len(path) || path || len(content) || blake3(content)` for each file (all lengths as `u64` little-endian).
 4. Encode the 32-byte digest as 64 lowercase hexadecimal characters.
 

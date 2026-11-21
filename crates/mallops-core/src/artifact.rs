@@ -846,6 +846,8 @@ mod tests {
                 "outputs": [{"dtype": "f64", "name": "churned"}],
                 "inputs": [{"dtype": "f64", "name": "age"}]
             }))
+            .with_metadata_entry("threshold", json!(1.5))
+            .with_metadata_entry("large_scale", json!(1e21_f64))
             .with_metadata_entry("framework_version", json!("1.6.0"))
             .with_metadata_entry("framework", json!("scikit-learn"))
             .with_parents([parent_b(), parent_a()])
@@ -856,10 +858,13 @@ mod tests {
     /// How this vector was obtained:
     /// 1. Construct `golden_manifest()` (`schema_version = 1`, `kind = model`,
     ///    `format = "pickle"`, `flavor = "sklearn-pickle"`, `io_schema` and
-    ///    `metadata` with unsorted insertion order, `parents = [0xaa..aa, 0x11..11]`).
-    /// 2. Canonicalize `Manifest` as compact JSON with lexicographically sorted
-    ///    keys at every level and lexicographically sorted `parents`:
-    ///    `{"flavor":"sklearn-pickle","format":"pickle","io_schema":{"inputs":[{"dtype":"f64","name":"age"}],"outputs":[{"dtype":"f64","name":"churned"}]},"kind":"model","metadata":{"framework":"scikit-learn","framework_version":"1.6.0"},"parents":["1111...11","aaaa...aa"],"schema_version":1}`
+    ///    `metadata` with unsorted insertion order including floats `1.5` and
+    ///    `1e21` to pin `serde_json` number formatting, `parents = [0xaa..aa, 0x11..11]`).
+    /// 2. Canonicalize `Manifest` as compact JSON with keys sorted by UTF-8 byte
+    ///    order at every level, `serde_json` number formatting (not RFC 8785,
+    ///    e.g. `1e21` formats as `1e+21`), and `parents` sorted lexicographically
+    ///    and deduplicated:
+    ///    `{"flavor":"sklearn-pickle","format":"pickle","io_schema":{"inputs":[{"dtype":"f64","name":"age"}],"outputs":[{"dtype":"f64","name":"churned"}]},"kind":"model","metadata":{"framework":"scikit-learn","framework_version":"1.6.0","large_scale":1e+21,"threshold":1.5},"parents":["1111...11","aaaa...aa"],"schema_version":1}`
     /// 3. Encode the length-prefixed frame:
     ///    - `u64::to_le_bytes(manifest_json.len()) || manifest_json`
     ///    - `u64::to_le_bytes(2)` (two payload files)
@@ -868,13 +873,14 @@ mod tests {
     ///    - file 1 (`"model/weights.bin"`, `b"\x01\x02\x03\x04"`):
     ///      `u64::to_le_bytes(17) || b"model/weights.bin" || u64::to_le_bytes(4) || blake3(b"\x01\x02\x03\x04")`
     /// 4. Compute `blake3::derive_key("mallops artifact v1", &frame)` and format
-    ///    the 32-byte digest as 64 lowercase hexadecimal characters.
+    ///    the 32-byte digest as 64 lowercase hexadecimal characters:
+    ///    `48064cd91754db3c836cb75d0ae7ca350532fece577452316e24d284c41d62da`.
     #[test]
     fn golden_artifact_id_v1_vector() {
         let expected_canonical_manifest = concat!(
             r#"{"flavor":"sklearn-pickle","format":"pickle","#,
             r#""io_schema":{"inputs":[{"dtype":"f64","name":"age"}],"outputs":[{"dtype":"f64","name":"churned"}]},"#,
-            r#""kind":"model","metadata":{"framework":"scikit-learn","framework_version":"1.6.0"},"#,
+            r#""kind":"model","metadata":{"framework":"scikit-learn","framework_version":"1.6.0","large_scale":1e+21,"threshold":1.5},"#,
             r#""parents":["1111111111111111111111111111111111111111111111111111111111111111","#,
             r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"#,
             r#""schema_version":1}"#
@@ -924,7 +930,7 @@ mod tests {
         )
         .unwrap();
 
-        const GOLDEN_HEX: &str = "18269ff8ca79e3534cb4329b6b4ebe60a846f63278eba16c7ee3a5023252e804";
+        const GOLDEN_HEX: &str = "48064cd91754db3c836cb75d0ae7ca350532fece577452316e24d284c41d62da";
         let expected: ArtifactId = GOLDEN_HEX.parse().unwrap();
 
         assert_eq!(derived, expected);
@@ -941,6 +947,8 @@ mod tests {
             }))
             .with_metadata_entry("framework", json!("scikit-learn"))
             .with_metadata_entry("framework_version", json!("1.6.0"))
+            .with_metadata_entry("large_scale", json!(1e21_f64))
+            .with_metadata_entry("threshold", json!(1.5))
             .with_parents([parent_a(), parent_b()]);
 
         let reordered_id = ArtifactId::compute_from_bytes(
@@ -1015,6 +1023,11 @@ mod tests {
     fn length_prefix_prevents_payload_and_manifest_boundary_collisions() {
         let manifest = Manifest::new(ArtifactKind::Blob, "raw");
 
+        // Length prefixes serve as defense in depth here (cases 1-2 already differ
+        // because each payload is individually BLAKE3-hashed, and case 3 compares
+        // distinct manifests); the exact length-prefixed v1 framing is pinned
+        // byte-for-byte by `golden_artifact_id_v1_vector`.
+
         // 1. Content boundary shift across two files: a="ab", b="" vs a="a", b="b".
         let id_ab_empty = ArtifactId::compute_from_bytes(
             &manifest,
@@ -1058,28 +1071,46 @@ mod tests {
         )
         .unwrap();
         assert_ne!(id_meta_no_files, id_empty_with_file);
+    }
 
-        // 4. Direct raw-frame boundary shift check: two distinct (manifest_len, manifest, rest)
-        //    splits of the exact same concatenated bytes must hash differently when length-prefixed.
-        let raw_a = manifest.canonical_json();
-        let raw_b = manifest_with_meta.canonical_json();
-        assert_ne!(raw_a, raw_b);
+    #[test]
+    fn canonical_json_matches_serde_representation() {
+        // Explicit struct literal ensures adding a field to `Manifest` fails compilation
+        // here unless both `canonical_json` and this consistency check are updated.
+        let manifest = Manifest {
+            schema_version: Manifest::SCHEMA_VERSION,
+            kind: ArtifactKind::Model,
+            format: "onnx".to_owned(),
+            flavor: Some("onnx".to_owned()),
+            io_schema: Some(json!({
+                "inputs": [{"name": "x", "dtype": "f32"}],
+                "outputs": [{"name": "y", "dtype": "f32"}]
+            })),
+            metadata: BTreeMap::from([
+                ("b".to_owned(), json!(1.5)),
+                ("a".to_owned(), json!({"z": true, "a": [1, 1e21_f64]})),
+            ]),
+            parents: vec![parent_b(), parent_a(), parent_b()],
+        };
 
-        // Even if payload content literally equals the trailing bytes of manifest_b, the
-        // manifest length prefix prevents any collision.
-        let mut h1 = blake3::Hasher::new_derive_key(ARTIFACT_ID_V1_CONTEXT);
-        h1.update(&(3u64).to_le_bytes());
-        h1.update(b"abc");
-        h1.update(&(2u64).to_le_bytes());
-        h1.update(b"de");
+        let mut normalized = manifest.clone();
+        normalized.parents.sort();
+        normalized.parents.dedup();
 
-        let mut h2 = blake3::Hasher::new_derive_key(ARTIFACT_ID_V1_CONTEXT);
-        h2.update(&(2u64).to_le_bytes());
-        h2.update(b"ab");
-        h2.update(&(3u64).to_le_bytes());
-        h2.update(b"cde");
+        let canonical_value: serde_json::Value =
+            serde_json::from_slice(&manifest.canonical_json()).unwrap();
+        let serde_value = serde_json::to_value(&normalized).unwrap();
+        assert_eq!(canonical_value, serde_value);
 
-        assert_ne!(h1.finalize(), h2.finalize());
+        for minimal in [
+            Manifest::new(ArtifactKind::Blob, "raw"),
+            Manifest::new(ArtifactKind::Blob, "raw").with_io_schema(serde_json::Value::Null),
+        ] {
+            let canonical_minimal: serde_json::Value =
+                serde_json::from_slice(&minimal.canonical_json()).unwrap();
+            let serde_minimal = serde_json::to_value(&minimal).unwrap();
+            assert_eq!(canonical_minimal, serde_minimal);
+        }
     }
 
     #[test]

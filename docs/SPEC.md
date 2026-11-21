@@ -17,9 +17,9 @@ It can be used in three ways, all backed by the same core:
 ### 1.1 Design principles
 
 1. **Format and library agnostic.** mallops never imposes a model format, a data format or an ML library. An artifact is *opaque files + a manifest*. ONNX, safetensors, TorchScript, pickle, GGUF, XGBoost JSON, a custom binary — all first-class.
-2. **Everything is a block.** Every lifecycle step, including storage, deploy and retrain triggers, is a replaceable block with declared inputs and outputs.
+2. **Everything is a block.** Every lifecycle step, including data storage, deploy and retrain triggers, is a replaceable block with declared inputs and outputs (artifact store and lineage are core contracts acting on every edge; see [ADR-0006](adr/0006-store-and-lineage-contracts.md)).
 3. **Small core, optional everything else.** The core has no ML dependency. Standard blocks live behind Cargo feature flags.
-4. **Reproducible by default.** Content-addressed artifacts, locked configs, recorded seeds and environment.
+4. **Reproducible by default.** Content-addressed artifacts, recorded configs, seeds and environment.
 5. **Local first, scale out later.** A full pipeline runs on a laptop with zero infrastructure; the same pipeline targets object storage, remote runners and edge fleets by swapping blocks.
 
 ### 1.2 Non-goals
@@ -61,9 +61,9 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-STO-1: blocks that write datasets/features to object stores, data lakes (Delta, Iceberg), databases and feature stores — v0.2+.
 
 **b) Artifact store** — the internal mechanism through which blocks hand artifacts to each other. Not a block: it sits on every edge of the DAG.
-- FR-STO-2: the core defines the `ArtifactStore` contract and ships two minimal implementations: `local` (filesystem, default) and `memory` (ephemeral, for tests and throwaway runs) — v0.1.
+- FR-STO-2: the core defines the immutable `ArtifactStore` contract (plus an auxiliary metadata API for cache entries, run lineage records, and future registry entries) and ships two minimal implementations: `local` (filesystem, default) and `memory` (ephemeral, for tests and throwaway runs) — v0.1 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 - FR-STO-3: remote backends (S3, GCS, Azure, …) are optional (`mallops-std` features or plugins) — v0.2.
-- FR-STO-4: content addressing (BLAKE3) — identical content is stored once; enables caching and resume.
+- FR-STO-4: content addressing (canonical BLAKE3 over manifest and payload, excluding run provenance) — identical content is stored once; enables caching and resume.
 - FR-STO-5: garbage collection of artifacts unreachable from retained runs — v0.2.
 
 ### 3.3 Preprocessing (data → features)
@@ -87,7 +87,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-EVL-3: custom metrics via plugins.
 
 ### 3.7 Model packaging
-- FR-PKG-1: package = model artifact + preprocessing artifacts + manifest (flavor, signature, requirements) — v0.1.
+- FR-PKG-1: package = model artifact + preprocessing `transform` artifacts + manifest (`flavor`, `io_schema`, requirements) — v0.1.
 - FR-PKG-2: optional OCI image output for serving — v0.2.
 - FR-PKG-3: artifact signing (Sigstore/cosign or ed25519) — v0.3.
 
@@ -101,9 +101,9 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-DEP-3: rollback to a previous registry version in one command.
 
 ### 3.10 Model serving
-- FR-SRV-1: HTTP/JSON inference server (`mallops serve`) — v0.1.
+- FR-SRV-1: HTTP/JSON inference server (`mallops serve [package-id]`) running outside the batch DAG, consuming a `package` artifact produced by `mallops run` — v0.1 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 - FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.
-- FR-SRV-3: **backend-agnostic**: the server dispatches to a `Predictor` chosen by the package flavor (ort, tract, candle, burn, linfa, llama.cpp, external Python process…).
+- FR-SRV-3: **backend-agnostic**: the server dispatches to a `Predictor` chosen by the package flavor (linfa, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) and is promoted to `mallops-core` before 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 
 ### 3.11 Monitoring and logging
 - FR-MON-1: structured logs (`tracing`) for every run and every request — v0.1.
@@ -134,10 +134,20 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 | NFR-1 Performance | Core overhead per block < 5 ms; independent branches run in parallel. |
 | NFR-2 Reproducibility | Same config + same input hashes + same seed ⇒ same artifact hashes for deterministic blocks; unchanged nodes are skipped (cache). |
 | NFR-3 Portability | Linux, macOS, Windows; x86_64 and aarch64. Edge targets armv7. |
-| NFR-4 Security | No secrets in config files (env/secret-provider references only); plugin sandboxing via WASM; signed artifacts from v0.3. |
-| NFR-5 Observability | Every run emits structured logs and a lineage record. |
-| NFR-6 Stability | Semantic versioning; public API of `mallops-core` frozen at 1.0. MSRV documented and tested in CI. |
-| NFR-7 Footprint | `mallops-core` compiles without any ML, cloud-SDK or `object_store` dependency; only `tokio`, `serde`, `blake3`, `tracing`. |
+| NFR-4 Security | Secrets only via redacted `${secret:NAME}` references (never written to `config.json`, cache keys, logs, or lineage); `mallops.yaml`, native blocks, and external processes are trusted code — sandboxing applies only to WASM plugins; unsafe code-executing model flavors require explicit opt-in at serve time; signed artifacts from v0.3. |
+| NFR-5 Observability | Every run emits structured logs and, unless `lineage: off`, a lineage record. |
+| NFR-6 Stability | Semantic versioning; public API of `mallops-core` frozen at 1.0 (`#[non_exhaustive]` on extensible public types). MSRV documented and tested in CI. |
+| NFR-7 Footprint | `mallops-core` compiles without any ML, cloud-SDK, `object_store`, database, or HTTP/gRPC dependency; dependencies are restricted to the explicit allowlist (`tokio`, `serde`, `serde_json`, `blake3`, `tracing`, `thiserror`, `ulid`, `tempfile`) plus feature-gated `yaml` (`yaml_serde`, default) and `schema` (`schemars`, optional) ([ADR-0007](adr/0007-core-contracts-revision.md)). |
+
+### 4.1 Trust model
+
+mallops enforces explicit trust boundaries ([ADR-0007](adr/0007-core-contracts-revision.md)):
+
+- **Pipeline definitions (`mallops.yaml`) are trusted code.** Running `mallops run` is equivalent to executing a build script: native blocks run in-process and external blocks run arbitrary configured commands (`command:`). By contrast, `mallops validate` and `mallops graph` **never** execute user code or spawn external processes.
+- **Plugin isolation boundaries.** Only WASM component plugins (post-v0.1) execute inside a capability-restricted sandbox. Native Rust blocks have no isolation; external CLI and gRPC blocks run as host processes. In v0.1, external CLI blocks execute via `argv` (never through a shell), with an explicit allowlisted environment and an isolated workdir, but this is process hygiene rather than a security sandbox.
+- **Model flavor deserialization.** Formats such as `pickle`, `joblib`, `sklearn-pickle`, and `torchscript` execute arbitrary code when loaded. `Predictor` implementations declare `executes_code(&self) -> bool`, and `mallops serve` refuses to load code-executing flavors unless `--trust-unsafe-flavors` is explicitly passed. Prefer non-executing formats (`onnx`, `safetensors`, `skops`) and, from v0.3, cryptographically signed packages.
+- **Secrets.** `${secret:NAME}` references are resolved on demand through a `SecretProvider` (`MALLOPS_SECRET_<NAME>` environment variable in v0.1) into an opaque `Secret` newtype whose `Debug`/`Display` output is redacted (`"***"`) and which does not implement `Serialize`. Secrets never enter `Context.config`, `config.json`, cache keys, `config_hash`, logs, or lineage sinks.
+- **Store integrity.** `ArtifactId` (strict 64 lowercase hex chars) and `RelPath` (relative POSIX UTF-8 path with no `..` or root prefixes) are strictly validated. `ArtifactStore` rejects symlinks and special files, stores payloads read-only on `LocalStore`, and materializes copies on `fetch` so blocks can never mutate stored artifacts in place.
 
 ## 5. Pipeline definition (`mallops.yaml`)
 
@@ -189,18 +199,19 @@ blocks:
     use: std/package
     in: { model: model.model, preprocess: features.transform, metrics: eval.metrics }
 
-  serve:
-    use: std/serve.http
-    in: { package: package.package }
-    with: { port: 8080 }
+serve:                   # optional serving config read by `mallops serve` (not a DAG node)
+  package: package.package
+  host: 127.0.0.1
+  port: 8080
 ```
 
 Rules:
-- `use` references a block by `namespace/name` (`std/…` built-in, `plugin/…` installed plugin, `wasm:path.wasm`, `grpc:host:port`).
+- `blocks:` defines the finite batch DAG executed by `mallops run`. Long-running serving lives in the optional top-level `serve:` section (read by `mallops serve`, never started by `mallops run`).
+- `use` references a block by `namespace/name` (`std/…` built-in in v0.1; `plugin/…`, `wasm:path.wasm`, and `grpc:host:port` are reserved for post-v0.1 plugin runtimes and fail with a clear error in v0.1).
 - `in` wires named inputs to `<block>.<output>`; this defines the DAG. Cycles are rejected.
-- `with` is block-specific config, validated against the block's JSON schema.
-- Values may reference environment variables `${env:NAME}` and secrets `${secret:NAME}`; secrets are never written to lineage.
-- A JSON Schema for the file is generated from Rust types (`schemars`) and published for editor completion.
+- `with` is block-specific config, validated by `Block::validate_config` (using `serde` in v0.1; optional JSON Schema validation behind the `schema-validate` feature). Each block also supports `cache: false` to bypass caching.
+- Values may reference environment variables `${env:NAME}` (resolved into `config` and included in `config_hash`) and secrets `${secret:NAME}` (resolved on demand via `MALLOPS_SECRET_<NAME>` in v0.1 into a redacted `Secret`, never written to `config.json`, cache keys, logs, or lineage).
+- A JSON Schema for `mallops.yaml` can be generated via the optional `schema` feature (`schemars`) for editor completion.
 
 ## 6. Artifact contract
 
@@ -212,32 +223,48 @@ Rules:
 
 ```json
 {
+  "schema_version": 1,
   "kind": "model",
   "format": "pickle",
   "flavor": "sklearn-pickle",
-  "signature": { "inputs": [{"name": "age", "dtype": "f64"}], "outputs": [{"name": "churned", "dtype": "f64"}] },
+  "io_schema": { "inputs": [{"name": "age", "dtype": "f64"}], "outputs": [{"name": "churned", "dtype": "f64"}] },
   "metadata": { "framework": "scikit-learn", "framework_version": "1.6.0" },
-  "produced_by": { "run": "01J…", "block": "model" },
   "parents": ["<hash>", "<hash>"]
 }
 ```
 
+Per-run provenance (`run`, `node`) is **not** part of `manifest.json`; it is recorded in `LineageEvent::ArtifactProduced` so identical deterministic runs produce identical `ArtifactId`s ([ADR-0007](adr/0007-core-contracts-revision.md)). Cryptographic signatures (`FR-PKG-3`, v0.3) are stored alongside artifacts rather than inside `manifest.json`.
+
+**Canonical `ArtifactId` encoding (`v1`):**
+1. Initialize a BLAKE3 keyed hasher with `blake3::derive_key("mallops artifact v1")`.
+2. Serialize `Manifest` as canonical JSON (object keys sorted lexicographically, `parents` sorted lexicographically) and hash `u64::to_le_bytes(len) || manifest_json_bytes`.
+3. Collect all payload files via validated `RelPath` (relative UTF-8 POSIX paths with `/` separators, no `..`, no symlinks) sorted bytewise; hash `u64::to_le_bytes(file_count)` followed by `len(path) || path || len(content) || blake3(content)` for each file (all lengths as `u64` little-endian).
+4. Encode the 32-byte digest as 64 lowercase hexadecimal characters.
+
 | `kind` | Typical `format` values | Notes |
 |---|---|---|
 | `dataset` | `parquet`, `arrow-ipc`, `csv`, `json`, `images`, `tfrecord`, any | Arrow/Parquet is the interchange default for std blocks only |
-| `features` | as dataset | plus optional fitted `transform` artifact |
+| `features` | as dataset | preprocessed feature splits |
+| `transform` | `json`, `bin`, `pickle`, any | fitted preprocessor (scaler, imputer, encoder…) reused by `package` and `serve` |
 | `model` | `onnx`, `safetensors`, `torchscript`, `pickle`, `joblib`, `gguf`, `xgboost-json`, `savedmodel`, any | `flavor` selects the predictor |
 | `metrics` | `json` | key → number map + optional plots |
 | `package` | `dir`, `oci` | model + transforms + manifest |
 | `blob` | any | escape hatch |
 
-Inputs and outputs of blocks declare the accepted `kind` and optionally accepted `format`s / `flavor`s; `mallops validate` checks compatibility before running.
+**Model flavor code-execution safety:**
+
+| Flavor / format | Executes code on load? | Serving default |
+|---|---|---|
+| `onnx`, `safetensors`, `linfa-*`, `xgboost-json`, `gguf`, `skops` | No | Allowed |
+| `pickle`, `joblib`, `sklearn-pickle`, `torchscript` | **Yes** | Refused unless `--trust-unsafe-flavors` |
+
+Inputs and outputs of blocks declare the accepted `kind` and optionally accepted `format`s / `flavor`s; `mallops validate` checks compatibility before running (using `Block::resolve_ports` when ports depend on `with:` config).
 
 ## 7. Roadmap
 
 | Version | Scope |
 |---|---|
-| **v0.1** | `mallops-core` (Block trait, artifacts, `ArtifactStore` + local/memory, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `serve`), std blocks: ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, serve http |
+| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, HTTP serving) |
 | v0.2 | remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry & versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging |
 | v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy |
 | v0.4 | `mallops-edge`, federated learning, fleet deploy, distributed monitoring |

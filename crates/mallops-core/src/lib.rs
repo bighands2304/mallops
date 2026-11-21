@@ -2,11 +2,8 @@
 //!
 //! See `docs/SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/adr/0007-core-contracts-revision.md`.
 
-pub mod artifact;
-pub mod error;
+mod artifact;
+mod error;
 
-pub use artifact::{
-    ARTIFACT_ID_V1_CONTEXT, Artifact, ArtifactId, ArtifactKind, Digest, Manifest, PayloadFile,
-    RelPath,
-};
+pub use artifact::{Artifact, ArtifactId, ArtifactKind, Digest, Manifest, PayloadFile, RelPath};
 pub use error::Error;

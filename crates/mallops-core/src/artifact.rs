@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use crate::Error;
 
 /// Domain-separation context string for canonical [`ArtifactId`] v1 hashing.
-pub const ARTIFACT_ID_V1_CONTEXT: &str = "mallops artifact v1";
+const ARTIFACT_ID_V1_CONTEXT: &str = "mallops artifact v1";
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -65,15 +65,6 @@ fn fmt_lowercase_hex(bytes: &[u8; 32], f: &mut fmt::Formatter<'_>) -> fmt::Resul
     Ok(())
 }
 
-fn to_lowercase_hex(bytes: &[u8; 32]) -> String {
-    let mut hex = String::with_capacity(Digest::HEX_LEN);
-    for &byte in bytes {
-        hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        hex.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    hex
-}
-
 fn write_json_string(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
@@ -119,7 +110,8 @@ fn write_canonical_value(out: &mut String, value: &serde_json::Value) {
         }
         serde_json::Value::Object(map) => {
             let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            // `serde_json`'s `preserve_order` feature may be enabled by feature unification.
+            entries.sort_unstable_by_key(|(a, _)| *a);
             out.push('{');
             for (idx, (key, val)) in entries.into_iter().enumerate() {
                 if idx > 0 {
@@ -166,7 +158,7 @@ impl Digest {
     /// Encodes the digest as 64 lowercase hexadecimal characters.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        to_lowercase_hex(&self.0)
+        self.to_string()
     }
 }
 
@@ -196,7 +188,7 @@ impl FromStr for Digest {
 
 impl Serialize for Digest {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_hex())
+        serializer.collect_str(self)
     }
 }
 
@@ -236,12 +228,6 @@ impl schemars::JsonSchema for Digest {
 pub struct ArtifactId(Digest);
 
 impl ArtifactId {
-    /// Creates an [`ArtifactId`] from a validated 32-byte [`Digest`].
-    #[must_use]
-    pub const fn from_digest(digest: Digest) -> Self {
-        Self(digest)
-    }
-
     /// Creates an [`ArtifactId`] from its raw 32-byte digest.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
@@ -272,16 +258,26 @@ impl ArtifactId {
     /// Canonical `ArtifactId` v1 framing (ADR-0007 D1 / `SPEC.md` §6):
     /// 1. Domain-separated BLAKE3 derive-key hasher with context `"mallops artifact v1"`.
     /// 2. `u64::to_le_bytes(manifest_bytes.len()) || manifest_bytes`, where
-    ///    `manifest_bytes` is the canonical sorted-key JSON encoding of `manifest`
-    ///    with `parents` sorted lexicographically.
+    ///    `manifest_bytes` is the canonical compact JSON encoding of `manifest`
+    ///    (keys sorted by UTF-8 byte order, numbers in `serde_json` format, not
+    ///    RFC 8785, `parents` sorted lexicographically and deduplicated).
     /// 3. `u64::to_le_bytes(file_count)` followed by each file sorted bytewise
     ///    by its validated [`RelPath`]:
     ///    `u64::to_le_bytes(path.len()) || path || u64::to_le_bytes(content_len) || blake3(content)`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPath`] if `files` contains duplicate [`RelPath`] entries.
+    /// Returns [`Error::UnsupportedSchemaVersion`] if `manifest.schema_version`
+    /// does not equal [`Manifest::SCHEMA_VERSION`], or [`Error::InvalidPath`] if
+    /// `files` contains duplicate [`RelPath`] entries.
     pub fn compute(manifest: &Manifest, files: &[PayloadFile]) -> Result<Self, Error> {
+        if manifest.schema_version != Manifest::SCHEMA_VERSION {
+            return Err(Error::UnsupportedSchemaVersion {
+                found: manifest.schema_version,
+                expected: Manifest::SCHEMA_VERSION,
+            });
+        }
+
         let mut sorted: Vec<&PayloadFile> = files.iter().collect();
         sorted.sort_by(|a, b| a.path.as_str().as_bytes().cmp(b.path.as_str().as_bytes()));
 
@@ -318,7 +314,9 @@ impl ArtifactId {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPath`] if `files` contains duplicate [`RelPath`] entries.
+    /// Returns [`Error::UnsupportedSchemaVersion`] if `manifest.schema_version`
+    /// does not equal [`Manifest::SCHEMA_VERSION`], or [`Error::InvalidPath`] if
+    /// `files` contains duplicate [`RelPath`] entries.
     pub fn compute_from_bytes<'a, I>(manifest: &Manifest, files: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = (RelPath, &'a [u8])>,
@@ -328,12 +326,6 @@ impl ArtifactId {
             .map(|(path, content)| PayloadFile::from_bytes(path, content))
             .collect();
         Self::compute(manifest, &entries)
-    }
-}
-
-impl From<Digest> for ArtifactId {
-    fn from(digest: Digest) -> Self {
-        Self(digest)
     }
 }
 
@@ -369,7 +361,7 @@ impl FromStr for ArtifactId {
 
 impl Serialize for ArtifactId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_hex())
+        serializer.collect_str(self)
     }
 }
 
@@ -646,6 +638,7 @@ fn io_schema_absent(value: &Option<serde_json::Value>) -> bool {
 /// deterministic runs hash to the same [`ArtifactId`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Manifest {
     /// Manifest schema version (currently [`Manifest::SCHEMA_VERSION`]).
@@ -728,9 +721,10 @@ impl Manifest {
         self
     }
 
-    /// Serializes this manifest as canonical compact JSON with lexicographically
-    /// sorted object keys (at every nesting level) and lexicographically sorted
-    /// `parents`.
+    /// Serializes this manifest as canonical compact JSON with object keys sorted
+    /// by UTF-8 byte order (at every nesting level), numbers formatted by
+    /// `serde_json` (not RFC 8785), `io_schema: null` omitted as absent, and
+    /// `parents` sorted lexicographically and deduplicated.
     #[must_use]
     pub fn canonical_json(&self) -> Vec<u8> {
         let mut out = String::new();
@@ -782,13 +776,14 @@ impl Manifest {
         push_key(&mut out, "parents");
         let mut sorted_parents = self.parents.clone();
         sorted_parents.sort();
+        sorted_parents.dedup();
         out.push('[');
         for (idx, parent) in sorted_parents.iter().enumerate() {
             if idx > 0 {
                 out.push(',');
             }
             out.push('"');
-            out.push_str(&parent.to_hex());
+            let _ = write!(out, "{parent}");
             out.push('"');
         }
         out.push(']');
@@ -804,12 +799,11 @@ impl Manifest {
 /// An immutable, content-addressed artifact combining its [`ArtifactId`] and [`Manifest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Artifact {
-    /// Validated 32-byte canonical BLAKE3 identifier of this artifact.
-    pub id: ArtifactId,
-    /// Format-agnostic metadata describing this artifact.
-    pub manifest: Manifest,
+    id: ArtifactId,
+    manifest: Manifest,
 }
 
 impl Artifact {
@@ -817,6 +811,18 @@ impl Artifact {
     #[must_use]
     pub const fn new(id: ArtifactId, manifest: Manifest) -> Self {
         Self { id, manifest }
+    }
+
+    /// Returns the content-addressed [`ArtifactId`] of this artifact.
+    #[must_use]
+    pub const fn id(&self) -> ArtifactId {
+        self.id
+    }
+
+    /// Returns a shared reference to this artifact's [`Manifest`].
+    #[must_use]
+    pub const fn manifest(&self) -> &Manifest {
+        &self.manifest
     }
 }
 
@@ -1316,11 +1322,74 @@ mod tests {
             [(RelPath::parse("data.parquet").unwrap(), b"PAR1".as_slice())],
         )
         .unwrap();
-        let artifact = Artifact::new(id, manifest);
+        let artifact = Artifact::new(id, manifest.clone());
+        assert_eq!(artifact.id(), id);
+        assert_eq!(artifact.manifest(), &manifest);
 
         let encoded = serde_json::to_string(&artifact).unwrap();
         let decoded: Artifact = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, artifact);
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.manifest(), &manifest);
+
+        // Unknown fields on Artifact must be rejected.
+        let mut with_extra: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        with_extra
+            .as_object_mut()
+            .unwrap()
+            .insert("extra".to_owned(), json!(true));
+        assert!(serde_json::from_value::<Artifact>(with_extra).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_unknown_fields_and_unsupported_schema_version() {
+        let with_produced_by =
+            r#"{"schema_version":1,"kind":"blob","format":"raw","produced_by":{"run":"r1"}}"#;
+        assert!(serde_json::from_str::<Manifest>(with_produced_by).is_err());
+
+        let with_signature = r#"{"schema_version":1,"kind":"blob","format":"raw","signature":{}}"#;
+        assert!(serde_json::from_str::<Manifest>(with_signature).is_err());
+
+        for bad_version in [0, 2, 99] {
+            let mut manifest = Manifest::new(ArtifactKind::Blob, "raw");
+            manifest.schema_version = bad_version;
+
+            let err = ArtifactId::compute(&manifest, &[]).unwrap_err();
+            assert!(matches!(
+                err,
+                Error::UnsupportedSchemaVersion {
+                    found,
+                    expected: Manifest::SCHEMA_VERSION,
+                } if found == bad_version
+            ));
+
+            let err_bytes = ArtifactId::compute_from_bytes(&manifest, []).unwrap_err();
+            assert!(matches!(
+                err_bytes,
+                Error::UnsupportedSchemaVersion {
+                    found,
+                    expected: Manifest::SCHEMA_VERSION,
+                } if found == bad_version
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_json_deduplicates_parents() {
+        let unique =
+            Manifest::new(ArtifactKind::Blob, "raw").with_parents([parent_a(), parent_b()]);
+        let duplicated = Manifest::new(ArtifactKind::Blob, "raw").with_parents([
+            parent_b(),
+            parent_a(),
+            parent_b(),
+            parent_a(),
+        ]);
+
+        assert_eq!(unique.canonical_json(), duplicated.canonical_json());
+        assert_eq!(
+            ArtifactId::compute(&unique, &[]).unwrap(),
+            ArtifactId::compute(&duplicated, &[]).unwrap()
+        );
     }
 
     #[test]

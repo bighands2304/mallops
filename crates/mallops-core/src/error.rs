@@ -17,4 +17,13 @@ pub enum Error {
     /// A [`RelPath`](crate::RelPath) failed validation or was duplicated.
     #[error("invalid relative path: {0}")]
     InvalidPath(String),
+
+    /// A [`Manifest`](crate::Manifest) declared an unsupported `schema_version`.
+    #[error("unsupported manifest schema_version {found}, expected {expected}")]
+    UnsupportedSchemaVersion {
+        /// The unsupported schema version found on the manifest.
+        found: u32,
+        /// The supported schema version ([`Manifest::SCHEMA_VERSION`](crate::Manifest::SCHEMA_VERSION)).
+        expected: u32,
+    },
 }

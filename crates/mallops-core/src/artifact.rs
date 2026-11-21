@@ -403,20 +403,44 @@ impl schemars::JsonSchema for ArtifactId {
 
 /// Validated non-empty UTF-8 POSIX relative path using `/` separators.
 ///
-/// Guarantees that the path contains no NUL bytes, backslashes, leading or
-/// trailing slashes, empty segments, `.` or `..` traversal segments, or
-/// Windows drive prefixes.
+/// Guarantees that the path contains no NUL or ASCII control bytes (`0x00`–`0x1F`),
+/// backslashes, colons (`:`), leading or trailing slashes, empty segments, `.` or
+/// `..` traversal segments, segments ending with `.` or ASCII space, or Windows
+/// reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`,
+/// case-insensitive, with or without an extension).
+///
+/// Comparisons and ordering are strictly bytewise over UTF-8 with no case folding
+/// or Unicode normalization.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelPath(String);
+
+fn is_windows_reserved_name(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or(segment);
+    if stem.len() == 3 {
+        stem.eq_ignore_ascii_case("CON")
+            || stem.eq_ignore_ascii_case("PRN")
+            || stem.eq_ignore_ascii_case("AUX")
+            || stem.eq_ignore_ascii_case("NUL")
+    } else if stem.len() == 4 {
+        let bytes = stem.as_bytes();
+        let is_com = bytes[..3].eq_ignore_ascii_case(b"COM");
+        let is_lpt = bytes[..3].eq_ignore_ascii_case(b"LPT");
+        (is_com || is_lpt) && matches!(bytes[3], b'1'..=b'9')
+    } else {
+        false
+    }
+}
 
 impl RelPath {
     /// Parses and validates a relative POSIX path.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPath`] if `input` is empty, contains NUL bytes
-    /// or backslashes, starts with `/` or a Windows drive prefix (e.g. `C:`),
-    /// ends with `/`, or contains empty, `.`, or `..` segments.
+    /// Returns [`Error::InvalidPath`] if `input` is empty, contains NUL or ASCII
+    /// control bytes (`0x00`–`0x1F`), backslashes, or colons (`:`), starts or ends
+    /// with `/`, or contains empty, `.`, or `..` segments, segments ending with `.`
+    /// or space, or Windows reserved device names (case-insensitive, bare or with
+    /// an extension).
     pub fn parse(input: &str) -> Result<Self, Error> {
         if input.is_empty() {
             return Err(Error::InvalidPath("path must not be empty".to_owned()));
@@ -426,20 +450,24 @@ impl RelPath {
                 "path must not contain NUL bytes".to_owned(),
             ));
         }
+        if input.bytes().any(|b| b < 0x20) {
+            return Err(Error::InvalidPath(
+                "path must not contain ASCII control characters (0x01-0x1F)".to_owned(),
+            ));
+        }
         if input.contains('\\') {
             return Err(Error::InvalidPath(
                 "path must use '/' separators and must not contain '\\'".to_owned(),
             ));
         }
-        let bytes = input.as_bytes();
-        if bytes[0] == b'/' {
+        if input.contains(':') {
             return Err(Error::InvalidPath(format!(
-                "path must be relative (leading '/'): {input}"
+                "path must not contain ':': {input}"
             )));
         }
-        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        if input.as_bytes()[0] == b'/' {
             return Err(Error::InvalidPath(format!(
-                "path must not contain a Windows drive prefix: {input}"
+                "path must be relative (leading '/'): {input}"
             )));
         }
 
@@ -452,6 +480,16 @@ impl RelPath {
             if segment == "." || segment == ".." {
                 return Err(Error::InvalidPath(format!(
                     "path must not contain '{segment}' segments: {input}"
+                )));
+            }
+            if segment.ends_with('.') || segment.ends_with(' ') {
+                return Err(Error::InvalidPath(format!(
+                    "path segment must not end with '.' or space: {input}"
+                )));
+            }
+            if is_windows_reserved_name(segment) {
+                return Err(Error::InvalidPath(format!(
+                    "path must not contain Windows reserved device name '{segment}': {input}"
                 )));
             }
         }
@@ -598,6 +636,10 @@ impl fmt::Display for ArtifactKind {
     }
 }
 
+fn io_schema_absent(value: &Option<serde_json::Value>) -> bool {
+    matches!(value, None | Some(serde_json::Value::Null))
+}
+
 /// Format-agnostic metadata describing an immutable [`Artifact`].
 ///
 /// Per-run provenance (`run`, `node`) is intentionally omitted so identical
@@ -616,7 +658,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flavor: Option<String>,
     /// Optional input/output schema describing data or model signatures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "io_schema_absent")]
     pub io_schema: Option<serde_json::Value>,
     /// Free-form structured metadata associated with the artifact.
     #[serde(default)]
@@ -712,7 +754,12 @@ impl Manifest {
         push_key(&mut out, "format");
         write_json_string(&mut out, &self.format);
 
-        if let Some(ref io_schema) = self.io_schema {
+        let io_schema = if io_schema_absent(&self.io_schema) {
+            None
+        } else {
+            self.io_schema.as_ref()
+        };
+        if let Some(io_schema) = io_schema {
             push_key(&mut out, "io_schema");
             write_canonical_value(&mut out, io_schema);
         }
@@ -1106,8 +1153,13 @@ mod tests {
             "a/b/c.parquet",
             ".hidden",
             "dir/.gitignore",
+            "v1.0/foo..bar",
             "v1.0/foo..bar.safetensors",
             "données/modèle.bin",
+            "console.txt",
+            "COM0",
+            "LPT0.log",
+            "a.con",
         ];
 
         for case in valid_cases {
@@ -1122,8 +1174,53 @@ mod tests {
         }
 
         let invalid_cases = [
-            "", "..", "../a", "a/../b", "a/..", ".", "./a", "a/./b", "a/.", "/abs", "/", "a//b",
-            "a/", r"C:\x", "C:/x", "c:foo", r"a\b", "a\0b", "\0",
+            "",
+            "..",
+            "../a",
+            "a/../b",
+            "a/..",
+            ".",
+            "./a",
+            "a/./b",
+            "a/.",
+            "/abs",
+            "/",
+            "a//b",
+            "a/",
+            r"C:\x",
+            "C:/x",
+            "c:foo",
+            "ab:c",
+            "model.bin:ads",
+            ":leading",
+            "dir/sub:stream",
+            r"a\b",
+            "a\0b",
+            "\0",
+            "a\u{01}b",
+            "a\tb",
+            "a\nb",
+            "a\rb",
+            "a\u{1f}b",
+            ".. ",
+            "a/.. ",
+            "a.",
+            "a ",
+            "a./b",
+            "a /b",
+            "...",
+            "CON",
+            "con",
+            "Prn",
+            "AUX",
+            "NUL",
+            "nul.txt",
+            "dir/Con.tar.gz",
+            "COM1",
+            "com9.bin",
+            "LPT1",
+            "lpt9.log",
+            "a/lPt5.json/b",
         ];
 
         for case in invalid_cases {
@@ -1138,6 +1235,29 @@ mod tests {
                 serde_json::from_str::<RelPath>(&json_str).is_err(),
                 "serde accepted invalid RelPath {case:?}"
             );
+        }
+    }
+
+    #[test]
+    fn manifest_io_schema_null_preserves_artifact_id_across_round_trip() {
+        let with_null_builder =
+            Manifest::new(ArtifactKind::Blob, "raw").with_io_schema(serde_json::Value::Null);
+        let mut with_null_field = Manifest::new(ArtifactKind::Blob, "raw");
+        with_null_field.io_schema = Some(serde_json::Value::Null);
+        let without_schema = Manifest::new(ArtifactKind::Blob, "raw");
+
+        let expected_id = ArtifactId::compute(&without_schema, &[]).unwrap();
+
+        for manifest in [with_null_builder, with_null_field] {
+            let id_before = ArtifactId::compute(&manifest, &[]).unwrap();
+            let serialized = serde_json::to_vec(&manifest).unwrap();
+            let deserialized: Manifest = serde_json::from_slice(&serialized).unwrap();
+            let id_after = ArtifactId::compute(&deserialized, &[]).unwrap();
+
+            assert_eq!(id_before, id_after);
+            assert_eq!(id_before, expected_id);
+            assert_eq!(manifest.canonical_json(), deserialized.canonical_json());
+            assert_eq!(deserialized, without_schema);
         }
     }
 

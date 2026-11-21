@@ -13,7 +13,9 @@ permissions:
 jobs:
   build:
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      exists: ${{ steps.cli.outputs.exists }}
     strategy:
       fail-fast: false
       matrix:
@@ -39,19 +41,54 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - name: Build and upload
+      - name: Build archive
+        id: build
         if: steps.cli.outputs.exists == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           NAME: mallops-${{ inputs.tag }}-${{ matrix.target }}
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+          RUNNER_OS: ${{ runner.os }}
         run: |
-          cargo build --release --locked -p mallops-cli --target ${{ matrix.target }}
+          set -euo pipefail
+          cargo build --release --locked -p mallops-cli --target "$TARGET"
           mkdir "$NAME"
-          cp "target/${{ matrix.target }}/release/mallops${{ matrix.ext }}" LICENSE README.md "$NAME/"
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            7z a "$NAME.zip" "$NAME" && asset="$NAME.zip"
+          cp "target/$TARGET/release/mallops${EXT:-}" LICENSE README.md "$NAME/"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z a "$NAME.zip" "$NAME"
+            asset="$NAME.zip"
           else
-            tar czf "$NAME.tar.gz" "$NAME" && asset="$NAME.tar.gz"
+            tar czf "$NAME.tar.gz" "$NAME"
+            asset="$NAME.tar.gz"
           fi
-          gh release upload "${{ inputs.tag }}" "$asset" --clobber
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.cli.outputs.exists == 'true'
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ steps.build.outputs.asset }}
+          if-no-files-found: error
+
+  upload:
+    needs: build
+    if: needs.build.outputs.exists == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+      - name: Generate checksums and upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          LC_ALL=C sha256sum -- * | sort -k2 > ../SHA256SUMS
+          mv ../SHA256SUMS ./SHA256SUMS
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" ./*

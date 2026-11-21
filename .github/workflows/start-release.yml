@@ -71,7 +71,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           gh auth setup-git
           git switch -c "release/$V"
-          git commit -am "chore(release): v$V"
+          git commit -sam "chore(release): v$V"
           git push -u origin "release/$V"
           gh pr create --base main --head "release/$V" \
             --title "chore(release): v$V" \

@@ -4,20 +4,23 @@ on:
   push:
     branches: ["release/**"]
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: prerelease-${{ github.ref }}
 
 jobs:
   tag:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.t.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Create next beta pre-release
         id: t
         env:
@@ -32,6 +35,8 @@ jobs:
 
   binaries:
     needs: tag
+    permissions:
+      contents: write
     uses: ./.github/workflows/build-binaries.yml
     with:
       tag: ${{ needs.tag.outputs.tag }}

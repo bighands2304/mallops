@@ -1,3 +1,9 @@
-//! Core of mallops: blocks, artifacts and the pipeline runtime.
+//! Core of `mallops`: format-agnostic artifact model, error types, and core contracts.
 //!
-//! Nothing here yet — see `docs/SPEC.md` and `docs/ARCHITECTURE.md`.
+//! See `docs/SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/adr/0007-core-contracts-revision.md`.
+
+mod artifact;
+mod error;
+
+pub use artifact::{Artifact, ArtifactId, ArtifactKind, Digest, Manifest, PayloadFile, RelPath};
+pub use error::Error;

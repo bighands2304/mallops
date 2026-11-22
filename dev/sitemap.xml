@@ -2,50 +2,50 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/ARCHITECTURE/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/SPEC/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/contributing/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0001-modular-workspace/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0002-arrow-default-interchange/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0003-plugins-wasm-and-grpc/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0004-agnostic-artifacts-and-flavors/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0005-gitflow-and-release/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0006-store-and-lineage-contracts/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
     <url>
          <loc>https://bighands2304.github.io/mallops/dev/adr/0007-core-contracts-revision/</loc>
-         <lastmod>2026-11-21</lastmod>
+         <lastmod>2026-11-22</lastmod>
     </url>
 </urlset>

@@ -1194,7 +1194,7 @@
 <span class="cp">#[non_exhaustive]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">Error</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="n">Config</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
-<span class="w">    </span><span class="n">Validation</span><span class="p">(</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ValidationError</span><span class="o">&gt;</span><span class="p">),</span><span class="w">        </span><span class="c1">// v0.1 (#3): `Validation(String)`; `Vec&lt;ValidationError&gt;` arriva con #6</span>
+<span class="w">    </span><span class="n">Validation</span><span class="p">(</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ValidationError</span><span class="o">&gt;</span><span class="p">),</span><span class="w">        </span><span class="c1">// all problems of one pass; ValidationError { path, message }</span>
 <span class="w">    </span><span class="n">Store</span><span class="p">(</span><span class="n">StoreError</span><span class="p">),</span>
 <span class="w">    </span><span class="n">Runtime</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span>
 <span class="w">    </span><span class="n">Cancelled</span><span class="p">,</span>
@@ -1205,6 +1205,7 @@
 <span class="p">}</span>
 </code></pre></div>
 <ul>
+<li><strong>Validation</strong>: <code>PipelineConfig::validate(&amp;BlockRegistry) -&gt; Result&lt;ValidatedPipeline, Error&gt;</code> checks DAG, resolved ports, <code>with:</code> configs and <code>serve.package</code> in one pass without running any block, aggregating <code>ValidationError { path, message }</code> (dotted paths such as <code>blocks.eval.in.test</code>, see SPEC §5). <code>ValidatedPipeline</code> holds nodes in topological order (ties by id), each with its <code>Arc&lt;dyn Block&gt;</code>, <code>BlockConfig</code> and <code>ResolvedPorts</code>. <code>PipelineBuilder</code> builds the same <code>PipelineConfig</code> in Rust, available without the <code>yaml</code> feature, and <code>build(&amp;registry)</code> goes through the same validator.</li>
 <li><strong>Secrets (<code>Secret</code>)</strong>: opaque newtype whose <code>Debug</code>/<code>Display</code> renders <code>"***"</code> and which does not implement <code>Serialize</code>. Resolved on demand via <code>ctx.secret("NAME")</code> (backed in v0.1 by <code>MALLOPS_SECRET_&lt;NAME&gt;</code> env vars) and excluded from <code>config.json</code>, cache keys, <code>config_hash</code>, logs, and lineage.</li>
 <li><strong><code>Predictor</code> placement</strong>: in v0.1, the minimal <code>Predictor</code> / <code>LoadedPredictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>; see <a href="#7-serving">§7 Serving</a>) and will be promoted to <code>mallops-core</code> before 1.0 once validated across backends (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 </ul>
@@ -1216,7 +1217,7 @@
     participant Store
     participant B as Block
     CLI-&gt;&gt;Core: run(mallops.yaml)
-    Core-&gt;&gt;Core: parse, validate config &amp; resolved ports, topo-sort
+    Core-&gt;&gt;Core: parse, validate config &amp; resolved ports, topo-sort (PipelineConfig::validate)
     loop each ready node (parallel when independent)
         Core-&gt;&gt;B: cache_policy(ctx)
         Core-&gt;&gt;Core: cache key = hash(block id, version, config_hash, input ids, extra_hash)

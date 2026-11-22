@@ -32,4 +32,33 @@ pub enum Error {
     /// An [`ArtifactStore`](crate::ArtifactStore) operation failed.
     #[error("artifact store error: {0}")]
     Store(#[from] StoreError),
+
+    /// A pipeline or block configuration is malformed.
+    #[error("config error: {0}")]
+    Config(String),
+
+    /// A pipeline, port wiring or block input failed validation.
+    #[error("validation error: {0}")]
+    Validation(String),
+
+    /// The runtime failed while executing a pipeline.
+    #[error("runtime error: {0}")]
+    Runtime(String),
+
+    /// The run was cancelled through its cancel token.
+    #[error("cancelled")]
+    Cancelled,
+
+    /// A secret could not be resolved. The message never contains the secret value.
+    #[error("secret error: {0}")]
+    Secret(String),
+
+    /// A block failed while running.
+    #[error("block `{id}` failed: {source}")]
+    Block {
+        /// Id of the failing block (e.g. `std/ingest.csv`).
+        id: String,
+        /// Underlying error reported by the block.
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }

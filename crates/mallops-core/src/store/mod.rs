@@ -14,6 +14,12 @@ use std::pin::Pin;
 
 use thiserror::Error;
 
+#[cfg(test)]
+mod conformance;
+mod memory;
+
+pub use memory::MemoryStore;
+
 use crate::{Artifact, ArtifactId, Error, Manifest, RelPath};
 
 /// A heap-allocated, pinned, `Send` future used for dyn-compatible async trait methods.

@@ -8,4 +8,4 @@ pub mod store;
 
 pub use artifact::{Artifact, ArtifactId, ArtifactKind, Digest, Manifest, PayloadFile, RelPath};
 pub use error::Error;
-pub use store::{ArtifactStore, BoxFuture, PayloadSource, StoreError};
+pub use store::{ArtifactStore, BoxFuture, MemoryStore, PayloadSource, StoreError};

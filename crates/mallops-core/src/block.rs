@@ -45,62 +45,69 @@ pub enum Stage {
     Custom,
 }
 
-/// A named block input or output with the artifact `kind`, and optionally `format` and `flavor`.
+/// A named block input or output with the artifact `kind`, and optionally accepted `formats` and `flavors`.
 ///
-/// On an input port, `format`/`flavor` of `None` mean "any". On an output port they
-/// describe what the block produces.
+/// On an input port, empty `formats`/`flavors` mean "any" (SPEC §6) and several values
+/// mean "any of these". On an output port they describe what the block produces.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Port {
     /// Port name, unique per direction within a block.
     pub name: Cow<'static, str>,
     /// Artifact kind carried by this port.
     pub kind: ArtifactKind,
-    /// Accepted/produced payload format, if constrained.
-    pub format: Option<Cow<'static, str>>,
-    /// Accepted/produced flavor, if constrained.
-    pub flavor: Option<Cow<'static, str>>,
+    /// Accepted/produced payload formats; empty means unconstrained.
+    pub formats: Vec<Cow<'static, str>>,
+    /// Accepted/produced flavors; empty means unconstrained.
+    pub flavors: Vec<Cow<'static, str>>,
+    /// Whether the input must be provided (default `true`); a node whose required
+    /// input comes from a skipped node is skipped too (ADR-0007 D4).
+    pub required: bool,
+}
+
+/// `true` if every produced value is accepted; empty `accepted` accepts anything,
+/// while an empty `produced` never satisfies a constraint.
+fn covers(accepted: &[Cow<'static, str>], produced: &[&str]) -> bool {
+    accepted.is_empty()
+        || (!produced.is_empty() && produced.iter().all(|p| accepted.iter().any(|a| a == p)))
 }
 
 impl Port {
-    /// Creates a port accepting any format and flavor of `kind`.
+    /// Creates a required port accepting any format and flavor of `kind`.
     #[must_use]
     pub fn new(name: impl Into<Cow<'static, str>>, kind: ArtifactKind) -> Self {
         Self {
             name: name.into(),
             kind,
-            format: None,
-            flavor: None,
+            formats: Vec::new(),
+            flavors: Vec::new(),
+            required: true,
         }
     }
 
-    /// Constrains the port to a payload `format`.
+    /// Adds an accepted/produced payload `format`.
     #[must_use]
     pub fn with_format(mut self, format: impl Into<Cow<'static, str>>) -> Self {
-        self.format = Some(format.into());
+        self.formats.push(format.into());
         self
     }
 
-    /// Constrains the port to a `flavor`.
+    /// Adds an accepted/produced `flavor`.
     #[must_use]
     pub fn with_flavor(mut self, flavor: impl Into<Cow<'static, str>>) -> Self {
-        self.flavor = Some(flavor.into());
+        self.flavors.push(flavor.into());
         self
     }
 
-    /// Returns `true` if an artifact described by `kind`/`format`/`flavor` satisfies this port.
-    ///
-    /// `kind` must be equal; a constrained `format`/`flavor` must match exactly
-    /// (a missing value never satisfies a constraint).
+    /// Marks the port as optional (see [`Inputs::try_get`]).
     #[must_use]
-    pub fn accepts_parts(
-        &self,
-        kind: ArtifactKind,
-        format: Option<&str>,
-        flavor: Option<&str>,
-    ) -> bool {
-        self.kind == kind
-            && self.format.as_deref().is_none_or(|f| format == Some(f))
-            && self.flavor.as_deref().is_none_or(|f| flavor == Some(f))
+    pub fn optional(mut self) -> Self {
+        self.required = false;
+        self
+    }
+
+    fn accepts_parts(&self, kind: ArtifactKind, formats: &[&str], flavors: &[&str]) -> bool {
+        self.kind == kind && covers(&self.formats, formats) && covers(&self.flavors, flavors)
     }
 
     /// Returns `true` if an artifact with this `manifest` satisfies this port.
@@ -108,19 +115,19 @@ impl Port {
     pub fn accepts_manifest(&self, manifest: &Manifest) -> bool {
         self.accepts_parts(
             manifest.kind,
-            Some(&manifest.format),
-            manifest.flavor.as_deref(),
+            &[&manifest.format],
+            manifest.flavor.as_deref().as_slice(),
         )
     }
 
     /// Returns `true` if an output port `output` can be wired into this input port.
+    ///
+    /// Every format/flavor the output may produce must be accepted.
     #[must_use]
     pub fn accepts(&self, output: &Port) -> bool {
-        self.accepts_parts(
-            output.kind,
-            output.format.as_deref(),
-            output.flavor.as_deref(),
-        )
+        let formats: Vec<&str> = output.formats.iter().map(|f| &**f).collect();
+        let flavors: Vec<&str> = output.flavors.iter().map(|f| &**f).collect();
+        self.accepts_parts(output.kind, &formats, &flavors)
     }
 }
 
@@ -210,6 +217,8 @@ impl From<&BlockSpec> for ResolvedPorts {
 }
 
 /// Owned payload of an [`OutputDraft`]; mirrors [`PayloadSource`] without borrows.
+///
+/// The runtime (#7) must confine `File`/`Dir` paths inside `ctx.workdir()` before `put`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DraftPayload {
@@ -287,18 +296,6 @@ impl OutputDrafts {
     pub fn iter(&self) -> impl Iterator<Item = (&str, &OutputDraft)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
-
-    /// Number of drafts.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns `true` if there are no drafts.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 impl IntoIterator for OutputDrafts {
@@ -326,7 +323,7 @@ pub enum BlockOutcome {
 }
 
 /// How the runtime may cache a block's result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CachePolicy {
     /// Cacheable; `extra_hash` (e.g. of local files or scripts) is mixed into the cache key.
@@ -373,7 +370,7 @@ impl Inputs {
             .ok_or_else(|| Error::Validation(format!("missing input port `{port}`")))
     }
 
-    /// Returns the artifact bound to `port`, if any (for optional inputs).
+    /// Returns the artifact bound to `port`, if any (for inputs declared [`Port::optional`]).
     #[must_use]
     pub fn try_get(&self, port: &str) -> Option<&Artifact> {
         self.0.get(port)
@@ -397,8 +394,10 @@ impl Inputs {
 /// struct Hello(BlockSpec);
 /// impl Block for Hello {
 ///     fn spec(&self) -> &BlockSpec { &self.0 }
-///     fn run(&self, _ctx: &Context, _inputs: Inputs) -> BoxFuture<'_, Result<BlockOutcome, Error>> {
-///         Box::pin(async {
+///     fn run<'a>(&'a self, ctx: &'a Context, _inputs: Inputs)
+///         -> BoxFuture<'a, Result<BlockOutcome, Error>> {
+///         Box::pin(async move {
+///             if ctx.cancel().is_cancelled() { return Err(Error::Cancelled) }
 ///             let m = Manifest::new(ArtifactKind::Blob, "text");
 ///             let d = OutputDraft::new(m, DraftPayload::Bytes(b"hi".to_vec()));
 ///             Ok(BlockOutcome::Produced(OutputDrafts::new().with("out", d)))
@@ -412,7 +411,7 @@ impl Inputs {
 ///     serde_json::Value::Null, CancelSource::new().token(), Arc::new(MemorySecretProvider::default()));
 /// let rt = tokio::runtime::Runtime::new().unwrap();
 /// let out = rt.block_on(Hello(spec).run(&ctx, Inputs::new())).unwrap();
-/// assert!(matches!(out, BlockOutcome::Produced(d) if d.len() == 1));
+/// assert!(matches!(out, BlockOutcome::Produced(d) if d.get("out").is_some()));
 /// ```
 pub trait Block: Send + Sync {
     /// Static description of the block.
@@ -441,12 +440,24 @@ pub trait Block: Send + Sync {
     /// # Errors
     ///
     /// An [`Error`] if the policy cannot be determined.
-    fn cache_policy(&self, _ctx: &Context) -> BoxFuture<'_, Result<CachePolicy, Error>> {
+    fn cache_policy<'a>(&'a self, _ctx: &'a Context) -> BoxFuture<'a, Result<CachePolicy, Error>> {
         Box::pin(async { Ok(CachePolicy::default()) })
     }
 
     /// Runs the block and returns output drafts for the runtime to commit.
-    fn run(&self, ctx: &Context, inputs: Inputs) -> BoxFuture<'_, Result<BlockOutcome, Error>>;
+    ///
+    /// Long-running blocks should check `ctx.cancel()` periodically and return
+    /// [`Error::Cancelled`] once it is cancelled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Cancelled`] on cancellation, otherwise any [`Error`] describing why the
+    /// block failed (the runtime marks the node failed and cancels its descendants).
+    fn run<'a>(
+        &'a self,
+        ctx: &'a Context,
+        inputs: Inputs,
+    ) -> BoxFuture<'a, Result<BlockOutcome, Error>>;
 }
 
 #[cfg(test)]
@@ -496,6 +507,28 @@ mod tests {
     }
 
     #[test]
+    fn port_accepts_any_of_several_formats() {
+        let p = Port::new("in", ArtifactKind::Model)
+            .with_format("onnx")
+            .with_format("safetensors");
+        assert!(p.accepts_manifest(&manifest(None)));
+        let st = Manifest::new(ArtifactKind::Model, "safetensors");
+        assert!(p.accepts_manifest(&st));
+        assert!(!p.accepts_manifest(&Manifest::new(ArtifactKind::Model, "pt")));
+        assert!(p.accepts(&Port::new("o", ArtifactKind::Model).with_format("onnx")));
+        let both = Port::new("o", ArtifactKind::Model)
+            .with_format("onnx")
+            .with_format("pt");
+        assert!(!p.accepts(&both));
+    }
+
+    #[test]
+    fn port_required_by_default_and_optional() {
+        assert!(Port::new("in", ArtifactKind::Blob).required);
+        assert!(!Port::new("in", ArtifactKind::Blob).optional().required);
+    }
+
+    #[test]
     fn skipped_outcome_carries_reason_and_outputs() {
         let o = BlockOutcome::Skipped {
             reason: "no new data".into(),
@@ -505,14 +538,13 @@ mod tests {
             panic!("expected Skipped")
         };
         assert_eq!(reason, "no new data");
-        assert!(outputs.is_empty());
+        assert_eq!(outputs, OutputDrafts::new());
     }
 
     #[test]
     fn produced_outcome_drafts_by_port() {
         let draft = OutputDraft::new(manifest(None), DraftPayload::Bytes(b"abc".to_vec()));
         let drafts = OutputDrafts::new().with("model", draft.clone());
-        assert_eq!(drafts.len(), 1);
         assert_eq!(drafts.get("model"), Some(&draft));
         assert_eq!(draft.payload.as_source(), PayloadSource::Bytes(b"abc"));
         assert!(matches!(
@@ -577,11 +609,11 @@ mod tests {
                 vec![Port::new(name.to_string(), ArtifactKind::Blob)],
             ))
         }
-        fn run(
-            &self,
-            _ctx: &Context,
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a Context,
             _inputs: Inputs,
-        ) -> BoxFuture<'_, Result<BlockOutcome, Error>> {
+        ) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
             let skip = self.skip;
             Box::pin(async move {
                 if skip {
@@ -613,7 +645,11 @@ mod tests {
         fn spec(&self) -> &BlockSpec {
             &self.0
         }
-        fn run(&self, _: &Context, _: Inputs) -> BoxFuture<'_, Result<BlockOutcome, Error>> {
+        fn run<'a>(
+            &'a self,
+            _: &'a Context,
+            _: Inputs,
+        ) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
             Box::pin(async { Ok(BlockOutcome::Produced(OutputDrafts::new())) })
         }
     }

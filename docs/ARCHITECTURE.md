@@ -76,7 +76,7 @@ pub struct BlockSpec {
     pub id: Cow<'static, str>,               // "std/train.external"
     pub version: Cow<'static, str>,          // "0.1.0" (included in cache key & lineage)
     pub stage: Stage,                        // Ingest, Preprocess, Train, …
-    pub inputs: Vec<Port>,                   // name + accepted kind/formats/flavors
+    pub inputs: Vec<Port>,                   // name + kind + accepted formats/flavors (empty = any) + required
     pub outputs: Vec<Port>,
     pub config_schema: Option<serde_json::Value>, // decoupled from `schemars`
 }
@@ -97,21 +97,34 @@ pub trait Block: Send + Sync {
     fn spec(&self) -> &BlockSpec;
     fn validate_config(&self, config: &serde_json::Value) -> Result<(), Error> { Ok(()) }
     fn resolve_ports(&self, config: &serde_json::Value) -> Result<ResolvedPorts, Error> { /* default: spec ports */ }
-    fn cache_policy(&self, ctx: &Context) -> Pin<Box<dyn Future<Output = Result<CachePolicy, Error>> + Send + '_>>;
-    fn run(&self, ctx: &Context, inputs: Inputs) -> Pin<Box<dyn Future<Output = Result<BlockOutcome, Error>> + Send + '_>>;
+    // `'a` on self and ctx: the future may use `ctx` (cancel, secrets, config, workdir).
+    fn cache_policy<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<CachePolicy, Error>>;
+    fn run<'a>(&'a self, ctx: &'a Context, inputs: Inputs) -> BoxFuture<'a, Result<BlockOutcome, Error>>;
 }
 
-/// Given to each block during execution (runtime instruments `run()` with a tracing span).
+/// `name` + `kind` + accepted `formats`/`flavors` (empty = any; several = any of them).
+/// `required` defaults to `true`; `Port::optional()` clears it (read with `Inputs::try_get`).
 #[non_exhaustive]
-pub struct Context {
-    pub run_id: RunId,
-    pub workdir: PathBuf,                    // scratch dir, also mounted for external blocks
-    pub store: Arc<dyn ArtifactStore>,
-    pub config: serde_json::Value,           // `with:` with `${env:…}` resolved; NEVER contains secrets
-    pub cancel: CancelToken,                 // cooperative cancellation (`watch::Receiver<bool>`)
-    // plus secret resolver:
-    // pub fn secret(&self, name: &str) -> Result<Secret, Error>
-    // pub fn config_as<T: DeserializeOwned>(&self) -> Result<T, Error>
+pub struct Port { pub name: Cow<'static, str>, pub kind: ArtifactKind,
+    pub formats: Vec<Cow<'static, str>>, pub flavors: Vec<Cow<'static, str>>, pub required: bool }
+
+/// Owned payload of an `OutputDraft` (`PayloadSource` borrows, so it cannot live in a draft).
+/// The runtime must confine `File`/`Dir` paths inside `ctx.workdir()` before `put`.
+#[non_exhaustive]
+pub enum DraftPayload { File(PathBuf), Dir(PathBuf), Bytes(Vec<u8>), Files(BTreeMap<RelPath, Vec<u8>>) }
+
+/// Given to each block during execution (runtime instruments `run()` with a tracing span).
+/// Fields are private; blocks read them through accessors.
+#[non_exhaustive]
+pub struct Context { /* run_id, workdir, store, config, cancel, secrets */ }
+impl Context {
+    pub fn run_id(&self) -> RunId;
+    pub fn workdir(&self) -> &Path;                          // scratch dir, also mounted for external blocks
+    pub fn store(&self) -> &Arc<dyn ArtifactStore>;
+    pub fn config(&self) -> &serde_json::Value;              // `with:` with `${env:…}` resolved; NEVER contains secrets
+    pub fn cancel(&self) -> &CancelToken;                    // cooperative cancellation (`watch::Receiver<bool>`)
+    pub fn secret(&self, name: &str) -> Result<Secret, Error>;
+    pub fn config_as<T: DeserializeOwned>(&self) -> Result<T, Error>;
 }
 // Blocks never touch lineage and never call `store.put()` for outputs:
 // the runtime commits outputs, injects `parents`, validates ports, and emits lineage events.
@@ -128,7 +141,7 @@ pub enum ArtifactKind { Dataset, Features, Transform, Model, Metrics, Package, B
 #[non_exhaustive]
 pub enum Error {
     Config(String),
-    Validation(Vec<ValidationError>),
+    Validation(Vec<ValidationError>),        // v0.1 (#3): `Validation(String)`; `Vec<ValidationError>` arriva con #6
     Store(StoreError),
     Runtime(String),
     Cancelled,

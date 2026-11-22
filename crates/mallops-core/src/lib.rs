@@ -7,6 +7,7 @@ mod block;
 pub mod config;
 mod context;
 mod error;
+mod pipeline;
 mod registry;
 pub mod store;
 
@@ -19,6 +20,7 @@ pub use context::{
     CancelSource, CancelToken, Context, EnvSecretProvider, MemorySecretProvider, RunId, Secret,
     SecretProvider,
 };
-pub use error::Error;
+pub use error::{Error, ValidationError};
+pub use pipeline::{ValidatedNode, ValidatedPipeline};
 pub use registry::{BlockRef, BlockRegistry};
 pub use store::{ArtifactStore, BoxFuture, LocalStore, MemoryStore, PayloadSource, StoreError};

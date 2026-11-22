@@ -147,6 +147,13 @@ impl Runtime {
                     root.display()
                 ))
             })?;
+        // Absolute and canonical even for a relative `workdir_root`, so `ctx.workdir()` is too.
+        let run_path = std::fs::canonicalize(run_dir.path()).map_err(|e| {
+            Error::Runtime(format!(
+                "cannot canonicalize run workdir {}: {e}",
+                run_dir.path().display()
+            ))
+        })?;
         let env = NodeEnv {
             run_id,
             store: Arc::clone(&self.config.store),
@@ -188,14 +195,9 @@ impl Runtime {
                 match gate(node, &index, &results, &env.cancel) {
                     Err((status, reason)) => results[i] = Some(not_run(status, reason)),
                     Ok(inputs) => {
-                        let workdir = run_dir.path().join(node_dir(i, &node.id));
-                        let span = tracing::info_span!(
-                            "node",
-                            id = %node.id,
-                            block = %node.block.spec().id
-                        );
+                        let workdir = run_path.join(format!("{i:04}"));
                         let task = run_node(node.clone(), inputs, workdir, env.clone());
-                        let handle = tasks.spawn(task.instrument(span));
+                        let handle = tasks.spawn(task);
                         task_node.insert(handle.id(), i);
                     }
                 }
@@ -211,10 +213,13 @@ impl Runtime {
                         .with_error(Error::Runtime(format!("node task failed: {e}"))),
                 ),
             };
-            if let Some(&i) = task_node.get(&task) {
+            if let Some(i) = task_node.remove(&task) {
                 results[i] = Some(summary);
             }
         }
+
+        // Off the async thread: removing the run tree can take a while.
+        let _ = tokio::task::spawn_blocking(move || drop(run_dir)).await;
 
         let nodes = nodes
             .iter()
@@ -241,21 +246,6 @@ struct NodeEnv {
 /// `<node>` of a validated `<node>.<port>` reference.
 fn upstream_node(src: &str) -> &str {
     src.split_once('.').map_or(src, |(node, _)| node)
-}
-
-/// Workdir name of node `i`: index prefix (unique) plus the id with unsafe characters replaced.
-fn node_dir(i: usize, id: &str) -> String {
-    let safe: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("{i:04}-{safe}")
 }
 
 fn finished(
@@ -364,8 +354,9 @@ async fn run_node(
     if env.cancel.is_cancelled() {
         return not_run(Status::Cancelled, "run cancelled".into());
     }
+    let span = tracing::info_span!("node", id = %node.id, block = %node.block.spec().id);
     let start = Instant::now();
-    let result = execute(&node, inputs, workdir, &env).await;
+    let result = execute(&node, inputs, workdir, &env).instrument(span).await;
     let duration = start.elapsed();
     match result {
         Ok((outputs, None)) => finished(Status::Succeeded, duration, outputs, None),

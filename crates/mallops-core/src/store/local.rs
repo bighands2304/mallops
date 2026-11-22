@@ -32,6 +32,9 @@ const PAYLOAD_DIR: &str = "payload";
 #[derive(Debug, Clone)]
 pub struct LocalStore {
     root: PathBuf,
+    /// `(dev, ino)` of the root, used to detect `fetch` destinations aliasing the store.
+    #[cfg(unix)]
+    root_id: (u64, u64),
 }
 
 impl LocalStore {
@@ -59,7 +62,14 @@ impl LocalStore {
             ))
             .into());
         }
-        Ok(Self { root: canonical })
+        Ok(Self {
+            #[cfg(unix)]
+            root_id: {
+                use std::os::unix::fs::MetadataExt;
+                (meta.dev(), meta.ino())
+            },
+            root: canonical,
+        })
     }
 
     /// Opens or initializes a [`LocalStore`] at [`LocalStore::DEFAULT_ROOT`] (`./.mallops`).
@@ -156,7 +166,11 @@ impl ArtifactStore for LocalStore {
     ) -> BoxFuture<'a, Result<PathBuf, Error>> {
         let id = *id;
         let dest = dest.to_path_buf();
-        self.blocking(move |root| fetch_sync(root, id, &dest))
+        #[cfg(unix)]
+        let root_id = self.root_id;
+        #[cfg(not(unix))]
+        let root_id = ();
+        self.blocking(move |root| fetch_sync(root, root_id, id, &dest))
     }
 
     fn verify<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<(), Error>> {
@@ -278,12 +292,7 @@ fn put_sync(
     manifest: Manifest,
     owned_payload: OwnedPayloadSource,
 ) -> Result<ArtifactId, Error> {
-    if manifest.schema_version != Manifest::SCHEMA_VERSION {
-        return Err(Error::UnsupportedSchemaVersion {
-            found: manifest.schema_version,
-            expected: Manifest::SCHEMA_VERSION,
-        });
-    }
+    payload::check_schema(&manifest)?;
 
     let entries = payload::collect(owned_payload.as_borrowed())?;
 
@@ -403,8 +412,24 @@ fn copy_and_hash_entry(entry: &PayloadEntry<'_>, dest: &Path) -> Result<(u64, Di
     ))
 }
 
+fn ensure_regular(file: &File, path: &Path) -> Result<(), Error> {
+    if file.metadata().map_err(StoreError::from)?.is_file() {
+        return Ok(());
+    }
+    Err(StoreError::InvalidPayload(format!(
+        "stored payload entry is not a regular file: {}",
+        path.display()
+    ))
+    .into())
+}
+
 fn hash_file_streaming(path: &Path) -> Result<(u64, Digest), io::Error> {
     let mut reader = File::open(path)?;
+    if !reader.metadata()?.is_file() {
+        return Err(io::Error::other(
+            "stored payload entry is not a regular file",
+        ));
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update_reader(&mut reader)?;
     Ok((
@@ -425,9 +450,18 @@ fn exists_sync(root: &Path, id: ArtifactId) -> Result<bool, Error> {
     Ok(stat_artifact_dir(root, id)?.is_some())
 }
 
-/// Rejects a `fetch` destination that resolves inside `root` (including non-existent paths whose
-/// nearest existing ancestor canonicalizes inside `root`).
-fn ensure_dest_outside_root(root: &Path, dest: &Path) -> Result<(), Error> {
+#[cfg(unix)]
+type RootId = (u64, u64);
+#[cfg(not(unix))]
+type RootId = ();
+
+/// Rejects a `fetch` destination that is, or lies under, the store root.
+///
+/// On Unix every existing ancestor of `dest` is resolved with [`fs::metadata`] (following symlinks,
+/// as `create_dir_all` will) and compared by `(dev, ino)` with the root, so alias paths such as
+/// firmlinks or bind mounts cannot bypass the check. Elsewhere the nearest existing ancestor is
+/// canonicalized and compared lexically.
+fn ensure_dest_outside_root(root: &Path, root_id: RootId, dest: &Path) -> Result<(), Error> {
     let abs = if dest.is_absolute() {
         dest.to_path_buf()
     } else {
@@ -436,53 +470,33 @@ fn ensure_dest_outside_root(root: &Path, dest: &Path) -> Result<(), Error> {
             .join(dest)
     };
 
-    let mut existing = abs.as_path();
-    let mut tail = Vec::new();
-    let mut resolved = loop {
-        match fs::canonicalize(existing) {
-            Ok(canon) => break canon,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                let Some(last) = existing.components().next_back() else {
-                    return Err(StoreError::Io(err).into());
-                };
-                tail.push(last.as_os_str().to_os_string());
-                let Some(parent) = existing.parent() else {
-                    return Err(StoreError::Io(err).into());
-                };
-                existing = parent;
-            }
-            Err(err) => return Err(StoreError::Io(err).into()),
+    let inside = abs.ancestors().any(|anc| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(anc).is_ok_and(|m| (m.dev(), m.ino()) == root_id)
         }
-    };
+        #[cfg(not(unix))]
+        {
+            let _ = root_id;
+            fs::canonicalize(anc).is_ok_and(|c| c.starts_with(root))
+        }
+    });
+    #[cfg(unix)]
+    let _ = root;
 
-    if resolved.starts_with(root) {
+    if inside {
         return Err(StoreError::InvalidPayload(format!(
             "fetch destination must not be inside store root: {}",
             dest.display()
         ))
         .into());
     }
-
-    for part in tail.into_iter().rev() {
-        if part == ".." {
-            resolved.pop();
-        } else if part != "." {
-            resolved.push(part);
-        }
-        if resolved.starts_with(root) {
-            return Err(StoreError::InvalidPayload(format!(
-                "fetch destination must not be inside store root: {}",
-                dest.display()
-            ))
-            .into());
-        }
-    }
-
     Ok(())
 }
 
-fn fetch_sync(root: &Path, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error> {
-    ensure_dest_outside_root(root, dest)?;
+fn fetch_sync(root: &Path, root_id: RootId, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error> {
+    ensure_dest_outside_root(root, root_id, dest)?;
 
     let dir = stat_artifact_dir(root, id)?.ok_or(StoreError::NotFound(id))?;
     let payload_dir = check_payload_dir(&dir, id)?;
@@ -492,6 +506,7 @@ fn fetch_sync(root: &Path, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error
         dest,
         stored_files.into_iter().map(|(rel, src_path)| {
             let file = File::open(&src_path).map_err(StoreError::from)?;
+            ensure_regular(&file, &src_path)?;
             Ok((rel, file))
         }),
     )?;
@@ -1048,6 +1063,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_rejects_dest_aliasing_store_root() {
+        let ts = TestStore::new();
+        let store = &ts.store;
+        let id = store
+            .put(sample_manifest(), PayloadSource::Bytes(b"payload"))
+            .await
+            .unwrap();
+        // The root itself, reached through a `..` detour (not a prefix of the canonical root).
+        let detour = store.root().join(META_DIR).join("..");
+        let err = store.fetch(&id, &detour).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_hash_entry_rejects_swap_after_collect() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("model.bin");
+        let secret = dir.path().join("secret");
+        fs::write(&src, b"legit").unwrap();
+        fs::write(&secret, b"secret").unwrap();
+
+        let entries = payload::collect(PayloadSource::File(&src)).unwrap();
+        fs::remove_file(&src).unwrap();
+        std::os::unix::fs::symlink(&secret, &src).unwrap();
+
+        let entry = entries.values().next().unwrap();
+        let err = copy_and_hash_entry(entry, &dir.path().join("out")).unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_rejects_dest_inside_store_root() {
         let ts = TestStore::new();
         let store = &ts.store;
@@ -1057,7 +1110,7 @@ mod tests {
             .unwrap();
 
         for dest in [
-            store.root().to_path_buf(),
+            store.root().join(META_DIR),
             store.root().join(ARTIFACTS_DIR).join("injected"),
             store.root().join("new_dir/nested"),
         ] {

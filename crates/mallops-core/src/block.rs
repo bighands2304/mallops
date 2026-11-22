@@ -409,7 +409,7 @@ impl Inputs {
 /// let spec = BlockSpec::new("ex/hello", "0.1.0", Stage::Custom)
 ///     .with_output(Port::new("out", ArtifactKind::Blob));
 /// let ctx = Context::new(RunId::new(), std::env::temp_dir(), Arc::new(MemoryStore::new()),
-///     serde_json::Value::Null, CancelSource::new().token(), Arc::new(MemorySecretProvider::new()));
+///     serde_json::Value::Null, CancelSource::new().token(), Arc::new(MemorySecretProvider::default()));
 /// let rt = tokio::runtime::Runtime::new().unwrap();
 /// let out = rt.block_on(Hello(spec).run(&ctx, Inputs::new())).unwrap();
 /// assert!(matches!(out, BlockOutcome::Produced(d) if d.len() == 1));
@@ -625,7 +625,7 @@ mod tests {
             Arc::new(MemoryStore::new()),
             serde_json::Value::Null,
             CancelSource::new().token(),
-            Arc::new(MemorySecretProvider::new()),
+            Arc::new(MemorySecretProvider::default()),
         )
     }
 

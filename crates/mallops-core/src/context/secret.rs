@@ -75,21 +75,9 @@ pub trait SecretProvider: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EnvSecretProvider;
 
-impl EnvSecretProvider {
-    /// Prefix prepended to secret names when looking up environment variables.
-    pub const PREFIX: &'static str = ENV_PREFIX;
-
-    /// Creates a new [`EnvSecretProvider`].
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 impl SecretProvider for EnvSecretProvider {
     fn get(&self, name: &str) -> Result<Secret, Error> {
-        if name.is_empty() {
-            return Err(Error::Secret("secret name must not be empty".to_string()));
-        }
+        check_name(name)?;
         let env_key = format!("{ENV_PREFIX}{name}");
         match std::env::var(&env_key) {
             Ok(value) => Ok(Secret::new(value)),
@@ -103,6 +91,13 @@ impl SecretProvider for EnvSecretProvider {
     }
 }
 
+fn check_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() {
+        return Err(Error::Secret("secret name must not be empty".to_string()));
+    }
+    Ok(())
+}
+
 /// In-memory [`SecretProvider`] intended for unit and integration tests.
 ///
 /// Its [`fmt::Debug`] implementation redacts all stored values.
@@ -112,20 +107,10 @@ pub struct MemorySecretProvider {
 }
 
 impl MemorySecretProvider {
-    /// Creates an empty [`MemorySecretProvider`].
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Inserts a secret and returns `self` for fluent test setup.
+    /// Adds a secret and returns `self` for fluent test setup.
     pub fn with_secret(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.insert(name, value);
-        self
-    }
-
-    /// Inserts or replaces a named secret in memory.
-    pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.secrets.insert(name.into(), value.into());
+        self
     }
 }
 
@@ -141,9 +126,7 @@ impl fmt::Debug for MemorySecretProvider {
 
 impl SecretProvider for MemorySecretProvider {
     fn get(&self, name: &str) -> Result<Secret, Error> {
-        if name.is_empty() {
-            return Err(Error::Secret("secret name must not be empty".to_string()));
-        }
+        check_name(name)?;
         self.secrets
             .get(name)
             .map(|value| Secret::new(value.clone()))
@@ -171,7 +154,7 @@ mod tests {
 
     #[test]
     fn memory_secret_provider_resolves_and_redacts_debug() {
-        let provider = MemorySecretProvider::new().with_secret("DB_PASS", TEST_SECRET_VALUE);
+        let provider = MemorySecretProvider::default().with_secret("DB_PASS", TEST_SECRET_VALUE);
 
         let resolved = provider.get("DB_PASS").expect("secret should resolve");
         assert_eq!(resolved.expose(), TEST_SECRET_VALUE);
@@ -191,7 +174,7 @@ mod tests {
 
     #[test]
     fn env_secret_provider_rejects_empty_name() {
-        let provider = EnvSecretProvider::new();
+        let provider = EnvSecretProvider;
         let err = provider.get("").expect_err("empty name must fail");
         assert!(matches!(err, Error::Secret(_)));
     }
@@ -227,7 +210,7 @@ mod tests {
             return;
         }
 
-        let provider = EnvSecretProvider::new();
+        let provider = EnvSecretProvider;
         let secret = provider
             .get("API_KEY")
             .expect("MALLOPS_SECRET_API_KEY should resolve");

@@ -23,7 +23,7 @@ pub use secret::{EnvSecretProvider, MemorySecretProvider, Secret, SecretProvider
 pub struct RunId(ulid::Ulid);
 
 impl RunId {
-    /// Generates a new monotonic-friendly ULID-backed [`RunId`].
+    /// Generates a new ULID-backed [`RunId`], sortable by time with millisecond granularity.
     pub fn new() -> Self {
         Self(ulid::Ulid::new())
     }
@@ -92,12 +92,8 @@ impl CancelSource {
     ///
     /// Calling `cancel` multiple times is idempotent.
     pub fn cancel(&self) {
-        let _ = self.tx.send(true);
-    }
-
-    /// Returns `true` if [`cancel`](Self::cancel) has been called.
-    pub fn is_cancelled(&self) -> bool {
-        *self.tx.borrow()
+        // send_replace stores the value even when no token is alive (send would drop it).
+        self.tx.send_replace(true);
     }
 }
 
@@ -129,16 +125,8 @@ impl CancelToken {
     /// spurious cancellation.
     pub async fn cancelled(&self) {
         let mut rx = self.rx.clone();
-        loop {
-            if *rx.borrow_and_update() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                if *rx.borrow() {
-                    return;
-                }
-                std::future::pending::<()>().await;
-            }
+        if rx.wait_for(|c| *c).await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 }
@@ -162,6 +150,7 @@ pub struct Context {
 
 impl Context {
     /// Creates a new block execution [`Context`].
+    // ponytail: 6 argomenti posizionali, passare a un builder quando arriva il 7°
     pub fn new(
         run_id: RunId,
         workdir: PathBuf,
@@ -217,7 +206,7 @@ impl Context {
     ///
     /// Returns [`Error::Config`] if deserialization fails.
     pub fn config_as<T: DeserializeOwned>(&self) -> Result<T, Error> {
-        serde_json::from_value(self.config.clone()).map_err(|err| Error::Config(err.to_string()))
+        T::deserialize(&self.config).map_err(|err| Error::Config(err.to_string()))
     }
 }
 
@@ -283,7 +272,6 @@ mod tests {
         let token1 = source.token();
         let token2 = token1.clone();
 
-        assert!(!source.is_cancelled());
         assert!(!token1.is_cancelled());
         assert!(!token2.is_cancelled());
 
@@ -297,12 +285,18 @@ mod tests {
         // Idempotent second call.
         source.cancel();
 
-        assert!(source.is_cancelled());
         assert!(token2.is_cancelled());
         assert!(waiter.await.expect("waiter task"));
 
         // Already-cancelled token resolves immediately.
         token2.cancelled().await;
+    }
+
+    #[test]
+    fn cancel_before_token_is_observed() {
+        let source = CancelSource::new();
+        source.cancel();
+        assert!(source.token().is_cancelled());
     }
 
     #[tokio::test]
@@ -332,7 +326,7 @@ mod tests {
         let ctx = test_context(
             json!({ "path": "data/customers.csv", "retries": 3 }),
             source.token(),
-            Arc::new(MemorySecretProvider::new()),
+            Arc::new(MemorySecretProvider::default()),
         );
 
         let cfg: BlockCfg = ctx.config_as().expect("valid config");
@@ -347,7 +341,7 @@ mod tests {
         let bad_ctx = test_context(
             json!({ "path": "data/customers.csv", "retries": "not-a-number" }),
             source.token(),
-            Arc::new(MemorySecretProvider::new()),
+            Arc::new(MemorySecretProvider::default()),
         );
         let err = bad_ctx
             .config_as::<BlockCfg>()
@@ -362,7 +356,7 @@ mod tests {
         let store: Arc<dyn ArtifactStore> = Arc::new(MemoryStore::new());
         let config = json!({ "key": "value" });
         let source = CancelSource::new();
-        let secrets = Arc::new(MemorySecretProvider::new().with_secret("TOKEN", "top-secret"));
+        let secrets = Arc::new(MemorySecretProvider::default().with_secret("TOKEN", "top-secret"));
 
         let ctx = Context::new(
             run_id,

@@ -11,17 +11,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::BlockRef;
-#[cfg(feature = "yaml")]
-use crate::Error;
-
-fn default_store_kind() -> String {
-    "local".to_owned()
-}
-
-fn default_store_path() -> String {
-    "./.mallops".to_owned()
-}
+use crate::{BlockRef, Error};
 
 fn default_host() -> String {
     "127.0.0.1".to_owned()
@@ -34,22 +24,20 @@ fn default_port() -> u16 {
 /// Artifact store settings (`store:`); defaults to a local store at `./.mallops`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct StoreConfig {
     /// Store kind (`local`, `memory`, ...).
-    #[serde(default = "default_store_kind")]
     pub kind: String,
     /// Store location (used by `local`).
-    #[serde(default = "default_store_path")]
     pub path: String,
 }
 
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
-            kind: default_store_kind(),
-            path: default_store_path(),
+            kind: "local".to_owned(),
+            path: "./.mallops".to_owned(),
         }
     }
 }
@@ -92,6 +80,10 @@ impl schemars::JsonSchema for LineageConfig {
         "LineageConfig".into()
     }
 
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::LineageConfig").into()
+    }
+
     fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "description": "`off` or a list of lineage sinks",
@@ -107,7 +99,7 @@ impl schemars::JsonSchema for LineageConfig {
 #[cfg(feature = "schema")]
 #[must_use]
 pub fn pipeline_config_json_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(PipelineConfig)).unwrap_or(serde_json::Value::Null)
+    schemars::schema_for!(PipelineConfig).into()
 }
 
 impl Serialize for LineageConfig {
@@ -121,20 +113,68 @@ impl Serialize for LineageConfig {
 
 impl<'de> Deserialize<'de> for LineageConfig {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Str(String),
-            Sinks(Vec<LineageSinkConfig>),
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = LineageConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("`off` or a list of lineage sinks")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v == "off" {
+                    Ok(LineageConfig::Off)
+                } else {
+                    Err(E::custom(format!(
+                        "invalid lineage `{v}`: expected `off` or a list of sinks"
+                    )))
+                }
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut sinks = Vec::new();
+                while let Some(s) = seq.next_element::<LineageSinkConfig>()? {
+                    sinks.push(s);
+                }
+                Ok(LineageConfig::Sinks(sinks))
+            }
         }
-        match Raw::deserialize(d)? {
-            Raw::Str(s) if s == "off" => Ok(Self::Off),
-            Raw::Str(s) => Err(serde::de::Error::custom(format!(
-                "invalid lineage `{s}`: expected `off` or a list of sinks"
-            ))),
-            Raw::Sinks(v) => Ok(Self::Sinks(v)),
+        d.deserialize_any(V)
+    }
+}
+
+/// Deserializes a map rejecting duplicate keys (YAML would otherwise keep the last one).
+fn unique_map<'de, D, V>(d: D) -> Result<BTreeMap<String, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct M<V>(std::marker::PhantomData<V>);
+    impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for M<V> {
+        type Value = BTreeMap<String, V>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((k, v)) = map.next_entry::<String, V>()? {
+                if out.contains_key(&k) {
+                    return Err(serde::de::Error::custom(format!("duplicate key `{k}`")));
+                }
+                out.insert(k, v);
+            }
+            Ok(out)
         }
     }
+    d.deserialize_map(M(std::marker::PhantomData))
 }
 
 /// Serde adapter reusing `BlockRef`'s `FromStr`, so reserved prefixes keep their error.
@@ -147,7 +187,10 @@ mod block_ref {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BlockRef, D::Error> {
         let s = String::deserialize(d)?;
-        BlockRef::from_str(&s).map_err(|e| serde::de::Error::custom(e.to_string()))
+        BlockRef::from_str(&s).map_err(|e| match e {
+            Error::Config(m) => serde::de::Error::custom(m),
+            other => serde::de::Error::custom(other),
+        })
     }
 }
 
@@ -162,7 +205,7 @@ pub struct BlockConfig {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub r#use: BlockRef,
     /// Input wiring: port name to `<block>.<output>` (`in:`).
-    #[serde(rename = "in", default)]
+    #[serde(rename = "in", default, deserialize_with = "unique_map")]
     pub r#in: BTreeMap<String, String>,
     /// Block-specific configuration (`with:`).
     #[serde(default)]
@@ -208,6 +251,7 @@ pub struct PipelineConfig {
     #[serde(default)]
     pub lineage: LineageConfig,
     /// Blocks of the batch DAG, by id.
+    #[serde(deserialize_with = "unique_map")]
     pub blocks: BTreeMap<String, BlockConfig>,
     /// Optional serving section.
     #[serde(default)]
@@ -234,6 +278,12 @@ impl PipelineConfig {
                 None => format!("{origin}: {e}"),
             })
         })?;
+        if cfg.version != 1 {
+            return Err(Error::Config(format!(
+                "{origin}: unsupported version {} (expected 1)",
+                cfg.version
+            )));
+        }
         cfg.interpolate_env(origin, env)?;
         Ok(cfg)
     }
@@ -248,12 +298,8 @@ impl PipelineConfig {
             Error::Config(m) => Error::Config(format!("{origin}: {what}: {m}")),
             other => other,
         };
-        let mut path = serde_json::Value::String(std::mem::take(&mut self.store.path));
-        let r = interp::interpolate(&mut path, env);
-        if let serde_json::Value::String(p) = path {
-            self.store.path = p;
-        }
-        r.map_err(|e| ctx("store.path".into(), e))?;
+        interp::interpolate_str(&mut self.store.path, env)
+            .map_err(|e| ctx("store.path".into(), e))?;
         if let LineageConfig::Sinks(sinks) = &mut self.lineage {
             for sink in sinks {
                 interp::interpolate(&mut sink.with, env)
@@ -378,38 +424,84 @@ serve:
         }
     }
 
+    /// Asserts `t.yaml:<line>:<col>: ` prefix with numeric line and column.
+    fn assert_located(e: &str) {
+        let rest = e.strip_prefix("t.yaml:").unwrap_or_else(|| panic!("{e}"));
+        let mut it = rest.splitn(3, ':');
+        let (l, c) = (it.next().unwrap(), it.next().unwrap());
+        assert!(
+            l.parse::<usize>().is_ok() && c.parse::<usize>().is_ok(),
+            "{e}"
+        );
+        assert!(it.next().is_some_and(|m| m.starts_with(' ')), "{e}");
+    }
+
     #[test]
     fn malformed_yaml_has_location() {
-        let e = err("version: 1\nname: [\n");
-        assert!(e.starts_with("t.yaml:"), "{e}");
-        let e = err("version: 1\nname: p\nblocks:\n  a: { use: Bad }\n");
-        assert!(e.starts_with("t.yaml:4:"), "{e}");
+        assert_located(&err("version: 1\nname: [\n")); // syntax
+        let e = err("version: 1\nname: p\nblocks:\n  a: { use: Bad }\n"); // schema
+        assert_located(&e);
+        assert!(
+            e.starts_with("t.yaml:4:") && !e.contains("config error"),
+            "{e}"
+        );
     }
 
     #[test]
     fn alias_bomb_is_an_error() {
         let mut s = String::from(
-            "version: 1\nname: p\nx0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]\n",
+            "version: 1\nname: p\nblocks:\n  a:\n    use: std/x\n    with:\n      x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]\n",
         );
         for i in 1..12 {
             let refs = vec![format!("*a{}", i - 1); 9].join(", ");
-            s.push_str(&format!("x{i}: &a{i} [{refs}]\n"));
+            s.push_str(&format!("      x{i}: &a{i} [{refs}]\n"));
         }
-        s.push_str("blocks: {a: {use: std/x, with: *a11}}\n");
-        assert!(parse(&s).is_err());
+        assert!(err(&s).contains("repetition limit exceeded"));
     }
 
     #[test]
     fn deep_nesting_is_an_error() {
         let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
-        assert!(
-            parse(&format!(
-                "version: 1\nname: p\nblocks: {{a: {{use: std/x, with: {deep}}}}}\n"
-            ))
-            .is_err()
-        );
-        let deep = format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000));
+        let e = err(&format!(
+            "version: 1\nname: p\nblocks: {{a: {{use: std/x, with: {deep}}}}}\n"
+        ));
+        assert!(e.contains("recursion limit exceeded"), "{e}");
+        let deep = format!("{}1{}", "[".repeat(5_000), "]".repeat(5_000));
         assert!(parse(&deep).is_err());
+    }
+
+    #[test]
+    fn lineage_sink_unknown_field_is_located() {
+        let e = err("version: 1\nname: p\nlineage: [{ sink: json, bogus: 1 }]\nblocks: {}\n");
+        assert!(e.contains("bogus") && !e.contains("Raw"), "{e}");
+        assert_located(&e);
+    }
+
+    #[test]
+    fn version_and_duplicates_rejected() {
+        assert!(err("version: 2\nname: p\nblocks: {}\n").contains("version"));
+        let e = err("version: 1\nname: p\nblocks:\n  a: { use: std/x }\n  a: { use: std/y }\n");
+        assert!(e.contains("duplicate"), "{e}");
+        let e = err("version: 1\nname: p\nblocks:\n  a: { use: std/x, in: { i: b.c, i: b.d } }\n");
+        assert!(e.contains("duplicate"), "{e}");
+    }
+
+    #[test]
+    fn secret_names_are_validated() {
+        for bad in ["${secret:}", "${secret:A${env:B}}"] {
+            let e = err(&format!(
+                "version: 1\nname: p\nblocks:\n  a: {{ use: std/x, with: {{ t: \"{bad}\" }} }}\n"
+            ));
+            assert!(e.starts_with("t.yaml: block `a`"), "{e}");
+        }
+    }
+
+    #[test]
+    fn missing_file_names_path() {
+        let e = PipelineConfig::from_yaml_file("/nonexistent/mallops.yaml", &|_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("/nonexistent/mallops.yaml"), "{e}");
     }
 
     const SPEC_EXAMPLE: &str = r#"
@@ -498,9 +590,12 @@ serve:
         const SENTINEL: &str = "SENTINEL-SECRET-VALUE";
         // the lookup would leak the value if secrets were resolved through it
         let env = |_: &str| Some(SENTINEL.to_owned());
-        let src = "version: 1\nname: p\nblocks:\n  a: { use: std/x, with: { token: \"${secret:API_TOKEN}\" } }\n";
+        let src = "version: 1\nname: p\nlineage: [{ sink: s, with: { k: \"${secret:API_TOKEN}\" } }]\nblocks:\n  a: { use: std/x, with: { token: \"${secret:API_TOKEN}\" } }\n";
         let c = PipelineConfig::from_yaml_str(src, "t", &env).unwrap();
         assert_eq!(c.blocks["a"].with["token"], "${secret:API_TOKEN}");
+        assert!(
+            matches!(&c.lineage, LineageConfig::Sinks(v) if v[0].with["k"] == "${secret:API_TOKEN}")
+        );
         let json = serde_json::to_string(&c).unwrap();
         for out in [json, format!("{c:?}")] {
             assert!(!out.contains(SENTINEL));
@@ -519,5 +614,15 @@ mod schema_tests {
         assert!(s["properties"]["blocks"].is_object());
         assert!(s["$defs"]["BlockConfig"]["properties"]["use"]["type"] == "string");
         assert!(s["$defs"]["LineageConfig"]["anyOf"].is_array());
+        let req: Vec<_> = s["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for k in ["version", "name", "blocks"] {
+            assert!(req.contains(&k), "{req:?}");
+        }
+        assert_eq!(s["additionalProperties"], false);
     }
 }

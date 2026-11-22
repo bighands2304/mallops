@@ -4,107 +4,29 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{
-    ArtifactId, ArtifactStore, DraftPayload, Error, Manifest, OutputDraft, OutputDrafts, Port,
-    ResolvedPorts, ValidationError,
-};
+use crate::ValidationError;
+use crate::{ArtifactId, ArtifactStore, DraftPayload, Error, OutputDrafts, ResolvedPorts};
 
-fn describe_manifest_mismatch(port_name: &str, port: &Port, manifest: &Manifest) -> String {
-    let mut dims = Vec::new();
-    if port.kind != manifest.kind {
-        dims.push("kind");
+/// Resolves a `File`/`Dir` draft path (relative paths are joined to `workdir`) to its
+/// canonical form, which must lie inside `root` (the canonical workdir) and be a regular
+/// file (`dir == false`) or a directory.
+fn confine(root: &Path, workdir: &Path, path: &Path, dir: bool) -> Result<PathBuf, String> {
+    let shown = path.display();
+    if path.as_os_str().is_empty() {
+        return Err("payload path must not be empty".into());
     }
-    if !port.formats.is_empty()
-        && !port
-            .formats
-            .iter()
-            .any(|f| f.as_ref() == manifest.format.as_str())
-    {
-        dims.push("format");
+    let canonical = fs::canonicalize(workdir.join(path))
+        .map_err(|e| format!("cannot resolve payload path `{shown}` inside workdir: {e}"))?;
+    if !canonical.starts_with(root) {
+        return Err(format!("payload path `{shown}` escapes workdir"));
     }
-    if !port.flavors.is_empty()
-        && !manifest
-            .flavor
-            .as_deref()
-            .is_some_and(|fl| port.flavors.iter().any(|f| f.as_ref() == fl))
-    {
-        dims.push("flavor");
+    let meta = fs::symlink_metadata(&canonical)
+        .map_err(|e| format!("cannot stat payload path `{shown}`: {e}"))?;
+    match (dir, meta.is_dir(), meta.is_file()) {
+        (true, true, _) | (false, _, true) => Ok(canonical),
+        (true, ..) => Err(format!("payload path `{shown}` is not a directory")),
+        (false, ..) => Err(format!("payload path `{shown}` is not a regular file")),
     }
-    format!(
-        "manifest violates output port `{port_name}` ({} mismatch): got kind `{}`, format `{}`, flavor {:?}; port requires kind `{}`, formats {:?}, flavors {:?}",
-        dims.join("+"),
-        manifest.kind,
-        manifest.format,
-        manifest.flavor,
-        port.kind,
-        port.formats,
-        port.flavors,
-    )
-}
-
-/// Canonicalizes `workdir` and every `File`/`Dir` draft path on Tokio's blocking pool,
-/// rejecting paths that cannot be resolved or escape `workdir`.
-///
-/// Returns `(entry_index, resolved_path)` pairs for valid entries (preserving the resolved
-/// non-canonical path so `ArtifactStore::put` still sees and rejects internal top-level
-/// symlinks) alongside any collected [`ValidationError`]s.
-async fn validate_fs_paths(
-    workdir: PathBuf,
-    targets: Vec<(usize, String, PathBuf)>,
-) -> Result<(Vec<(usize, PathBuf)>, Vec<ValidationError>), Error> {
-    tokio::task::spawn_blocking(move || {
-        let canonical_workdir = fs::canonicalize(&workdir).map_err(|err| {
-            Error::Runtime(format!(
-                "cannot canonicalize workdir `{}`: {err}",
-                workdir.display()
-            ))
-        })?;
-        if !canonical_workdir.is_dir() {
-            return Err(Error::Runtime(format!(
-                "workdir `{}` is not a directory",
-                workdir.display()
-            )));
-        }
-
-        let mut resolved_paths = Vec::with_capacity(targets.len());
-        let mut errors = Vec::new();
-
-        for (idx, port_name, raw_path) in targets {
-            let path_key = format!("out.{port_name}");
-            if raw_path.as_os_str().is_empty() {
-                errors.push(ValidationError::new(
-                    path_key,
-                    "payload path must not be empty",
-                ));
-                continue;
-            }
-            let resolved = workdir.join(&raw_path);
-            match fs::canonicalize(&resolved) {
-                Ok(canonical) if canonical.starts_with(&canonical_workdir) => {
-                    resolved_paths.push((idx, resolved));
-                }
-                Ok(_) => {
-                    errors.push(ValidationError::new(
-                        path_key,
-                        format!("payload path `{}` escapes workdir", raw_path.display()),
-                    ));
-                }
-                Err(err) => {
-                    errors.push(ValidationError::new(
-                        path_key,
-                        format!(
-                            "cannot resolve payload path `{}` inside workdir: {err}",
-                            raw_path.display()
-                        ),
-                    ));
-                }
-            }
-        }
-
-        Ok((resolved_paths, errors))
-    })
-    .await
-    .map_err(|err| Error::Runtime(format!("blocking commit validation task failed: {err}")))?
 }
 
 /// Validates `drafts` against the node's resolved output `ports` and commits them.
@@ -112,9 +34,14 @@ async fn validate_fs_paths(
 /// - every draft must name a declared output port and satisfy it (`Port::accepts_manifest`);
 /// - when `produced` (outcome `Produced`), every required output port must have a draft;
 ///   for `Skipped` outcomes drafts are optional;
-/// - `File`/`Dir` payloads must resolve inside `workdir` (no `..` or symlink escapes);
+/// - `File`/`Dir` payloads must canonicalize inside `workdir` (no `..` or symlink escapes) to a
+///   regular file / a directory; the canonical path is what `put` receives;
 /// - `manifest.parents` is replaced by `parents` (the node's actual input ids, sorted and deduped);
 /// - drafts are committed with [`ArtifactStore::put`] only if all checks pass.
+///
+/// Payload *content* (nested symlinks, special files inside a `Dir`) is checked by the store
+/// during `put`; when that fails, outputs of the node committed before stay in the store as
+/// unreferenced artifacts (immutable and harmless, left to a later GC).
 ///
 /// Returns the committed ids by output port.
 ///
@@ -129,38 +56,52 @@ pub(crate) async fn commit_outputs(
     workdir: &Path,
     produced: bool,
 ) -> Result<BTreeMap<String, ArtifactId>, Error> {
-    let mut entries: Vec<(String, OutputDraft)> = drafts.into_iter().collect();
+    // ponytail: sync canonicalize/stat on the async thread, a few syscalls per output
+    // (like the per-node `create_dir` in the scheduler).
+    let root = fs::canonicalize(workdir).map_err(|e| {
+        Error::Runtime(format!(
+            "cannot canonicalize workdir `{}`: {e}",
+            workdir.display()
+        ))
+    })?;
     let mut errors = Vec::new();
-    let mut fs_targets = Vec::new();
+    let mut checked = Vec::new();
 
-    for (idx, (port_name, draft)) in entries.iter().enumerate() {
-        let Some(port) = ports
-            .outputs
-            .iter()
-            .find(|p| p.name.as_ref() == port_name.as_str())
-        else {
+    for (name, mut draft) in drafts {
+        let at = format!("out.{name}");
+        let Some(port) = ports.outputs.iter().find(|p| p.name == name.as_str()) else {
             errors.push(ValidationError::new(
-                format!("out.{port_name}"),
-                format!("unknown output port `{port_name}`"),
+                at,
+                format!("unknown output port `{name}`"),
             ));
             continue;
         };
-
         if !port.accepts_manifest(&draft.manifest) {
+            let m = &draft.manifest;
             errors.push(ValidationError::new(
-                format!("out.{port_name}"),
-                describe_manifest_mismatch(port_name, port, &draft.manifest),
+                &at,
+                format!(
+                    "manifest (kind `{}`, format `{}`, flavor {:?}) does not satisfy output port \
+                     `{name}` (kind `{}`, formats {:?}, flavors {:?})",
+                    m.kind, m.format, m.flavor, port.kind, port.formats, port.flavors
+                ),
             ));
         }
-
-        if let DraftPayload::File(path) | DraftPayload::Dir(path) = &draft.payload {
-            fs_targets.push((idx, port_name.clone(), path.clone()));
+        let dir = matches!(draft.payload, DraftPayload::Dir(_));
+        if let DraftPayload::File(path) | DraftPayload::Dir(path) = &mut draft.payload {
+            // The path may change between this check and `put`: accepted by the trust model
+            // (ADR-0007 D7; decision 2026-11-22 #2 B1-bis).
+            match confine(&root, workdir, path, dir) {
+                Ok(canonical) => *path = canonical,
+                Err(msg) => errors.push(ValidationError::new(&at, msg)),
+            }
         }
+        checked.push((name, draft));
     }
 
     if produced {
         for port in ports.outputs.iter().filter(|p| p.required) {
-            if entries.iter().all(|(name, _)| name != port.name.as_ref()) {
+            if checked.iter().all(|(name, _)| name != port.name.as_ref()) {
                 errors.push(ValidationError::new(
                     format!("out.{}", port.name),
                     format!("missing required output `{}`", port.name),
@@ -169,31 +110,17 @@ pub(crate) async fn commit_outputs(
         }
     }
 
-    if !fs_targets.is_empty() {
-        let (resolved_paths, fs_errors) =
-            validate_fs_paths(workdir.to_path_buf(), fs_targets).await?;
-        errors.extend(fs_errors);
-        for (idx, resolved) in resolved_paths {
-            if let DraftPayload::File(path) | DraftPayload::Dir(path) = &mut entries[idx].1.payload
-            {
-                *path = resolved;
-            }
-        }
-    }
-
     if !errors.is_empty() {
         return Err(Error::Validation(errors));
     }
 
-    let mut normalized_parents = parents.to_vec();
-    normalized_parents.sort_unstable();
-    normalized_parents.dedup();
+    let mut parents = parents.to_vec();
+    parents.sort_unstable();
+    parents.dedup();
 
     let mut committed = BTreeMap::new();
-    for (port, draft) in entries {
-        let manifest = draft
-            .manifest
-            .with_parents(normalized_parents.iter().copied());
+    for (port, draft) in checked {
+        let manifest = draft.manifest.with_parents(parents.iter().copied());
         let id = store.put(manifest, draft.payload.as_source()).await?;
         committed.insert(port, id);
     }
@@ -205,7 +132,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::{Artifact, ArtifactKind, BoxFuture, MemoryStore, PayloadSource, RelPath};
+    use crate::{
+        Artifact, ArtifactKind, BoxFuture, Manifest, MemoryStore, OutputDraft, PayloadSource, Port,
+        RelPath,
+    };
 
     /// Wraps [`MemoryStore`] and counts every `put` invocation so tests can prove
     /// no store write happened when validation fails.
@@ -631,32 +561,76 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn commit_internal_symlink_is_still_rejected_by_store() {
+    async fn commit_internal_symlinks_commit_canonical_target_nested_rejected_by_store() {
         use std::os::unix::fs::symlink;
 
         let store = MemoryStore::new();
         let workdir = tempfile::tempdir().unwrap();
-        let real_file = workdir.path().join("real.txt");
-        fs::write(&real_file, b"ok").unwrap();
-        let link = workdir.path().join("alias.txt");
-        symlink(&real_file, &link).unwrap();
+        let sub = workdir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("real.txt"), b"ok").unwrap();
+        symlink(sub.join("real.txt"), workdir.path().join("alias.txt")).unwrap();
+        symlink(&sub, workdir.path().join("alias_dir")).unwrap();
+        let nested = workdir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        symlink(sub.join("real.txt"), nested.join("link.txt")).unwrap();
 
         let ports = ResolvedPorts::new(vec![], vec![Port::new("data", ArtifactKind::Blob)]);
-        let drafts = OutputDrafts::new().with(
-            "data",
-            OutputDraft::new(
-                Manifest::new(ArtifactKind::Blob, "text"),
-                DraftPayload::File(PathBuf::from("alias.txt")),
-            ),
-        );
+        let commit = |payload| {
+            let drafts = OutputDrafts::new().with(
+                "data",
+                OutputDraft::new(Manifest::new(ArtifactKind::Blob, "text"), payload),
+            );
+            commit_outputs(&store, &ports, drafts, &[], workdir.path(), true)
+        };
 
-        let err = commit_outputs(&store, &ports, drafts, &[], workdir.path(), true)
+        // Top-level and intermediate symlinks inside the workdir: `put` gets the canonical
+        // target, so both commit the same content as the real file.
+        let real = commit(DraftPayload::File("sub/real.txt".into()))
+            .await
+            .unwrap();
+        for alias in ["alias.txt", "alias_dir/real.txt"] {
+            let via = commit(DraftPayload::File(alias.into())).await.unwrap();
+            assert_eq!(via["data"], real["data"], "{alias}");
+        }
+
+        // Symlinks nested inside a `Dir` payload are rejected by the store at `put`.
+        let err = commit(DraftPayload::Dir("nested".into()))
             .await
             .unwrap_err();
         assert!(
             matches!(err, Error::Store(crate::StoreError::InvalidPayload(_))),
-            "expected InvalidPayload from store for internal symlink, got {err:?}"
+            "expected InvalidPayload from store for nested symlink, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_file_dir_type_mismatch_without_put() {
+        let store = SpyStore::new();
+        let workdir = tempfile::tempdir().unwrap();
+        fs::create_dir(workdir.path().join("dir")).unwrap();
+        fs::write(workdir.path().join("file.bin"), b"x").unwrap();
+        let ports = ResolvedPorts::new(vec![], vec![Port::new("data", ArtifactKind::Blob)]);
+
+        for (payload, expected) in [
+            (DraftPayload::File("dir".into()), "not a regular file"),
+            (DraftPayload::Dir("file.bin".into()), "not a directory"),
+        ] {
+            let drafts = OutputDrafts::new().with(
+                "data",
+                OutputDraft::new(Manifest::new(ArtifactKind::Blob, "bin"), payload),
+            );
+            let err = commit_outputs(&store, &ports, drafts, &[], workdir.path(), true)
+                .await
+                .unwrap_err();
+            let Error::Validation(errs) = err else {
+                panic!("expected Validation error, got {err:?}");
+            };
+            assert_eq!(errs.len(), 1);
+            assert_eq!(errs[0].path, "out.data");
+            assert!(errs[0].message.contains(expected), "{}", errs[0].message);
+        }
+        assert_eq!(store.puts(), 0);
     }
 
     #[tokio::test]

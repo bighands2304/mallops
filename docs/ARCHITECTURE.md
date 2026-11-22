@@ -360,7 +360,7 @@ flowchart TB
 |---|---|
 | Errors | `thiserror` in libraries (`mallops_core::Error`), `anyhow` only in the CLI |
 | Logging/tracing | `tracing`; OpenTelemetry exporter behind a feature |
-| Config | `serde` + `serde_json` + `yaml_serde` (`yaml` feature) + optional `schemars` (`schema` feature); `${env:NAME}` interpolated at load time in `with`/`store.path` only, `${secret:NAME}` stays symbolic |
+| Config | `serde` + `serde_json` + `yaml_serde` (`yaml` feature, enabled by default) + optional `schemars` (`schema` feature); `${env:NAME}` interpolated at load time in `with`/`store.path` only, `${secret:NAME}` stays symbolic |
 | Async | `tokio` |
 | CLI | `clap` derive |
 | Testing | unit tests per crate, integration tests running example pipelines, `insta` snapshots for CLI output |

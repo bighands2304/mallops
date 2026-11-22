@@ -1375,4 +1375,23 @@ mod tests {
         store.put_meta(&runs_key, b"reused").await.unwrap();
         assert_eq!(store.get_meta(&runs_key).await.unwrap().unwrap(), b"reused");
     }
+
+    /// Keeps the temp dir alive and restores write permissions before it is removed.
+    struct Guard(tempfile::TempDir);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            make_tree_writable(self.0.path());
+        }
+    }
+
+    mod conformance {
+        use super::*;
+
+        crate::store::conformance::conformance_tests!(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = LocalStore::new(dir.path()).unwrap();
+            (store, Guard(dir))
+        });
+    }
 }

@@ -211,7 +211,7 @@ pub trait ArtifactStore: Send + Sync {
     // Immutable content-addressed artifacts (ArtifactId = canonical BLAKE3 digest)
     fn put(&self, manifest: Manifest, payload: PayloadSource<'_>) -> BoxFuture<'_, Result<ArtifactId, Error>>;
     fn get(&self, id: &ArtifactId) -> BoxFuture<'_, Result<Option<Artifact>, Error>>;
-    /// Materialize the payload into `dest` (copy/read-only materialization locally; download + verify remotely).
+    /// Materialize the payload into `dest` (isolated writable copy locally; download + verify remotely).
     /// Never returns a writable path inside the store itself.
     fn fetch(&self, id: &ArtifactId, dest: &Path) -> BoxFuture<'_, Result<PathBuf, Error>>;
     fn verify(&self, id: &ArtifactId) -> BoxFuture<'_, Result<(), Error>>;
@@ -226,11 +226,11 @@ pub trait ArtifactStore: Send + Sync {
 ```
 
 - Validated types: `ArtifactId` (strict 64 lowercase hex) and `RelPath` (normalized POSIX UTF-8 relative path, no `..`, no root prefixes) prevent path traversal across all store operations.
-- Immutability: `put` writes atomically (temp dir + idempotent rename), rejects symlinks and special files, and marks stored payloads read-only on `LocalStore` (`0444` files / `0555` dirs where supported). `fetch` always materializes into `dest` so no block can mutate stored artifacts in place.
+- Immutability: `put` writes atomically (temp dir + idempotent rename), rejects symlinks and special files, and marks stored payloads read-only on `LocalStore` (`0444` files / `0555` dirs where supported). `fetch` always materializes an isolated writable copy into `dest` so no block can mutate stored artifacts in place.
 - Core implementations: `LocalStore` (filesystem, default, `./.mallops`) and `MemoryStore` (ephemeral; tests and throwaway runs).
 - Optional: `ObjectStore` adapter over the `object_store` crate (S3, GCS, Azure) behind `mallops-std` features; anything else as a plugin.
 - What depends on it: data hand-off between nodes and processes, caching (`cache/<key>.json`), resume via cached re-runs, `JsonSink` (`runs/<run-id>/lineage.json`), and model registry (v0.2).
-- Layout: `artifacts/<hash>/…`, `cache/<key>.json`, `runs/<run-id>/lineage.json`, `registry/<model>/<version>.json` (v0.2).
+- Layout (`LocalStore`): `artifacts/<hash>/…`, `meta/cache/<key>.json`, `meta/runs/<run-id>/lineage.json`, `meta/registry/<model>/<version>.json` (v0.2), `.tmp/` (staging).
 
 ### 6.2 Lineage
 

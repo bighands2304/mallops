@@ -187,6 +187,9 @@ pub trait ArtifactStore: Send + Sync {
     ///
     /// - Unlike artifacts, metadata entries are mutable (last-write-wins) and keyed by
     ///   validated [`RelPath`] (e.g. `cache/<key>.json`, `runs/<run-id>/lineage.json`).
+    /// - A metadata key cannot be a path-segment prefix of another metadata key (nor have an
+    ///   existing key as a path-segment prefix); conflicting writes fail with
+    ///   [`Error::InvalidPath`].
     /// - Writes must be atomic so concurrent readers never observe partial data, and
     ///   filesystem implementations must enforce the store root boundary.
     fn put_meta<'a>(&'a self, key: &'a RelPath, data: &'a [u8])

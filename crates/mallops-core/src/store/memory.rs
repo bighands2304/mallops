@@ -78,6 +78,11 @@ async fn load(payload: PayloadSource<'_>) -> Result<Files, Error> {
     }
 }
 
+fn is_segment_prefix(prefix: &str, path: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn id_of(manifest: &Manifest, files: &Files) -> Result<ArtifactId, Error> {
     ArtifactId::compute_from_bytes(
         manifest,
@@ -163,7 +168,16 @@ impl ArtifactStore for MemoryStore {
         data: &'a [u8],
     ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
-            write(&self.meta).insert(key.clone(), data.to_vec());
+            let mut meta = write(&self.meta);
+            if meta.keys().any(|existing| {
+                is_segment_prefix(key.as_str(), existing.as_str())
+                    || is_segment_prefix(existing.as_str(), key.as_str())
+            }) {
+                return Err(Error::InvalidPath(format!(
+                    "metadata key '{key}' conflicts with an existing key prefix"
+                )));
+            }
+            meta.insert(key.clone(), data.to_vec());
             Ok(())
         })
     }
@@ -174,10 +188,9 @@ impl ArtifactStore for MemoryStore {
 
     fn list_meta<'a>(&'a self, prefix: &'a RelPath) -> BoxFuture<'a, Result<Vec<RelPath>, Error>> {
         Box::pin(async move {
-            let dir = format!("{prefix}/");
             Ok(read(&self.meta)
                 .keys()
-                .filter(|k| *k == prefix || k.as_str().starts_with(&dir))
+                .filter(|k| *k == prefix || is_segment_prefix(prefix.as_str(), k.as_str()))
                 .cloned()
                 .collect())
         })

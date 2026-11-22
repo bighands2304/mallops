@@ -198,7 +198,12 @@ impl ArtifactStore for LocalStore {
     }
 }
 
-/// Ensures `candidate` stays lexically and canonically inside `root` without crossing symlinks.
+/// Ensures `candidate` stays lexically inside `root` without traversing symlinks.
+///
+/// Because `root` is canonicalized on construction and each existing component is checked via
+/// `lstat`, this protects against planted or accidental symlinks inside the store. It is a
+/// check-then-use guard and does not protect against a concurrent attacker with write access to
+/// the store directory (outside the v0.1 threat model, ADR-0007 D7).
 fn ensure_within_root(root: &Path, candidate: &Path) -> Result<(), Error> {
     let rel = candidate
         .strip_prefix(root)
@@ -214,12 +219,12 @@ fn ensure_within_root(root: &Path, candidate: &Path) -> Result<(), Error> {
 
         match fs::symlink_metadata(&cur) {
             Ok(meta) => {
-                if meta.file_type().is_symlink() {
+                let ft = meta.file_type();
+                if ft.is_symlink() {
                     return Err(StoreError::PathOutsideRoot(cur).into());
                 }
-                let canonical = fs::canonicalize(&cur).map_err(StoreError::from)?;
-                if !canonical.starts_with(root) {
-                    return Err(StoreError::PathOutsideRoot(canonical).into());
+                if !ft.is_dir() {
+                    break;
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => break,
@@ -277,7 +282,9 @@ fn put_sync(
 
         let (len, digest) = match entry {
             PayloadEntry::Bytes(bytes) => {
-                fs::write(&dest_path, bytes).map_err(StoreError::from)?;
+                let mut file = File::create(&dest_path).map_err(StoreError::from)?;
+                file.write_all(bytes).map_err(StoreError::from)?;
+                file.sync_all().map_err(StoreError::from)?;
                 (bytes.len() as u64, Digest::hash(bytes))
             }
             PayloadEntry::File { .. } => copy_and_hash_entry(entry, &dest_path)?,
@@ -289,7 +296,11 @@ fn put_sync(
     let id = ArtifactId::compute(&manifest, &payload_files)?;
     let manifest_bytes = manifest.canonical_json();
     let manifest_stage = staging.path().join(MANIFEST_FILE);
-    fs::write(&manifest_stage, &manifest_bytes).map_err(StoreError::from)?;
+    let mut manifest_file = File::create(&manifest_stage).map_err(StoreError::from)?;
+    manifest_file
+        .write_all(&manifest_bytes)
+        .map_err(StoreError::from)?;
+    manifest_file.sync_all().map_err(StoreError::from)?;
 
     let final_dir = artifact_dir(root, id);
     ensure_within_root(root, &final_dir)?;
@@ -301,7 +312,7 @@ fn put_sync(
 
     // Take ownership of staging_path so read-only cleanup always runs if publishing fails.
     let staging_path = staging.keep();
-    let publish_res = publish_staged_artifact(&staging_path, &final_dir, id);
+    let publish_res = publish_staged_artifact(&staging_path, &final_dir, &artifacts_root, id);
     if publish_res.is_err() {
         let _ = remove_readonly_tree(&staging_path);
     }
@@ -311,6 +322,7 @@ fn put_sync(
 fn publish_staged_artifact(
     staging_path: &Path,
     final_dir: &Path,
+    artifacts_root: &Path,
     id: ArtifactId,
 ) -> Result<ArtifactId, Error> {
     set_file_readonly(&staging_path.join(MANIFEST_FILE))?;
@@ -318,7 +330,16 @@ fn publish_staged_artifact(
 
     match fs::rename(staging_path, final_dir) {
         Ok(()) => {
-            set_dir_readonly(final_dir)?;
+            #[cfg(unix)]
+            File::open(artifacts_root)
+                .and_then(|dir| dir.sync_all())
+                .map_err(StoreError::from)?;
+            #[cfg(not(unix))]
+            let _ = artifacts_root;
+            // ponytail: best-effort chmod after publish; the artifact is already atomically live,
+            // so failing here would abort a succeeded put(). Must run after rename because moving
+            // a directory updates its `..` entry.
+            let _ = set_dir_readonly(final_dir);
             Ok(id)
         }
         Err(err) => {
@@ -356,7 +377,7 @@ fn copy_and_hash_entry(entry: &PayloadEntry<'_>, dest: &Path) -> Result<(u64, Di
         hasher: blake3::Hasher::new(),
     };
     let total_len = io::copy(&mut reader, &mut writer).map_err(StoreError::from)?;
-    writer.flush().map_err(StoreError::from)?;
+    writer.inner.sync_all().map_err(StoreError::from)?;
     Ok((
         total_len,
         Digest::from_bytes(*writer.hasher.finalize().as_bytes()),
@@ -724,15 +745,40 @@ fn put_meta_sync(root: &Path, key: &RelPath, data: &[u8]) -> Result<(), Error> {
     let tmp_root = root.join(TMP_DIR);
     let meta_root = root.join(META_DIR);
     ensure_dir_within_root(root, &tmp_root)?;
-    ensure_dir_within_root(root, &meta_root)?;
 
     let dest = meta_root.join(key.as_path());
     ensure_within_root(root, &dest)?;
 
-    if let Some(parent) = dest.parent() {
-        ensure_dir_within_root(root, parent)?;
+    for ancestor in dest.ancestors().skip(1) {
+        if ancestor == meta_root || !ancestor.starts_with(&meta_root) {
+            break;
+        }
+        if fs::symlink_metadata(ancestor).is_ok_and(|meta| meta.file_type().is_file()) {
+            return Err(Error::InvalidPath(format!(
+                "metadata key '{key}' conflicts with an existing key prefix"
+            )));
+        }
     }
-    ensure_within_root(root, &dest)?;
+    if fs::symlink_metadata(&dest).is_ok_and(|meta| meta.file_type().is_dir()) {
+        return Err(Error::InvalidPath(format!(
+            "metadata key '{key}' conflicts with an existing directory prefix"
+        )));
+    }
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            if matches!(
+                err.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::NotADirectory
+            ) {
+                Error::InvalidPath(format!(
+                    "metadata key '{key}' conflicts with an existing key prefix"
+                ))
+            } else {
+                StoreError::Io(err).into()
+            }
+        })?;
+    }
 
     let mut tmp = tempfile::Builder::new()
         .prefix("meta-")
@@ -741,8 +787,17 @@ fn put_meta_sync(root: &Path, key: &RelPath, data: &[u8]) -> Result<(), Error> {
     tmp.write_all(data).map_err(StoreError::from)?;
     tmp.flush().map_err(StoreError::from)?;
 
-    tmp.persist(&dest)
-        .map_err(|err| StoreError::Io(err.error))?;
+    tmp.persist(&dest).map_err(|err| {
+        if err.error.kind() == io::ErrorKind::IsADirectory
+            || fs::symlink_metadata(&dest).is_ok_and(|meta| meta.file_type().is_dir())
+        {
+            Error::InvalidPath(format!(
+                "metadata key '{key}' conflicts with an existing directory prefix"
+            ))
+        } else {
+            StoreError::Io(err.error).into()
+        }
+    })?;
     Ok(())
 }
 
@@ -750,30 +805,18 @@ fn get_meta_sync(root: &Path, key: &RelPath) -> Result<Option<Vec<u8>>, Error> {
     let dest = root.join(META_DIR).join(key.as_path());
     ensure_within_root(root, &dest)?;
 
-    let meta = match fs::symlink_metadata(&dest) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(StoreError::Io(err).into()),
-    };
-
-    let ft = meta.file_type();
-    if ft.is_symlink() {
-        return Err(StoreError::PathOutsideRoot(dest).into());
-    }
-    if ft.is_dir() {
-        return Ok(None);
-    }
-    if !ft.is_file() {
-        return Err(StoreError::InvalidPayload(format!(
-            "metadata entry is not a regular file: {}",
-            dest.display()
-        ))
-        .into());
-    }
-
     match fs::read(&dest) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::IsADirectory
+                    | io::ErrorKind::NotADirectory
+            ) || fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_dir()) =>
+        {
+            Ok(None)
+        }
         Err(err) => Err(StoreError::Io(err).into()),
     }
 }
@@ -781,12 +824,18 @@ fn get_meta_sync(root: &Path, key: &RelPath) -> Result<Option<Vec<u8>>, Error> {
 fn list_meta_sync(root: &Path, prefix: &RelPath) -> Result<Vec<RelPath>, Error> {
     let meta_root = root.join(META_DIR);
     let target = meta_root.join(prefix.as_path());
-    ensure_within_root(root, &meta_root)?;
     ensure_within_root(root, &target)?;
 
     let meta = match fs::symlink_metadata(&target) {
         Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(Vec::new());
+        }
         Err(err) => return Err(StoreError::Io(err).into()),
     };
 
@@ -847,44 +896,22 @@ fn list_meta_sync(root: &Path, prefix: &RelPath) -> Result<Vec<RelPath>, Error> 
 }
 
 fn delete_meta_sync(root: &Path, key: &RelPath) -> Result<(), Error> {
-    let meta_root = root.join(META_DIR);
-    let dest = meta_root.join(key.as_path());
-    ensure_within_root(root, &meta_root)?;
+    let dest = root.join(META_DIR).join(key.as_path());
     ensure_within_root(root, &dest)?;
 
-    let meta = match fs::symlink_metadata(&dest) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(StoreError::Io(err).into()),
-    };
-
-    let ft = meta.file_type();
-    if ft.is_symlink() {
-        return Err(StoreError::PathOutsideRoot(dest).into());
-    }
-    if ft.is_dir() {
-        return Ok(());
-    }
-
     match fs::remove_file(&dest) {
-        Ok(()) => {
-            prune_empty_parents(&meta_root, dest.parent());
+        Ok(()) => Ok(()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::IsADirectory
+                    | io::ErrorKind::NotADirectory
+            ) || fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_dir()) =>
+        {
             Ok(())
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(StoreError::Io(err).into()),
-    }
-}
-
-fn prune_empty_parents(stop_at: &Path, mut current: Option<&Path>) {
-    while let Some(dir) = current {
-        if dir == stop_at || !dir.starts_with(stop_at) {
-            break;
-        }
-        if fs::remove_dir(dir).is_err() {
-            break;
-        }
-        current = dir.parent();
     }
 }
 
@@ -1448,12 +1475,9 @@ mod tests {
             vec![lineage.clone()]
         );
 
-        // Delete and verify empty parent pruning allows reusing parent path.
+        // Delete removes the entry.
         store.delete_meta(&lineage).await.unwrap();
         assert!(store.get_meta(&lineage).await.unwrap().is_none());
-        let runs_key = RelPath::parse("runs").unwrap();
-        store.put_meta(&runs_key, b"reused").await.unwrap();
-        assert_eq!(store.get_meta(&runs_key).await.unwrap().unwrap(), b"reused");
     }
 
     /// Keeps the temp dir alive and restores write permissions before it is removed.

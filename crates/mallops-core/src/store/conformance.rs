@@ -297,6 +297,30 @@ pub(crate) async fn meta_round_trip<S: ArtifactStore>(store: &S) {
     store.put_meta(&cache, b"{\"v\":2}").await.unwrap();
     assert_eq!(store.get_meta(&cache).await.unwrap().unwrap(), b"{\"v\":2}");
 
+    // A metadata key cannot be a prefix of another key (or have another key as a prefix).
+    for conflicting in [
+        rel("runs"),
+        rel("runs/r1"),
+        rel("cache/abc.json/nested"),
+        rel("cache/abc.json/a/b"),
+    ] {
+        let err = store.put_meta(&conflicting, b"conflict").await.unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidPath(_)),
+            "expected InvalidPath for conflicting meta key '{conflicting}', got {err:?}"
+        );
+    }
+    assert_eq!(store.get_meta(&cache).await.unwrap().unwrap(), b"{\"v\":2}");
+    assert_eq!(store.get_meta(&lineage).await.unwrap().unwrap(), b"l1");
+    assert!(store.get_meta(&rel("runs")).await.unwrap().is_none());
+    assert!(
+        store
+            .get_meta(&rel("cache/abc.json/nested"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     // Prefix matches on a segment boundary, sorted.
     assert_eq!(
         store.list_meta(&rel("cache")).await.unwrap(),

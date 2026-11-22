@@ -150,6 +150,39 @@ pub enum Error {
     InvalidPath(String),
     Block { id: String, source: Box<dyn std::error::Error + Send + Sync> },
 }
+
+/// Runtime settings: `new(store)` defaults to available parallelism, `EnvSecretProvider`,
+/// `std::env::temp_dir()` and a cancel token that never fires.
+#[non_exhaustive]
+pub struct RuntimeConfig {
+    pub max_jobs: usize,                     // `--jobs`; 0 counts as 1
+    pub store: Arc<dyn ArtifactStore>,
+    pub secret_provider: Arc<dyn SecretProvider>,
+    pub workdir_root: PathBuf,               // per-run temporary workdirs are created here
+    pub cancel: CancelToken,                 // external cancellation, seen by blocks via ctx.cancel()
+}
+
+pub struct Runtime { /* config */ }
+impl Runtime {
+    pub fn new(config: RuntimeConfig) -> Self;
+    // Err only for runtime failures; node outcomes are in the summary.
+    pub async fn run(&self, pipeline: &ValidatedPipeline) -> Result<RunSummary, Error>;
+}
+
+#[non_exhaustive]
+pub struct RunSummary { pub run_id: RunId, pub nodes: BTreeMap<String, NodeSummary> } // is_success()
+
+#[non_exhaustive]
+pub struct NodeSummary {
+    pub status: Status,
+    pub duration: Duration,                  // zero if the node never started
+    pub outputs: BTreeMap<String, ArtifactId>, // committed outputs by port
+    pub reason: Option<String>,              // why skipped / cancelled
+    pub error: Option<Error>,                // Failed node, or Error::Cancelled from a cancelled block
+}
+
+#[non_exhaustive]
+pub enum Status { Succeeded, Failed, Skipped, Cancelled }
 ```
 
 - **Validation**: `PipelineConfig::validate(&BlockRegistry) -> Result<ValidatedPipeline, Error>` checks DAG, resolved ports, `with:` configs and `serve.package` in one pass without running any block, aggregating `ValidationError { path, message }` (dotted paths such as `blocks.eval.in.test`, see SPEC §5). `ValidatedPipeline` holds nodes in topological order (ties by id), each with its `Arc<dyn Block>`, `BlockConfig` and `ResolvedPorts`. `PipelineBuilder` builds the same `PipelineConfig` in Rust, available without the `yaml` feature, and `build(&registry)` goes through the same validator.
@@ -184,8 +217,13 @@ sequenceDiagram
     Core-->>CLI: run summary
 ```
 
-- Scheduler: `tokio` tasks, bounded concurrency (`--jobs`), `spawn_blocking` for heavy CPU/hashing/filesystem work, cooperative `CancelToken` (+ `kill_on_drop` for external child processes).
-- Failure and skipping: a failed node cancels its descendants; a `BlockOutcome::Skipped` (e.g. a failed quality gate) skips downstream nodes that require its outputs and records `Status::Skipped` in lineage. Independent branches still finish. Re-running resumes from cache.
+- Scheduler: nodes in topological order start as soon as all their upstream nodes have finished, as `tokio` tasks in a `JoinSet`, bounded by a `Semaphore` of `max_jobs` permits (`--jobs`); `spawn_blocking` for heavy CPU/hashing/filesystem work (+ `kill_on_drop` for external child processes). Each node runs through one function (`run_node`: job slot → load inputs with `store.get` → `block.run` → commit), the single place where caching (#8) and lineage (#9) hook in. Its future is wrapped with `.instrument(info_span!("node", id, block))`; the span never lives in `Context`.
+- Failure: a node whose block or commit fails is `Status::Failed` (with its `error`); all its descendants are `Cancelled` without running, with a reason naming the failed node. Independent branches still finish. Re-running resumes from cache.
+- Skipping: `BlockOutcome::Skipped` (e.g. a failed quality gate) marks the node `Skipped`; outputs it still returns are committed. A consumer with any **required** input from a `Skipped` node, or whose required upstream output was not committed, is `Skipped` without running, even when its other inputs succeeded (fan-in). Optional inputs without a committed artifact are absent from `Inputs`. A failed or cancelled parent wins over a skipped one (`Cancelled`).
+- Cancellation: cooperative through `RuntimeConfig::cancel`, the token blocks see as `ctx.cancel()`. Once it fires no new node starts (`Cancelled`, reason `run cancelled`); a block that returns `Error::Cancelled` is `Cancelled` with that error, not `Failed`. In-flight tasks are never aborted.
+- Commit (`runtime/commit.rs`): drafts are checked before any `store.put`, and all violations are reported at once as `Error::Validation` with paths `out.<port>`: unknown output port, `Port::accepts_manifest` mismatch (kind/format/flavor), missing required output on `Produced` (optional on `Skipped`), `File`/`Dir` payloads that do not resolve inside the node workdir (canonicalized, no `..` or symlink escapes). `manifest.parents` is replaced by the node's input ids, sorted and deduplicated.
+- Workdir: each run creates a `tempfile::TempDir` (prefix `mallops-run-<run_id>-`) in `workdir_root`, with one subdirectory per node passed as `ctx.workdir()`; it is removed when the run ends.
+- Result: `run` returns `Err` only for runtime-level failures (e.g. the run workdir cannot be created); node outcomes go to the `RunSummary`.
 - Batch DAG only: `serve` is not a batch DAG node. `mallops run` executes `blocks:` and produces a `package` artifact; `mallops serve` consumes that package separately ([ADR-0007](adr/0007-core-contracts-revision.md)).
 
 ## 5. Plugin model

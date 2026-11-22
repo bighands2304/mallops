@@ -1,6 +1,6 @@
 # mallops — Technical Specification
 
-> Status: **Draft** · Target: v0.1 · Last update: 2026-11-21
+> Status: **Draft** · Target: v0.1 · Last update: 2026-11-23
 
 ## 1. Vision
 
@@ -133,7 +133,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 
 | Id | Requirement |
 |---|---|
-| NFR-1 Performance | Core overhead per block < 5 ms; independent branches run in parallel. |
+| NFR-1 Performance | Core overhead per block < 5 ms (median on `MemoryStore`, checked by the ignored test `runtime_nfr1_block_overhead`); independent branches run in parallel. |
 | NFR-2 Reproducibility | Same config + same input hashes + same seed ⇒ same artifact hashes for deterministic blocks; unchanged nodes are skipped (cache). |
 | NFR-3 Portability | Linux, macOS, Windows; x86_64 and aarch64. Edge targets armv7. |
 | NFR-4 Security | Secrets only via redacted `${secret:NAME}` references (never written to `config.json`, cache keys, logs, or lineage); `mallops.yaml`, native blocks, and external processes are trusted code — sandboxing applies only to WASM plugins; unsafe code-executing model flavors require explicit opt-in at serve time; signed artifacts from v0.3. |
@@ -213,6 +213,12 @@ Rules:
 - `in` wires named inputs to `<block>.<output>` (split at the first `.`); this defines the DAG. Cycles and self-loops are rejected.
 - `with` is block-specific config, validated by `Block::validate_config` (using `serde` in v0.1; optional JSON Schema validation behind the `schema-validate` feature). Each block also supports `cache: false` to bypass caching and an optional `seed:` (u64) for deterministic blocks.
 - Validation (`PipelineConfig::validate`, behind `mallops validate`) runs in one pass, never calls `Block::run`, and reports every problem at once as `Error::Validation(Vec<ValidationError>)`, each with a dotted `path`: `blocks.<id>.use` (unknown block, or a `Stage::Serve` block, which is not a DAG node), `blocks.<id>.in.<port>` (malformed reference, unknown upstream node or output port, undeclared input port, `kind`/`format`/`flavor` mismatch, required input not connected), `blocks.<id>.with[.<sub>]` (errors of `Block::validate_config` and `Block::resolve_ports`, prefixed with `blocks.<id>.with`), `blocks.<id>` (one error per cycle, on its first node by id, listing the nodes) and `serve.package` (not `<node>.<output>`, unknown node or output, or kind other than `package`). A node whose block is unknown, is a `Stage::Serve` block, or whose `with:` fails `validate_config` or `resolve_ports` is unresolved: checks that need its ports (declared input ports, required inputs, output ports, `kind`/`format`/`flavor` compatibility of the edges touching it, `serve.package` pointing at it) are skipped, so one root cause yields one error. When `validate_config` fails, `resolve_ports` is not called. Nodes of the validated pipeline are in topological order, ties broken by node id.
+- Execution (`Runtime::run`, behind `mallops run`) runs nodes of the validated pipeline as soon as all their upstream nodes have finished, at most `--jobs` (`RuntimeConfig::max_jobs`, `0` counts as `1`) blocks at a time, and returns a `RunSummary` with one `NodeSummary` per node: `status` (`Succeeded`, `Failed`, `Skipped`, `Cancelled`), `duration`, committed output ids, and a skip/cancel `reason` or the `error`. Node outcomes never make `run` return `Err`; only runtime failures do (for example, the run workdir cannot be created). Rules:
+  - A node whose block or output commit fails is `Failed`; all its descendants are `Cancelled` without running, with a reason naming the failed node. Independent branches finish.
+  - `BlockOutcome::Skipped` marks the node `Skipped` (outputs it still returns are committed). A consumer is `Skipped` without running when any **required** input comes from a `Skipped` node or was not committed, even if its other inputs succeeded (fan-in). An optional input without a committed artifact is simply absent. If a node has both a failed/cancelled and a skipped parent, it is `Cancelled`.
+  - Cancellation is cooperative: once the run's `CancelToken` fires, no new node starts (`Cancelled`, reason `run cancelled`); a running block that returns `Error::Cancelled` is `Cancelled` (not `Failed`). Nothing is aborted forcibly.
+  - Output drafts are validated before any `store.put` (errors at `out.<port>`): every draft names a declared output port and satisfies its `kind`/`format`/`flavor`; a `Produced` outcome provides every required output; `File`/`Dir` payloads resolve inside the node workdir. The runtime sets `parents` to the node's input ids (sorted, deduplicated).
+  - Each run gets a temporary workdir under `RuntimeConfig::workdir_root` with one subdirectory per node (`ctx.workdir()`); it is removed when the run ends.
 - Values may reference environment variables `${env:NAME}` (resolved into `config` and included in `config_hash`; `NAME` is `[A-Za-z0-9_]+`; interpolated only in string values of each block's `with`, of lineage sink `with`, and in `store.path`, never in keys, `in`, `seed` or elsewhere; replaced text is not re-scanned; no escape syntax; a missing variable is an error naming the file and the block, sink or `store.path`) and secrets `${secret:NAME}` (same `NAME` charset, validated at load; kept literally in the config, never resolved at load time; resolved on demand via `MALLOPS_SECRET_<NAME>` in v0.1 into a redacted `Secret`, never written to `config.json`, cache keys, logs, or lineage).
 - Unknown keys are rejected (`deny_unknown_fields`); `lineage` accepts only `off` or a list of sinks; `version` must be `1`; duplicate block ids (or `in` ports) are rejected. Syntax and schema errors are reported as `<file>:<line>:<column>: <message>`.
 - A JSON Schema for `mallops.yaml` can be generated via the optional `schema` feature (`schemars`) for editor completion.

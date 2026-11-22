@@ -3,7 +3,7 @@
 //! See `docs/SPEC.md` §2 and §4.1, `docs/ARCHITECTURE.md` §3, and
 //! `docs/adr/0007-core-contracts-revision.md` (D4, D7).
 
-mod secret;
+pub(crate) mod secret;
 
 use std::fmt;
 use std::path::{Path, PathBuf};

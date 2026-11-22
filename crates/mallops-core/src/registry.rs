@@ -75,10 +75,10 @@ impl BlockRegistry {
     pub fn register(&mut self, block: Arc<dyn Block>) -> Result<(), Error> {
         let id: BlockRef = block.spec().id.parse()?;
         match self.0.entry(id) {
-            Entry::Occupied(e) => Err(Error::Validation(format!(
-                "block `{}` is already registered",
-                e.key()
-            ))),
+            Entry::Occupied(e) => Err(Error::validation(
+                "",
+                format!("block `{}` is already registered", e.key()),
+            )),
             Entry::Vacant(e) => {
                 e.insert(block);
                 Ok(())

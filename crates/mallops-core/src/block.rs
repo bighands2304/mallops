@@ -367,7 +367,7 @@ impl Inputs {
     pub fn get(&self, port: &str) -> Result<&Artifact, Error> {
         self.0
             .get(port)
-            .ok_or_else(|| Error::Validation(format!("missing input port `{port}`")))
+            .ok_or_else(|| Error::validation("", format!("missing input port `{port}`")))
     }
 
     /// Returns the artifact bound to `port`, if any (for inputs declared [`Port::optional`]).
@@ -568,7 +568,7 @@ mod tests {
         let inputs = Inputs::new().with("model", art.clone());
         assert_eq!(inputs.get("model").unwrap(), &art);
         let err = inputs.get("data").unwrap_err();
-        assert!(matches!(&err, Error::Validation(m) if m.contains("data")));
+        assert!(matches!(&err, Error::Validation(v) if v[0].message.contains("data")));
         assert!(inputs.try_get("data").is_none());
     }
 
@@ -598,7 +598,7 @@ mod tests {
         }
         fn validate_config(&self, config: &serde_json::Value) -> Result<(), Error> {
             if config.get("bad").is_some() {
-                return Err(Error::Validation("bad config".into()));
+                return Err(Error::validation("", "bad config"));
             }
             Ok(())
         }

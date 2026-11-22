@@ -47,7 +47,7 @@ impl FromStr for RunId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         ulid::Ulid::from_string(s)
             .map(Self)
-            .map_err(|err| Error::Validation(format!("invalid run id `{s}`: {err}")))
+            .map_err(|err| Error::validation("", format!("invalid run id `{s}`: {err}")))
     }
 }
 

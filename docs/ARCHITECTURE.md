@@ -141,7 +141,7 @@ pub enum ArtifactKind { Dataset, Features, Transform, Model, Metrics, Package, B
 #[non_exhaustive]
 pub enum Error {
     Config(String),
-    Validation(Vec<ValidationError>),        // v0.1 (#3): `Validation(String)`; `Vec<ValidationError>` arriva con #6
+    Validation(Vec<ValidationError>),        // all problems of one pass; ValidationError { path, message }
     Store(StoreError),
     Runtime(String),
     Cancelled,
@@ -152,6 +152,7 @@ pub enum Error {
 }
 ```
 
+- **Validation**: `PipelineConfig::validate(&BlockRegistry) -> Result<ValidatedPipeline, Error>` checks DAG, resolved ports, `with:` configs and `serve.package` in one pass without running any block, aggregating `ValidationError { path, message }` (dotted paths such as `blocks.eval.in.test`, see SPEC §5). `ValidatedPipeline` holds nodes in topological order (ties by id), each with its `Arc<dyn Block>`, `BlockConfig` and `ResolvedPorts`. `PipelineBuilder` builds the same `PipelineConfig` in Rust, available without the `yaml` feature, and `build(&registry)` goes through the same validator.
 - **Secrets (`Secret`)**: opaque newtype whose `Debug`/`Display` renders `"***"` and which does not implement `Serialize`. Resolved on demand via `ctx.secret("NAME")` (backed in v0.1 by `MALLOPS_SECRET_<NAME>` env vars) and excluded from `config.json`, cache keys, `config_hash`, logs, and lineage.
 - **`Predictor` placement**: in v0.1, the minimal `Predictor` / `LoadedPredictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`; see [§7 Serving](#7-serving)) and will be promoted to `mallops-core` before 1.0 once validated across backends ([ADR-0007](adr/0007-core-contracts-revision.md)).
 
@@ -166,7 +167,7 @@ sequenceDiagram
     participant Store
     participant B as Block
     CLI->>Core: run(mallops.yaml)
-    Core->>Core: parse, validate config & resolved ports, topo-sort
+    Core->>Core: parse, validate config & resolved ports, topo-sort (PipelineConfig::validate)
     loop each ready node (parallel when independent)
         Core->>B: cache_policy(ctx)
         Core->>Core: cache key = hash(block id, version, config_hash, input ids, extra_hash)

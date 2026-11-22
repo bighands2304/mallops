@@ -13,11 +13,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{BlockRef, Error};
 
-fn default_host() -> String {
+pub(crate) fn default_host() -> String {
     "127.0.0.1".to_owned()
 }
 
-fn default_port() -> u16 {
+pub(crate) fn default_port() -> u16 {
     8080
 }
 

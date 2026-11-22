@@ -6,12 +6,13 @@
 //! - `meta/<rel-path>` — mutable auxiliary metadata (cache entries, run lineage, etc.)
 //! - `.tmp/` — same-filesystem staging directory for atomic writes
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::store::payload::{self, PayloadEntry};
+use crate::store::payload::{self, PayloadEntry, WalkEntry};
 use crate::{
     Artifact, ArtifactId, ArtifactStore, BoxFuture, Digest, Error, Manifest, PayloadFile,
     PayloadSource, RelPath, StoreError,
@@ -114,16 +115,23 @@ impl OwnedPayloadSource {
     }
 }
 
-async fn run_blocking<F, T>(f: F) -> Result<T, Error>
-where
-    F: FnOnce() -> Result<T, Error> + Send + 'static,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(f).await.map_err(|err| {
-        Error::Store(StoreError::Backend(format!(
-            "blocking store task failed: {err}"
-        )))
-    })?
+impl LocalStore {
+    fn blocking<'a, T, F>(&'a self, f: F) -> BoxFuture<'a, Result<T, Error>>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Path) -> Result<T, Error> + Send + 'static,
+    {
+        let root = self.root.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || f(&root))
+                .await
+                .map_err(|err| {
+                    Error::Store(StoreError::Backend(format!(
+                        "blocking store task failed: {err}"
+                    )))
+                })?
+        })
+    }
 }
 
 impl ArtifactStore for LocalStore {
@@ -132,17 +140,13 @@ impl ArtifactStore for LocalStore {
         manifest: Manifest,
         payload: PayloadSource<'a>,
     ) -> BoxFuture<'a, Result<ArtifactId, Error>> {
-        let root = self.root.clone();
-        let owned_payload = OwnedPayloadSource::from_borrowed(payload);
-        Box::pin(
-            async move { run_blocking(move || put_sync(&root, manifest, owned_payload)).await },
-        )
+        let owned = OwnedPayloadSource::from_borrowed(payload);
+        self.blocking(move |root| put_sync(root, manifest, owned))
     }
 
     fn get<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<Option<Artifact>, Error>> {
-        let root = self.root.clone();
         let id = *id;
-        Box::pin(async move { run_blocking(move || get_sync(&root, id)).await })
+        self.blocking(move |root| get_sync(root, id))
     }
 
     fn fetch<'a>(
@@ -150,22 +154,19 @@ impl ArtifactStore for LocalStore {
         id: &'a ArtifactId,
         dest: &'a Path,
     ) -> BoxFuture<'a, Result<PathBuf, Error>> {
-        let root = self.root.clone();
         let id = *id;
         let dest = dest.to_path_buf();
-        Box::pin(async move { run_blocking(move || fetch_sync(&root, id, &dest)).await })
+        self.blocking(move |root| fetch_sync(root, id, &dest))
     }
 
     fn verify<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<(), Error>> {
-        let root = self.root.clone();
         let id = *id;
-        Box::pin(async move { run_blocking(move || verify_sync(&root, id)).await })
+        self.blocking(move |root| verify_sync(root, id))
     }
 
     fn exists<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<bool, Error>> {
-        let root = self.root.clone();
         let id = *id;
-        Box::pin(async move { run_blocking(move || exists_sync(&root, id)).await })
+        self.blocking(move |root| exists_sync(root, id))
     }
 
     fn put_meta<'a>(
@@ -173,28 +174,24 @@ impl ArtifactStore for LocalStore {
         key: &'a RelPath,
         data: &'a [u8],
     ) -> BoxFuture<'a, Result<(), Error>> {
-        let root = self.root.clone();
         let key = key.clone();
         let data = data.to_vec();
-        Box::pin(async move { run_blocking(move || put_meta_sync(&root, &key, &data)).await })
+        self.blocking(move |root| put_meta_sync(root, &key, &data))
     }
 
     fn get_meta<'a>(&'a self, key: &'a RelPath) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
-        let root = self.root.clone();
         let key = key.clone();
-        Box::pin(async move { run_blocking(move || get_meta_sync(&root, &key)).await })
+        self.blocking(move |root| get_meta_sync(root, &key))
     }
 
     fn list_meta<'a>(&'a self, prefix: &'a RelPath) -> BoxFuture<'a, Result<Vec<RelPath>, Error>> {
-        let root = self.root.clone();
         let prefix = prefix.clone();
-        Box::pin(async move { run_blocking(move || list_meta_sync(&root, &prefix)).await })
+        self.blocking(move |root| list_meta_sync(root, &prefix))
     }
 
     fn delete_meta<'a>(&'a self, key: &'a RelPath) -> BoxFuture<'a, Result<(), Error>> {
-        let root = self.root.clone();
         let key = key.clone();
-        Box::pin(async move { run_blocking(move || delete_meta_sync(&root, &key)).await })
+        self.blocking(move |root| delete_meta_sync(root, &key))
     }
 }
 
@@ -240,9 +237,40 @@ fn artifact_dir(root: &Path, id: ArtifactId) -> PathBuf {
 }
 
 fn ensure_dir_within_root(root: &Path, dir: &Path) -> Result<(), Error> {
-    ensure_within_root(root, dir)?;
     fs::create_dir_all(dir).map_err(StoreError::from)?;
     ensure_within_root(root, dir)
+}
+
+fn stat_artifact_dir(root: &Path, id: ArtifactId) -> Result<Option<PathBuf>, Error> {
+    let dir = artifact_dir(root, id);
+    ensure_within_root(root, &dir)?;
+
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(Some(dir)),
+        Ok(_) => Err(StoreError::Corrupted {
+            id,
+            reason: "stored artifact entry is not a directory".to_owned(),
+        }
+        .into()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(StoreError::Io(err).into()),
+    }
+}
+
+fn check_payload_dir(artifact_dir: &Path, id: ArtifactId) -> Result<PathBuf, Error> {
+    let payload_dir = artifact_dir.join(PAYLOAD_DIR);
+    let meta = fs::symlink_metadata(&payload_dir).map_err(|err| StoreError::Corrupted {
+        id,
+        reason: format!("missing or unreadable payload directory: {err}"),
+    })?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return Err(StoreError::Corrupted {
+            id,
+            reason: "stored payload entry is not a regular directory".to_owned(),
+        }
+        .into());
+    }
+    Ok(payload_dir)
 }
 
 fn put_sync(
@@ -310,47 +338,38 @@ fn put_sync(
         return Ok(id);
     }
 
-    // Take ownership of staging_path so read-only cleanup always runs if publishing fails.
+    // Take ownership of staging_path so read-only cleanup always runs if publishing fails or loses a race.
     let staging_path = staging.keep();
-    let publish_res = publish_staged_artifact(&staging_path, &final_dir, &artifacts_root, id);
-    if publish_res.is_err() {
-        let _ = remove_readonly_tree(&staging_path);
-    }
-    publish_res
-}
+    let publish = (|| -> Result<ArtifactId, Error> {
+        set_file_readonly(&staging_path.join(MANIFEST_FILE))?;
+        set_tree_readonly(&staging_path.join(PAYLOAD_DIR))?;
 
-fn publish_staged_artifact(
-    staging_path: &Path,
-    final_dir: &Path,
-    artifacts_root: &Path,
-    id: ArtifactId,
-) -> Result<ArtifactId, Error> {
-    set_file_readonly(&staging_path.join(MANIFEST_FILE))?;
-    set_tree_readonly(&staging_path.join(PAYLOAD_DIR))?;
-
-    match fs::rename(staging_path, final_dir) {
-        Ok(()) => {
-            #[cfg(unix)]
-            File::open(artifacts_root)
-                .and_then(|dir| dir.sync_all())
-                .map_err(StoreError::from)?;
-            #[cfg(not(unix))]
-            let _ = artifacts_root;
-            // ponytail: best-effort chmod after publish; the artifact is already atomically live,
-            // so failing here would abort a succeeded put(). Must run after rename because moving
-            // a directory updates its `..` entry.
-            let _ = set_dir_readonly(final_dir);
-            Ok(id)
-        }
-        Err(err) => {
-            let _ = remove_readonly_tree(staging_path);
-            if fs::symlink_metadata(final_dir).is_ok_and(|meta| meta.file_type().is_dir()) {
+        match fs::rename(&staging_path, &final_dir) {
+            Ok(()) => {
+                #[cfg(unix)]
+                File::open(&artifacts_root)
+                    .and_then(|dir| dir.sync_all())
+                    .map_err(StoreError::from)?;
+                // ponytail: best-effort chmod after publish; the artifact is already atomically
+                // live, so failing here would abort a succeeded put(). Must run after rename
+                // because moving a directory updates its `..` entry.
+                let _ = set_dir_readonly(&final_dir);
                 Ok(id)
-            } else {
-                Err(StoreError::Io(err).into())
+            }
+            Err(err) => {
+                if fs::symlink_metadata(&final_dir).is_ok_and(|meta| meta.file_type().is_dir()) {
+                    Ok(id)
+                } else {
+                    Err(StoreError::Io(err).into())
+                }
             }
         }
+    })();
+
+    if publish.is_err() || fs::symlink_metadata(&staging_path).is_ok() {
+        let _ = remove_readonly_tree(&staging_path);
     }
+    publish
 }
 
 struct HashingWriter<W> {
@@ -395,35 +414,15 @@ fn hash_file_streaming(path: &Path) -> Result<(u64, Digest), io::Error> {
 }
 
 fn get_sync(root: &Path, id: ArtifactId) -> Result<Option<Artifact>, Error> {
-    let dir = artifact_dir(root, id);
-    ensure_within_root(root, &dir)?;
-
-    let meta = match fs::symlink_metadata(&dir) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(StoreError::Io(err).into()),
+    let Some(dir) = stat_artifact_dir(root, id)? else {
+        return Ok(None);
     };
-    if !meta.file_type().is_dir() {
-        return Err(StoreError::Corrupted {
-            id,
-            reason: "stored artifact entry is not a directory".to_owned(),
-        }
-        .into());
-    }
-
     let manifest = read_stored_manifest(&dir, id)?;
     Ok(Some(Artifact::new(id, manifest)))
 }
 
 fn exists_sync(root: &Path, id: ArtifactId) -> Result<bool, Error> {
-    let dir = artifact_dir(root, id);
-    ensure_within_root(root, &dir)?;
-
-    match fs::symlink_metadata(&dir) {
-        Ok(meta) => Ok(meta.file_type().is_dir()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(StoreError::Io(err).into()),
-    }
+    Ok(stat_artifact_dir(root, id)?.is_some())
 }
 
 /// Rejects a `fetch` destination that resolves inside `root` (including non-existent paths whose
@@ -485,38 +484,10 @@ fn ensure_dest_outside_root(root: &Path, dest: &Path) -> Result<(), Error> {
 fn fetch_sync(root: &Path, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error> {
     ensure_dest_outside_root(root, dest)?;
 
-    let dir = artifact_dir(root, id);
-    ensure_within_root(root, &dir)?;
-
-    let dir_meta = match fs::symlink_metadata(&dir) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(StoreError::NotFound(id).into());
-        }
-        Err(err) => return Err(StoreError::Io(err).into()),
-    };
-    if !dir_meta.file_type().is_dir() {
-        return Err(StoreError::Corrupted {
-            id,
-            reason: "stored artifact entry is not a directory".to_owned(),
-        }
-        .into());
-    }
-
-    let payload_dir = dir.join(PAYLOAD_DIR);
-    let payload_meta = fs::symlink_metadata(&payload_dir).map_err(|err| StoreError::Corrupted {
-        id,
-        reason: format!("missing or unreadable payload directory: {err}"),
-    })?;
-    if payload_meta.file_type().is_symlink() || !payload_meta.file_type().is_dir() {
-        return Err(StoreError::Corrupted {
-            id,
-            reason: "stored payload entry is not a regular directory".to_owned(),
-        }
-        .into());
-    }
-
+    let dir = stat_artifact_dir(root, id)?.ok_or(StoreError::NotFound(id))?;
+    let payload_dir = check_payload_dir(&dir, id)?;
     let stored_files = walk_stored_payload(&payload_dir, id)?;
+
     payload::materialize(
         dest,
         stored_files.into_iter().map(|(rel, src_path)| {
@@ -529,75 +500,26 @@ fn fetch_sync(root: &Path, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error
 }
 
 fn verify_sync(root: &Path, id: ArtifactId) -> Result<(), Error> {
-    let dir = artifact_dir(root, id);
-    ensure_within_root(root, &dir)?;
+    let dir = stat_artifact_dir(root, id)?.ok_or(StoreError::NotFound(id))?;
 
-    let dir_meta = match fs::symlink_metadata(&dir) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(StoreError::NotFound(id).into());
-        }
-        Err(err) => return Err(StoreError::Io(err).into()),
-    };
-    if !dir_meta.file_type().is_dir() {
-        return Err(StoreError::Corrupted {
+    // Reject missing or unexpected extra entries at the artifact root directory.
+    let expected = BTreeSet::from([OsString::from(MANIFEST_FILE), OsString::from(PAYLOAD_DIR)]);
+    let actual: BTreeSet<OsString> = fs::read_dir(&dir)
+        .and_then(|rd| rd.map(|e| e.map(|entry| entry.file_name())).collect())
+        .map_err(|err| StoreError::Corrupted {
             id,
-            reason: "stored artifact entry is not a directory".to_owned(),
-        }
-        .into());
-    }
-
-    // Reject unexpected extra entries at the artifact root directory.
-    let mut saw_manifest = false;
-    let mut saw_payload = false;
-    let read_dir = fs::read_dir(&dir).map_err(|err| StoreError::Corrupted {
-        id,
-        reason: format!("failed to read artifact directory: {err}"),
-    })?;
-    for entry_res in read_dir {
-        let entry = entry_res.map_err(|err| StoreError::Corrupted {
-            id,
-            reason: format!("failed to read artifact directory entry: {err}"),
+            reason: format!("failed to read artifact directory: {err}"),
         })?;
-        let name = entry.file_name();
-        match name.to_str() {
-            Some(MANIFEST_FILE) => saw_manifest = true,
-            Some(PAYLOAD_DIR) => saw_payload = true,
-            _ => {
-                return Err(StoreError::Corrupted {
-                    id,
-                    reason: format!(
-                        "unexpected entry in artifact directory: {}",
-                        name.to_string_lossy()
-                    ),
-                }
-                .into());
-            }
-        }
-    }
-    if !saw_manifest || !saw_payload {
+    if actual != expected {
         return Err(StoreError::Corrupted {
             id,
-            reason: "artifact directory is missing manifest.json or payload/".to_owned(),
+            reason: "artifact directory must contain exactly manifest.json and payload/".to_owned(),
         }
         .into());
     }
 
     let manifest = read_stored_manifest(&dir, id)?;
-
-    let payload_dir = dir.join(PAYLOAD_DIR);
-    let payload_meta = fs::symlink_metadata(&payload_dir).map_err(|err| StoreError::Corrupted {
-        id,
-        reason: format!("failed to inspect payload directory: {err}"),
-    })?;
-    if payload_meta.file_type().is_symlink() || !payload_meta.file_type().is_dir() {
-        return Err(StoreError::Corrupted {
-            id,
-            reason: "stored payload entry is not a regular directory".to_owned(),
-        }
-        .into());
-    }
-
+    let payload_dir = check_payload_dir(&dir, id)?;
     let stored_files = walk_stored_payload(&payload_dir, id)?;
     let mut payload_files = Vec::with_capacity(stored_files.len());
 
@@ -668,73 +590,39 @@ fn walk_stored_payload(
     payload_dir: &Path,
     id: ArtifactId,
 ) -> Result<BTreeMap<RelPath, PathBuf>, Error> {
+    let entries = payload::walk_files(payload_dir, false).map_err(|err| StoreError::Corrupted {
+        id,
+        reason: format!("failed to walk payload directory: {err}"),
+    })?;
+
     let mut files = BTreeMap::new();
-    let mut stack: Vec<(PathBuf, String)> = vec![(payload_dir.to_path_buf(), String::new())];
-
-    while let Some((dir_path, rel_prefix)) = stack.pop() {
-        let read_dir = fs::read_dir(&dir_path).map_err(|err| StoreError::Corrupted {
-            id,
-            reason: format!("failed to read payload directory: {err}"),
-        })?;
-
-        for entry_res in read_dir {
-            let entry = entry_res.map_err(|err| StoreError::Corrupted {
+    for WalkEntry { path, meta } in entries {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            return Err(StoreError::Corrupted {
                 id,
-                reason: format!("failed to read payload entry: {err}"),
-            })?;
-            let entry_path = entry.path();
-            let meta = fs::symlink_metadata(&entry_path).map_err(|err| StoreError::Corrupted {
-                id,
-                reason: format!("failed to inspect payload entry: {err}"),
-            })?;
-            let ft = meta.file_type();
-
-            if ft.is_symlink() {
-                return Err(StoreError::Corrupted {
-                    id,
-                    reason: format!(
-                        "unexpected symlink in stored payload: {}",
-                        entry_path.display()
-                    ),
-                }
-                .into());
+                reason: format!("unexpected symlink in stored payload: {}", path.display()),
             }
-            if !ft.is_file() && !ft.is_dir() {
-                return Err(StoreError::Corrupted {
-                    id,
-                    reason: format!(
-                        "unexpected special file in stored payload: {}",
-                        entry_path.display()
-                    ),
-                }
-                .into());
-            }
-
-            let file_name = entry.file_name();
-            let name_str = file_name.to_str().ok_or_else(|| StoreError::Corrupted {
+            .into());
+        }
+        if !ft.is_file() && !ft.is_dir() {
+            return Err(StoreError::Corrupted {
                 id,
                 reason: format!(
-                    "non-UTF-8 path component in stored payload: {}",
-                    entry_path.display()
+                    "unexpected special file in stored payload: {}",
+                    path.display()
                 ),
-            })?;
-
-            let rel_str = if rel_prefix.is_empty() {
-                name_str.to_owned()
-            } else {
-                format!("{rel_prefix}/{name_str}")
-            };
-
-            let rel = RelPath::parse(&rel_str).map_err(|err| StoreError::Corrupted {
-                id,
-                reason: format!("invalid stored payload path '{rel_str}': {err}"),
-            })?;
-
-            if ft.is_dir() {
-                stack.push((entry_path, rel_str));
-            } else {
-                files.insert(rel, entry_path);
             }
+            .into());
+        }
+        let rel = payload::rel_path_from_root(payload_dir, &path).map_err(|err| {
+            StoreError::Corrupted {
+                id,
+                reason: format!("invalid stored payload path '{}': {err}", path.display()),
+            }
+        })?;
+        if ft.is_file() {
+            files.insert(rel, path);
         }
     }
 
@@ -851,43 +739,13 @@ fn list_meta_sync(root: &Path, prefix: &RelPath) -> Result<Vec<RelPath>, Error> 
     }
 
     let mut keys = Vec::new();
-    let mut stack: Vec<(PathBuf, String)> = vec![(target, prefix.as_str().to_owned())];
-
-    while let Some((dir_path, rel_prefix)) = stack.pop() {
-        let read_dir = match fs::read_dir(&dir_path) {
-            Ok(rd) => rd,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(StoreError::Io(err).into()),
-        };
-
-        for entry_res in read_dir {
-            let entry = entry_res.map_err(StoreError::from)?;
-            let entry_path = entry.path();
-            let entry_meta = match fs::symlink_metadata(&entry_path) {
-                Ok(meta) => meta,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(StoreError::Io(err).into()),
-            };
-            let entry_ft = entry_meta.file_type();
-
-            if entry_ft.is_symlink() {
-                return Err(StoreError::PathOutsideRoot(entry_path).into());
-            }
-
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                return Err(Error::InvalidPath(format!(
-                    "non-UTF-8 metadata entry: {}",
-                    entry_path.display()
-                )));
-            };
-            let rel_str = format!("{rel_prefix}/{name_str}");
-
-            if entry_ft.is_dir() {
-                stack.push((entry_path, rel_str));
-            } else if entry_ft.is_file() {
-                keys.push(RelPath::parse(&rel_str)?);
-            }
+    for WalkEntry { path, meta } in payload::walk_files(&target, true).map_err(StoreError::from)? {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            return Err(StoreError::PathOutsideRoot(path).into());
+        }
+        if ft.is_file() {
+            keys.push(payload::rel_path_from_root(&meta_root, &path)?);
         }
     }
 
@@ -944,22 +802,12 @@ fn set_dir_readonly(_path: &Path) -> Result<(), Error> {
 
 fn set_tree_readonly(dir: &Path) -> Result<(), Error> {
     let mut dirs = vec![dir.to_path_buf()];
-    let mut idx = 0;
-
-    while idx < dirs.len() {
-        let current = dirs[idx].clone();
-        idx += 1;
-        for entry_res in fs::read_dir(&current).map_err(StoreError::from)? {
-            let entry = entry_res.map_err(StoreError::from)?;
-            let path = entry.path();
-            let ft = fs::symlink_metadata(&path)
-                .map_err(StoreError::from)?
-                .file_type();
-            if ft.is_dir() {
-                dirs.push(path);
-            } else if ft.is_file() {
-                set_file_readonly(&path)?;
-            }
+    for WalkEntry { path, meta } in payload::walk_files(dir, false).map_err(StoreError::from)? {
+        let ft = meta.file_type();
+        if ft.is_dir() {
+            dirs.push(path);
+        } else if ft.is_file() {
+            set_file_readonly(&path)?;
         }
     }
 
@@ -1035,6 +883,10 @@ mod tests {
             let store = LocalStore::new(dir.path()).unwrap();
             Self { _dir: dir, store }
         }
+
+        fn into_parts(self) -> (LocalStore, Self) {
+            (self.store.clone(), self)
+        }
     }
 
     impl Drop for TestStore {
@@ -1046,101 +898,6 @@ mod tests {
     fn sample_manifest() -> Manifest {
         Manifest::new(ArtifactKind::Blob, "bin")
             .with_metadata_entry("author", serde_json::json!("test"))
-    }
-
-    #[tokio::test]
-    async fn put_get_exists_verify_round_trip() {
-        let ts = TestStore::new();
-        let store = &ts.store;
-
-        let missing = ArtifactId::from_bytes([0x42; 32]);
-        assert!(!store.exists(&missing).await.unwrap());
-        assert!(store.get(&missing).await.unwrap().is_none());
-        let err = store.verify(&missing).await.unwrap_err();
-        assert!(matches!(err, Error::Store(StoreError::NotFound(id)) if id == missing));
-
-        // Bytes payload
-        let manifest = sample_manifest();
-        let id = store
-            .put(manifest.clone(), PayloadSource::Bytes(b"hello world"))
-            .await
-            .unwrap();
-        assert!(store.exists(&id).await.unwrap());
-        let artifact = store.get(&id).await.unwrap().unwrap();
-        assert_eq!(artifact.id(), id);
-        assert_eq!(artifact.manifest(), &manifest);
-        store.verify(&id).await.unwrap();
-
-        // Directory payload
-        let src_dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(src_dir.path().join("nested")).unwrap();
-        fs::write(src_dir.path().join("a.txt"), b"alpha").unwrap();
-        fs::write(src_dir.path().join("nested/b.txt"), b"beta").unwrap();
-
-        let dir_id = store
-            .put(sample_manifest(), PayloadSource::Dir(src_dir.path()))
-            .await
-            .unwrap();
-        store.verify(&dir_id).await.unwrap();
-
-        // Single file payload
-        let single_file = src_dir.path().join("a.txt");
-        let file_id = store
-            .put(sample_manifest(), PayloadSource::File(&single_file))
-            .await
-            .unwrap();
-        store.verify(&file_id).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn put_deduplicates_sequential_and_concurrent_writes_atomically() {
-        let ts = TestStore::new();
-        let store = ts.store.clone();
-        let manifest = sample_manifest();
-
-        let id1 = store
-            .put(manifest.clone(), PayloadSource::Bytes(b"same content"))
-            .await
-            .unwrap();
-        let id2 = store
-            .put(manifest.clone(), PayloadSource::Bytes(b"same content"))
-            .await
-            .unwrap();
-        assert_eq!(id1, id2);
-
-        // Concurrent puts of a brand-new artifact must all succeed with the same ID.
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let s = store.clone();
-            let m = manifest.clone();
-            handles.push(tokio::spawn(async move {
-                let mut files = BTreeMap::new();
-                files.insert(
-                    RelPath::parse("part1.bin").unwrap(),
-                    b"payload-1".as_slice(),
-                );
-                files.insert(
-                    RelPath::parse("sub/part2.bin").unwrap(),
-                    b"payload-2".as_slice(),
-                );
-                s.put(m, PayloadSource::Files(files)).await
-            }));
-        }
-
-        let mut ids = Vec::new();
-        for handle in handles {
-            ids.push(handle.await.unwrap().unwrap());
-        }
-        let expected = ids[0];
-        assert!(ids.iter().all(|id| *id == expected));
-        store.verify(&expected).await.unwrap();
-
-        // Staging directory must have no leftover temp entries.
-        let tmp_entries: Vec<_> = fs::read_dir(store.root().join(TMP_DIR)).unwrap().collect();
-        assert!(
-            tmp_entries.is_empty(),
-            "expected empty .tmp dir, found {tmp_entries:?}"
-        );
     }
 
     #[cfg(unix)]
@@ -1172,56 +929,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_materializes_isolated_copy() {
-        let ts = TestStore::new();
-        let store = &ts.store;
-
-        let missing = ArtifactId::from_bytes([0x99; 32]);
-        let dest_missing = tempfile::tempdir().unwrap();
-        let err = store
-            .fetch(&missing, dest_missing.path())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Store(StoreError::NotFound(id)) if id == missing));
-
-        let mut files = BTreeMap::new();
-        files.insert(
-            RelPath::parse("weights.bin").unwrap(),
-            b"original".as_slice(),
-        );
-        files.insert(
-            RelPath::parse("nested/config.json").unwrap(),
-            b"{\"k\":1}".as_slice(),
-        );
-        let id = store
-            .put(sample_manifest(), PayloadSource::Files(files))
-            .await
-            .unwrap();
-
-        let out_parent = tempfile::tempdir().unwrap();
-        let dest = out_parent.path().join("fetched");
-        let returned = store.fetch(&id, &dest).await.unwrap();
-        assert_eq!(returned, dest);
-        assert!(!returned.starts_with(store.root()));
-
-        assert_eq!(fs::read(dest.join("weights.bin")).unwrap(), b"original");
-        assert_eq!(
-            fs::read(dest.join("nested/config.json")).unwrap(),
-            b"{\"k\":1}"
-        );
-
-        // Mutating and deleting fetched files must succeed and leave stored artifact intact.
-        fs::write(dest.join("weights.bin"), b"tampered-copy").unwrap();
-        fs::remove_file(dest.join("nested/config.json")).unwrap();
-        store.verify(&id).await.unwrap();
-
-        // A second fetch must still produce the original content.
-        let dest2 = out_parent.path().join("fetched2");
-        store.fetch(&id, &dest2).await.unwrap();
-        assert_eq!(fs::read(dest2.join("weights.bin")).unwrap(), b"original");
-    }
-
-    #[tokio::test]
     async fn verify_detects_tampering_on_disk() {
         let ts = TestStore::new();
         let store = &ts.store;
@@ -1242,7 +949,7 @@ mod tests {
             "expected Corrupted on content tamper, got {err:?}"
         );
 
-        // Restore valid content, then add an extra file.
+        // Restore valid content, then add an extra file in payload/ and at artifact root.
         fs::write(&data_file, b"clean payload").unwrap();
         store.verify(&id).await.unwrap();
         let extra = dir.join(PAYLOAD_DIR).join("extra.txt");
@@ -1250,9 +957,18 @@ mod tests {
         let err = store.verify(&id).await.unwrap_err();
         assert!(
             matches!(err, Error::Store(StoreError::Corrupted { .. })),
-            "expected Corrupted on extra file, got {err:?}"
+            "expected Corrupted on extra payload file, got {err:?}"
         );
         fs::remove_file(&extra).unwrap();
+
+        let extra_root = dir.join("extra_root");
+        fs::write(&extra_root, b"sneaky").unwrap();
+        let err = store.verify(&id).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::Corrupted { .. })),
+            "expected Corrupted on extra artifact root entry, got {err:?}"
+        );
+        fs::remove_file(&extra_root).unwrap();
 
         // Plant a symlink inside payload on Unix.
         #[cfg(unix)]
@@ -1279,75 +995,6 @@ mod tests {
             matches!(err, Error::Store(StoreError::Corrupted { .. })),
             "expected Corrupted on malformed manifest verify, got {err:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn put_rejects_symlinks_case_collisions_and_unsupported_schema() {
-        let ts = TestStore::new();
-        let store = &ts.store;
-
-        // Unsupported manifest schema_version
-        let mut bad_manifest = sample_manifest();
-        bad_manifest.schema_version = 99;
-        let err = store
-            .put(bad_manifest, PayloadSource::Bytes(b"x"))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                Error::UnsupportedSchemaVersion {
-                    found: 99,
-                    expected: 1
-                }
-            ),
-            "got {err:?}"
-        );
-
-        // Case collision (A.bin vs a.bin)
-        let mut colliding = BTreeMap::new();
-        colliding.insert(RelPath::parse("A.bin").unwrap(), b"1".as_slice());
-        colliding.insert(RelPath::parse("a.bin").unwrap(), b"2".as_slice());
-        let err = store
-            .put(sample_manifest(), PayloadSource::Files(colliding))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::InvalidPath(_)), "got {err:?}");
-
-        // Symlinks (internal and external) on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-
-            let outside = tempfile::tempdir().unwrap();
-            let secret = outside.path().join("secret.txt");
-            fs::write(&secret, b"secret").unwrap();
-
-            let dir = tempfile::tempdir().unwrap();
-            let internal_target = dir.path().join("real.txt");
-            fs::write(&internal_target, b"real").unwrap();
-            symlink(&internal_target, dir.path().join("internal_link.txt")).unwrap();
-
-            let err = store
-                .put(sample_manifest(), PayloadSource::Dir(dir.path()))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, Error::Store(StoreError::InvalidPayload(_))),
-                "expected InvalidPayload for internal symlink, got {err:?}"
-            );
-
-            let dir_ext = tempfile::tempdir().unwrap();
-            symlink(&secret, dir_ext.path().join("escape.txt")).unwrap();
-            let err = store
-                .put(sample_manifest(), PayloadSource::Dir(dir_ext.path()))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, Error::Store(StoreError::InvalidPayload(_))),
-                "expected InvalidPayload for external symlink, got {err:?}"
-            );
-        }
     }
 
     #[cfg(unix)]
@@ -1438,64 +1085,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn meta_crud_and_segment_boundary_listing() {
-        let ts = TestStore::new();
-        let store = &ts.store;
-
-        let k1 = RelPath::parse("cache/a.json").unwrap();
-        let k2 = RelPath::parse("cache/sub/b.json").unwrap();
-        let k3 = RelPath::parse("cache2/c.json").unwrap();
-        let lineage = RelPath::parse("runs/01J/lineage.json").unwrap();
-
-        assert!(store.get_meta(&k1).await.unwrap().is_none());
-        store.delete_meta(&k1).await.unwrap(); // idempotent on absent key
-
-        store.put_meta(&k1, br#"{"v":1}"#).await.unwrap();
-        store.put_meta(&k2, br#"{"v":2}"#).await.unwrap();
-        store.put_meta(&k3, br#"{"v":3}"#).await.unwrap();
-        store.put_meta(&lineage, br#"{"events":[]}"#).await.unwrap();
-
-        assert_eq!(store.get_meta(&k1).await.unwrap().unwrap(), br#"{"v":1}"#);
-        // Intermediate directory is not a metadata value.
-        let cache_prefix = RelPath::parse("cache").unwrap();
-        assert!(store.get_meta(&cache_prefix).await.unwrap().is_none());
-
-        // Atomic overwrite (last-write-wins).
-        store.put_meta(&k1, br#"{"v":10}"#).await.unwrap();
-        assert_eq!(store.get_meta(&k1).await.unwrap().unwrap(), br#"{"v":10}"#);
-
-        // Segment-boundary listing (excludes cache2/c.json).
-        let listed = store.list_meta(&cache_prefix).await.unwrap();
-        assert_eq!(listed, vec![k1.clone(), k2.clone()]);
-
-        // Exact file prefix listing.
-        assert_eq!(
-            store.list_meta(&lineage).await.unwrap(),
-            vec![lineage.clone()]
-        );
-
-        // Delete removes the entry.
-        store.delete_meta(&lineage).await.unwrap();
-        assert!(store.get_meta(&lineage).await.unwrap().is_none());
-    }
-
-    /// Keeps the temp dir alive and restores write permissions before it is removed.
-    struct Guard(tempfile::TempDir);
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            make_tree_writable(self.0.path());
-        }
-    }
-
     mod conformance {
         use super::*;
 
-        crate::store::conformance::conformance_tests!(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let store = LocalStore::new(dir.path()).unwrap();
-            (store, Guard(dir))
-        });
+        crate::store::conformance::conformance_tests!(|| TestStore::new().into_parts());
     }
 }

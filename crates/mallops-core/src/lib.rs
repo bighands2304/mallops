@@ -4,6 +4,7 @@
 
 mod artifact;
 mod block;
+pub mod config;
 mod context;
 mod error;
 mod registry;

@@ -15,7 +15,8 @@ categories.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["yaml"]
+yaml = ["dep:yaml_serde"]
 schema = ["dep:schemars"]
 
 [dependencies]
@@ -27,6 +28,7 @@ thiserror.workspace = true
 tokio.workspace = true
 ulid.workspace = true
 schemars = { workspace = true, optional = true }
+yaml_serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

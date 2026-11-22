@@ -77,7 +77,7 @@ CI also runs, and `ci-ok` requires:
 - **Coverage:** `cargo llvm-cov --workspace --all-features --fail-under-lines 85` (install with `cargo install cargo-llvm-cov`).
 - **SAST:** CodeQL (`security-and-quality`) on Rust and on the workflows; any error or warning fails the PR. Alerts are in the Security tab.
 - **SCA:** `cargo deny check` on the whole dependency tree (advisories, licenses, sources), plus GitHub dependency review on the dependencies a PR adds or updates.
-- **Workflow security:** [zizmor](https://docs.zizmor.sh) on `.github/workflows` (`uvx zizmor .github/workflows`; config in `.github/zizmor.yml`).
+- **Workflow security:** [zizmor](https://docs.zizmor.sh) on `.github/` (`uvx zizmor .`; config in `.github/zizmor.yml`).
 
 ## Documentation
 

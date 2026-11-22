@@ -4,6 +4,7 @@ updates:
     directory: /
     target-branch: dev
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
     commit-message: { prefix: "build" }
     groups:
       cargo: { patterns: ["*"] }
@@ -11,6 +12,7 @@ updates:
     directory: /
     target-branch: dev
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
     commit-message: { prefix: "ci" }
     groups:
       actions: { patterns: ["*"] }
@@ -18,6 +20,7 @@ updates:
     directory: /docs
     target-branch: dev
     schedule: { interval: monthly }
+    cooldown: { default-days: 7 }
     commit-message: { prefix: "docs" }
     groups:
       docs: { patterns: ["*"] }

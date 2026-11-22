@@ -9,7 +9,9 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::{Artifact, ArtifactKind, Digest, Error, Manifest, PayloadSource, RelPath};
+use crate::{
+    Artifact, ArtifactKind, BoxFuture, Context, Digest, Error, Manifest, PayloadSource, RelPath,
+};
 
 /// Lifecycle stage a block belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -383,6 +385,70 @@ impl Inputs {
     }
 }
 
+/// A composable lifecycle step (ADR-0007 D2, D4).
+///
+/// Dyn-compatible: the runtime holds blocks as `Arc<dyn Block>`. A block returns
+/// [`OutputDrafts`]; it never calls `ArtifactStore::put` for its outputs.
+///
+/// ```
+/// use std::sync::Arc;
+/// use mallops_core::*;
+///
+/// struct Hello(BlockSpec);
+/// impl Block for Hello {
+///     fn spec(&self) -> &BlockSpec { &self.0 }
+///     fn run(&self, _ctx: &Context, _inputs: Inputs) -> BoxFuture<'_, Result<BlockOutcome, Error>> {
+///         Box::pin(async {
+///             let m = Manifest::new(ArtifactKind::Blob, "text");
+///             let d = OutputDraft::new(m, DraftPayload::Bytes(b"hi".to_vec()));
+///             Ok(BlockOutcome::Produced(OutputDrafts::new().with("out", d)))
+///         })
+///     }
+/// }
+///
+/// let spec = BlockSpec::new("ex/hello", "0.1.0", Stage::Custom)
+///     .with_output(Port::new("out", ArtifactKind::Blob));
+/// let ctx = Context::new(RunId::new(), std::env::temp_dir(), Arc::new(MemoryStore::new()),
+///     serde_json::Value::Null, CancelSource::new().token(), Arc::new(MemorySecretProvider::new()));
+/// let rt = tokio::runtime::Runtime::new().unwrap();
+/// let out = rt.block_on(Hello(spec).run(&ctx, Inputs::new())).unwrap();
+/// assert!(matches!(out, BlockOutcome::Produced(d) if d.len() == 1));
+/// ```
+pub trait Block: Send + Sync {
+    /// Static description of the block.
+    fn spec(&self) -> &BlockSpec;
+
+    /// Validates the `with:` configuration before the pipeline runs.
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`] (typically [`Error::Validation`]) if `config` is invalid.
+    fn validate_config(&self, _config: &serde_json::Value) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Resolves the ports for a given configuration (default: the spec's ports).
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`] if the ports cannot be derived from `config`.
+    fn resolve_ports(&self, _config: &serde_json::Value) -> Result<ResolvedPorts, Error> {
+        Ok(ResolvedPorts::from(self.spec()))
+    }
+
+    /// Cache policy for this run (default: [`CachePolicy::default`]).
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`] if the policy cannot be determined.
+    fn cache_policy(&self, _ctx: &Context) -> Result<CachePolicy, Error> {
+        Ok(CachePolicy::default())
+    }
+
+    /// Runs the block and returns output drafts for the runtime to commit.
+    fn run(&self, ctx: &Context, inputs: Inputs) -> BoxFuture<'_, Result<BlockOutcome, Error>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +550,120 @@ mod tests {
         assert_eq!(rp.inputs, spec.inputs);
         assert_eq!(rp.outputs.len(), 1);
         assert!(spec.config_schema.is_some());
+    }
+
+    use crate::{CancelSource, MemorySecretProvider, MemoryStore, RunId};
+    use std::sync::Arc;
+
+    struct Toy {
+        spec: BlockSpec,
+        skip: bool,
+    }
+
+    impl Block for Toy {
+        fn spec(&self) -> &BlockSpec {
+            &self.spec
+        }
+        fn validate_config(&self, config: &serde_json::Value) -> Result<(), Error> {
+            if config.get("bad").is_some() {
+                return Err(Error::Validation("bad config".into()));
+            }
+            Ok(())
+        }
+        fn resolve_ports(&self, config: &serde_json::Value) -> Result<ResolvedPorts, Error> {
+            let name = config.get("out").and_then(|v| v.as_str()).unwrap_or("out");
+            Ok(ResolvedPorts::new(
+                vec![],
+                vec![Port::new(name.to_string(), ArtifactKind::Blob)],
+            ))
+        }
+        fn run(
+            &self,
+            _ctx: &Context,
+            _inputs: Inputs,
+        ) -> BoxFuture<'_, Result<BlockOutcome, Error>> {
+            let skip = self.skip;
+            Box::pin(async move {
+                if skip {
+                    return Ok(BlockOutcome::Skipped {
+                        reason: "nothing to do".into(),
+                        outputs: OutputDrafts::new(),
+                    });
+                }
+                let d = OutputDraft::new(
+                    Manifest::new(ArtifactKind::Blob, "text"),
+                    DraftPayload::Bytes(b"x".to_vec()),
+                );
+                Ok(BlockOutcome::Produced(OutputDrafts::new().with("out", d)))
+            })
+        }
+    }
+
+    fn toy(skip: bool) -> Toy {
+        Toy {
+            spec: BlockSpec::new("ex/toy", "0.1.0", Stage::Custom)
+                .with_output(Port::new("out", ArtifactKind::Blob)),
+            skip,
+        }
+    }
+
+    /// Block relying on every trait default.
+    struct Plain(BlockSpec);
+    impl Block for Plain {
+        fn spec(&self) -> &BlockSpec {
+            &self.0
+        }
+        fn run(&self, _: &Context, _: Inputs) -> BoxFuture<'_, Result<BlockOutcome, Error>> {
+            Box::pin(async { Ok(BlockOutcome::Produced(OutputDrafts::new())) })
+        }
+    }
+
+    fn ctx() -> Context {
+        Context::new(
+            RunId::new(),
+            std::env::temp_dir(),
+            Arc::new(MemoryStore::new()),
+            serde_json::Value::Null,
+            CancelSource::new().token(),
+            Arc::new(MemorySecretProvider::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn block_is_dyn_compatible_and_runs() {
+        let b: Arc<dyn Block> = Arc::new(toy(false));
+        let boxed: Box<dyn Block> = Box::new(toy(true));
+        assert_eq!(b.spec().id, "ex/toy");
+        let BlockOutcome::Produced(d) = b.run(&ctx(), Inputs::new()).await.unwrap() else {
+            panic!("expected Produced")
+        };
+        assert!(d.get("out").is_some());
+        let out = boxed.run(&ctx(), Inputs::new()).await.unwrap();
+        assert!(matches!(out, BlockOutcome::Skipped { .. }));
+    }
+
+    #[test]
+    fn trait_defaults() {
+        let p = Plain(toy(false).spec);
+        assert!(p.validate_config(&serde_json::json!({"any": 1})).is_ok());
+        assert_eq!(
+            p.resolve_ports(&serde_json::Value::Null).unwrap(),
+            ResolvedPorts::from(p.spec())
+        );
+        assert_eq!(p.cache_policy(&ctx()).unwrap(), CachePolicy::default());
+    }
+
+    #[test]
+    fn overrides_validate_and_resolve() {
+        let b = toy(false);
+        assert!(b.validate_config(&serde_json::json!({})).is_ok());
+        let err = b
+            .validate_config(&serde_json::json!({"bad": 1}))
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
+        let rp = b
+            .resolve_ports(&serde_json::json!({"out": "custom"}))
+            .unwrap();
+        assert_eq!(rp.outputs[0].name, "custom");
     }
 }

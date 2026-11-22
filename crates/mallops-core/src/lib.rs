@@ -10,8 +10,8 @@ pub mod store;
 
 pub use artifact::{Artifact, ArtifactId, ArtifactKind, Digest, Manifest, PayloadFile, RelPath};
 pub use block::{
-    BlockOutcome, BlockSpec, CachePolicy, DraftPayload, Inputs, OutputDraft, OutputDrafts, Port,
-    ResolvedPorts, Stage,
+    Block, BlockOutcome, BlockSpec, CachePolicy, DraftPayload, Inputs, OutputDraft, OutputDrafts,
+    Port, ResolvedPorts, Stage,
 };
 pub use context::{
     CancelSource, CancelToken, Context, EnvSecretProvider, MemorySecretProvider, RunId, Secret,

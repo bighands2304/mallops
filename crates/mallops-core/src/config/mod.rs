@@ -3,7 +3,7 @@
 //! `${env:NAME}` values are interpolated at load time; `${secret:NAME}` references stay
 //! symbolic and are resolved on demand through `Context::secret` (ADR-0007 D7).
 
-#[allow(dead_code)] // ponytail: wired into the parser by task 5.3
+#[cfg(feature = "yaml")]
 mod interp;
 
 use std::collections::BTreeMap;
@@ -33,6 +33,7 @@ fn default_port() -> u16 {
 
 /// Artifact store settings (`store:`); defaults to a local store at `./.mallops`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct StoreConfig {
@@ -55,6 +56,7 @@ impl Default for StoreConfig {
 
 /// One lineage sink (`- sink: json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct LineageSinkConfig {
@@ -82,6 +84,30 @@ impl Default for LineageConfig {
             with: serde_json::Value::Null,
         }])
     }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for LineageConfig {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LineageConfig".into()
+    }
+
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "`off` or a list of lineage sinks",
+            "anyOf": [
+                { "const": "off" },
+                { "type": "array", "items": g.subschema_for::<LineageSinkConfig>() }
+            ]
+        })
+    }
+}
+
+/// JSON Schema of `mallops.yaml`, for editor completion.
+#[cfg(feature = "schema")]
+#[must_use]
+pub fn pipeline_config_json_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(PipelineConfig)).unwrap_or(serde_json::Value::Null)
 }
 
 impl Serialize for LineageConfig {
@@ -127,11 +153,13 @@ mod block_ref {
 
 /// One block of the batch DAG (`blocks.<id>`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct BlockConfig {
     /// Block reference (`use:`).
     #[serde(rename = "use", with = "block_ref")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub r#use: BlockRef,
     /// Input wiring: port name to `<block>.<output>` (`in:`).
     #[serde(rename = "in", default)]
@@ -149,6 +177,7 @@ pub struct BlockConfig {
 
 /// Serving settings read by `mallops serve` (not a DAG node).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ServeConfig {
@@ -164,6 +193,7 @@ pub struct ServeConfig {
 
 /// Typed `mallops.yaml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PipelineConfig {
@@ -198,13 +228,42 @@ impl PipelineConfig {
         origin: &str,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, Error> {
-        let _ = env; // ponytail: interpolazione collegata in 5.3
-        yaml_serde::from_str(src).map_err(|e| {
+        let mut cfg: Self = yaml_serde::from_str(src).map_err(|e| {
             Error::Config(match e.location() {
                 Some(l) => format!("{origin}:{}:{}: {e}", l.line(), l.column()),
                 None => format!("{origin}: {e}"),
             })
-        })
+        })?;
+        cfg.interpolate_env(origin, env)?;
+        Ok(cfg)
+    }
+
+    /// Interpolates only `blocks.*.with`, lineage sink `with` and `store.path`.
+    fn interpolate_env(
+        &mut self,
+        origin: &str,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(), Error> {
+        let ctx = |what: String, e: Error| match e {
+            Error::Config(m) => Error::Config(format!("{origin}: {what}: {m}")),
+            other => other,
+        };
+        let mut path = serde_json::Value::String(std::mem::take(&mut self.store.path));
+        let r = interp::interpolate(&mut path, env);
+        if let serde_json::Value::String(p) = path {
+            self.store.path = p;
+        }
+        r.map_err(|e| ctx("store.path".into(), e))?;
+        if let LineageConfig::Sinks(sinks) = &mut self.lineage {
+            for sink in sinks {
+                interp::interpolate(&mut sink.with, env)
+                    .map_err(|e| ctx(format!("lineage sink `{}`", sink.sink), e))?;
+            }
+        }
+        for (id, b) in &mut self.blocks {
+            interp::interpolate(&mut b.with, env).map_err(|e| ctx(format!("block `{id}`"), e))?;
+        }
+        Ok(())
     }
 
     /// Reads and parses a `mallops.yaml` file.
@@ -351,5 +410,114 @@ serve:
         );
         let deep = format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000));
         assert!(parse(&deep).is_err());
+    }
+
+    const SPEC_EXAMPLE: &str = r#"
+version: 1
+name: churn-classifier
+store:
+  kind: local
+  path: ./.mallops
+lineage:
+  - sink: json
+  - sink: openlineage
+    with: { url: "${env:OPENLINEAGE_URL}" }
+blocks:
+  raw:
+    use: std/ingest.csv
+    with:
+      path: data/customers.csv
+  features:
+    use: std/preprocess.tabular
+    in: { data: raw.dataset }
+    with:
+      target: churned
+      steps:
+        - impute: { strategy: median }
+        - scale: { method: standard }
+        - split: { test: 0.2, seed: 42 }
+  model:
+    use: std/train.external
+    in: { train: features.train }
+    with:
+      command: ["python", "train.py"]
+      flavor: sklearn-pickle
+      params: { n_estimators: 200 }
+  eval:
+    use: std/evaluate.classification
+    in: { model: model.model, test: features.test }
+    with:
+      gate: { metric: f1, min: 0.80 }
+  package:
+    use: std/package
+    in: { model: model.model, preprocess: features.transform, metrics: eval.metrics }
+serve:
+  package: package.package
+  host: 127.0.0.1
+  port: 8080
+"#;
+
+    #[test]
+    fn spec_example_interpolates_env() {
+        let env = |k: &str| (k == "OPENLINEAGE_URL").then(|| "http://ol:5000".to_owned());
+        let c = PipelineConfig::from_yaml_str(SPEC_EXAMPLE, "t.yaml", &env).unwrap();
+        let LineageConfig::Sinks(v) = &c.lineage else {
+            panic!("expected sinks")
+        };
+        assert_eq!(v[1].with["url"], "http://ol:5000");
+        assert_eq!(c.blocks.len(), 5);
+    }
+
+    #[test]
+    fn missing_env_names_origin_and_sink() {
+        let e = err(SPEC_EXAMPLE);
+        assert!(e.contains("t.yaml") && e.contains("openlineage"), "{e}");
+        assert!(e.contains("OPENLINEAGE_URL"), "{e}");
+    }
+
+    #[test]
+    fn env_in_store_path_and_block_with_only() {
+        let env = |k: &str| (k == "D").then(|| "/data".to_owned());
+        let src = "version: 1\nname: p\nstore: { path: \"${env:D}/s\" }\nblocks:\n  a: { use: std/x, with: { p: \"${env:D}\" }, in: { i: \"${env:NOPE}\" } }\n";
+        let c = PipelineConfig::from_yaml_str(src, "t", &env).unwrap();
+        assert_eq!(c.store.path, "/data/s");
+        assert_eq!(c.blocks["a"].with["p"], "/data");
+        assert_eq!(c.blocks["a"].r#in["i"], "${env:NOPE}"); // not interpolated
+        let e = PipelineConfig::from_yaml_str(
+            "version: 1\nname: p\nblocks:\n  a: { use: std/x, with: { p: \"${env:D}\" } }\n",
+            "t",
+            &|_| None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("block `a`"), "{e}");
+    }
+
+    #[test]
+    fn secret_reference_stays_symbolic() {
+        const SENTINEL: &str = "SENTINEL-SECRET-VALUE";
+        // the lookup would leak the value if secrets were resolved through it
+        let env = |_: &str| Some(SENTINEL.to_owned());
+        let src = "version: 1\nname: p\nblocks:\n  a: { use: std/x, with: { token: \"${secret:API_TOKEN}\" } }\n";
+        let c = PipelineConfig::from_yaml_str(src, "t", &env).unwrap();
+        assert_eq!(c.blocks["a"].with["token"], "${secret:API_TOKEN}");
+        let json = serde_json::to_string(&c).unwrap();
+        for out in [json, format!("{c:?}")] {
+            assert!(!out.contains(SENTINEL));
+            assert!(out.contains("${secret:API_TOKEN}") || out.contains("secret:API_TOKEN"));
+        }
+    }
+}
+
+#[cfg(all(test, feature = "schema"))]
+mod schema_tests {
+    #[test]
+    fn schema_is_valid_object() {
+        let s = super::pipeline_config_json_schema();
+        assert!(s.is_object());
+        assert_eq!(s["type"], "object");
+        assert!(s["properties"]["blocks"].is_object());
+        assert!(s["$defs"]["BlockConfig"]["properties"]["use"]["type"] == "string");
+        assert!(s["$defs"]["LineageConfig"]["anyOf"].is_array());
     }
 }

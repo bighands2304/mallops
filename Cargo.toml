@@ -23,5 +23,7 @@ all = { level = "warn", priority = -1 }
 blake3 = "1.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tempfile = "3"
 thiserror = "2.0"
+tokio = { version = "1", default-features = false, features = ["rt"] }
 schemars = "1.2"

@@ -21,6 +21,6 @@ pub use context::{
     SecretProvider,
 };
 pub use error::{Error, ValidationError};
-pub use pipeline::{ValidatedNode, ValidatedPipeline};
+pub use pipeline::{NodeBuilder, PipelineBuilder, ValidatedNode, ValidatedPipeline};
 pub use registry::{BlockRef, BlockRegistry};
 pub use store::{ArtifactStore, BoxFuture, LocalStore, MemoryStore, PayloadSource, StoreError};

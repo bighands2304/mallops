@@ -3,7 +3,11 @@
 //! [`PipelineConfig::validate`] checks the DAG, resolved ports, block configs and the
 //! `serve:` target in one pass and never runs a block.
 
+mod builder;
+
 use std::sync::Arc;
+
+pub use builder::{NodeBuilder, PipelineBuilder};
 
 use crate::config::{BlockConfig, PipelineConfig, ServeConfig};
 use crate::{Block, ResolvedPorts};

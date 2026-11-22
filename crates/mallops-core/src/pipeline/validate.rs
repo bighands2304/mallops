@@ -1,5 +1,6 @@
 //! The single-pass pipeline validator behind [`PipelineConfig::validate`].
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ValidatedNode, ValidatedPipeline};
@@ -9,27 +10,33 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// A node whose block is known and whose ports resolved.
+/// A node whose block is known, is not a serve block, and whose config and ports validated.
 struct Resolved {
     block: Arc<dyn Block>,
     ports: ResolvedPorts,
 }
 
 /// Maps an error from `validate_config`/`resolve_ports` to paths under `blocks.<id>.with`.
+///
+/// An empty `Error::Validation` still yields one error: a failing block never passes.
 fn with_errors(id: &str, e: Error) -> Vec<ValidationError> {
     let base = format!("blocks.{id}.with");
     match e {
-        Error::Validation(v) => v
+        Error::Validation(v) if !v.is_empty() => v
             .into_iter()
-            .map(|mut ve| {
-                ve.path = if ve.path.is_empty() {
+            .map(|ve| {
+                let path = if ve.path.is_empty() {
                     base.clone()
                 } else {
                     format!("{base}.{}", ve.path)
                 };
-                ve
+                ValidationError::new(path, ve.message)
             })
             .collect(),
+        Error::Validation(_) => vec![ValidationError::new(
+            base,
+            "block reported a validation failure without details",
+        )],
         other => vec![ValidationError::new(base, other.to_string())],
     }
 }
@@ -51,19 +58,21 @@ fn describe(p: &Port) -> String {
 
 /// Which of `kind`/`format`/`flavor` make `input` reject `output` (empty if it accepts).
 fn mismatches(input: &Port, output: &Port) -> Vec<&'static str> {
-    let mut dims = Vec::new();
-    if input.kind != output.kind {
-        dims.push("kind");
-        return dims;
+    if input.accepts(output) {
+        return Vec::new();
     }
-    let mut no_flavor = input.clone();
-    no_flavor.flavors.clear();
-    if !no_flavor.accepts(output) {
+    if input.kind != output.kind {
+        return vec!["kind"];
+    }
+    // same rule as `Port::accepts`: empty accepted list = any, empty produced never satisfies.
+    let bad = |acc: &[Cow<'static, str>], prod: &[Cow<'static, str>]| {
+        !acc.is_empty() && (prod.is_empty() || !prod.iter().all(|p| acc.contains(p)))
+    };
+    let mut dims = Vec::new();
+    if bad(&input.formats, &output.formats) {
         dims.push("format");
     }
-    let mut no_format = input.clone();
-    no_format.formats.clear();
-    if !no_format.accepts(output) {
+    if bad(&input.flavors, &output.flavors) {
         dims.push("flavor");
     }
     dims
@@ -123,16 +132,14 @@ impl PipelineConfig {
                 ));
                 continue;
             }
-            let mut good = true;
             if let Err(e) = block.validate_config(&cfg.with) {
                 errs.extend(with_errors(id, e));
-                good = false;
+                continue;
             }
             match block.resolve_ports(&cfg.with) {
-                Ok(ports) if good => {
+                Ok(ports) => {
                     ok.insert(id, Resolved { block, ports });
                 }
-                Ok(_) => {}
                 Err(e) => errs.extend(with_errors(id, e)),
             }
         }
@@ -159,7 +166,8 @@ impl PipelineConfig {
                 };
                 fwd.entry(up_id.as_str()).or_default().insert(id);
                 bwd.entry(id).or_default().insert(up_id.as_str());
-                // no cascading errors: port checks need both ends resolved.
+                // no cascading errors: nodes absent from `ok` (unknown block, serve block, failed
+                // `validate_config`/`resolve_ports`) skip every check that needs their ports.
                 let input = ok
                     .get(id.as_str())
                     .map(|n| (n, n.ports.inputs.iter().find(|p| p.name == port.as_str())));
@@ -328,7 +336,7 @@ mod tests {
     struct T {
         spec: crate::BlockSpec,
         cfg_err: Option<fn() -> Error>,
-        ports_err: bool,
+        ports_err: Option<fn() -> Error>,
         /// Output flavor taken from `with.flavor` when set.
         dynamic: bool,
     }
@@ -341,8 +349,8 @@ mod tests {
             self.cfg_err.map_or(Ok(()), |f| Err(f()))
         }
         fn resolve_ports(&self, c: &serde_json::Value) -> Result<ResolvedPorts, Error> {
-            if self.ports_err {
-                return Err(Error::Config("bad ports".into()));
+            if let Some(f) = self.ports_err {
+                return Err(f());
             }
             let mut r = ResolvedPorts::from(&self.spec);
             if self.dynamic {
@@ -367,7 +375,7 @@ mod tests {
         T {
             spec,
             cfg_err: None,
-            ports_err: false,
+            ports_err: None,
             dynamic: false,
         }
     }
@@ -422,6 +430,22 @@ mod tests {
                 vec![],
             ),
             t(
+                "t/wantptvision",
+                Stage::Evaluate,
+                vec![
+                    Port::new("in", ArtifactKind::Model)
+                        .with_format("pt")
+                        .with_flavor("vision"),
+                ],
+                vec![],
+            ),
+            t(
+                "t/rawmodel",
+                Stage::Train,
+                vec![],
+                vec![Port::new("out", ArtifactKind::Model)],
+            ),
+            t(
                 "t/pkg",
                 Stage::Package,
                 vec![],
@@ -450,7 +474,22 @@ mod tests {
         c.cfg_err = Some(|| Error::Config("boom".into()));
         r.register(Arc::new(c)).unwrap();
         let mut c = t("t/portsfail", Stage::Evaluate, vec![ds("in")], vec![]);
-        c.ports_err = true;
+        c.ports_err = Some(|| Error::Config("bad ports".into()));
+        r.register(Arc::new(c)).unwrap();
+        let mut c = t("t/emptycfg", Stage::Evaluate, vec![], vec![]);
+        c.cfg_err = Some(|| Error::Validation(vec![]));
+        r.register(Arc::new(c)).unwrap();
+        let mut c = t("t/emptyports", Stage::Evaluate, vec![], vec![]);
+        c.ports_err = Some(|| Error::Validation(vec![]));
+        r.register(Arc::new(c)).unwrap();
+        let mut c = t(
+            "t/bothfail",
+            Stage::Evaluate,
+            vec![ds("in")],
+            vec![ds("out")],
+        );
+        c.cfg_err = Some(|| Error::validation("x", "bad"));
+        c.ports_err = Some(|| Error::Config("bad ports".into()));
         r.register(Arc::new(c)).unwrap();
         r
     }
@@ -516,7 +555,7 @@ mod tests {
         let v = p.validate(&registry()).unwrap();
         let ids: Vec<_> = v.nodes().iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["m", "z", "a", "b"]);
-        assert!(v.serve().is_none());
+        assert!(v.config().serve.is_none());
     }
 
     #[test]
@@ -526,7 +565,13 @@ mod tests {
             Some("pkg.out"),
         );
         assert_eq!(
-            p.validate(&registry()).unwrap().serve().unwrap().package,
+            p.validate(&registry())
+                .unwrap()
+                .config()
+                .serve
+                .as_ref()
+                .unwrap()
+                .package,
             "pkg.out"
         );
     }
@@ -562,7 +607,7 @@ mod tests {
                 ("a", node("t/mid", &[("in", "c.out")])),
                 ("b", node("t/mid", &[("in", "a.out")])),
                 ("c", node("t/mid", &[("in", "b.out")])),
-                ("tail", node("t/mid", &[("in", "c.out")])),
+                ("0_tail", node("t/mid", &[("in", "c.out")])),
                 ("x", node("t/mid", &[("in", "y.out")])),
                 ("y", node("t/mid", &[("in", "x.out")])),
             ],
@@ -689,6 +734,7 @@ mod tests {
             ],
             None,
         );
+        assert_eq!(paths(&p), ["blocks.a.in.in"]);
         assert!(msg(&p, "blocks.a.in.in").starts_with("format mismatch"));
         let ok = pipe(
             vec![
@@ -709,7 +755,34 @@ mod tests {
             ],
             None,
         );
+        assert_eq!(paths(&p), ["blocks.a.in.in"]);
         assert!(msg(&p, "blocks.a.in.in").starts_with("flavor mismatch"));
+    }
+
+    #[test]
+    fn validate_port_mismatch_format_and_flavor_together() {
+        let p = pipe(
+            vec![
+                ("m", node("t/model", &[])),
+                ("a", node("t/wantptvision", &[("in", "m.out")])),
+            ],
+            None,
+        );
+        assert_eq!(paths(&p), ["blocks.a.in.in"]);
+        assert!(msg(&p, "blocks.a.in.in").starts_with("format+flavor mismatch"));
+    }
+
+    #[test]
+    fn validate_unconstrained_output_does_not_satisfy_constrained_input() {
+        let p = pipe(
+            vec![
+                ("m", node("t/rawmodel", &[])),
+                ("a", node("t/wantonnx", &[("in", "m.out")])),
+            ],
+            None,
+        );
+        assert_eq!(paths(&p), ["blocks.a.in.in"]);
+        assert!(msg(&p, "blocks.a.in.in").starts_with("format mismatch"));
     }
 
     #[test]
@@ -814,5 +887,45 @@ mod tests {
             None,
         );
         assert!(p.validate(&registry()).is_ok());
+    }
+
+    #[test]
+    fn validate_empty_validation_error_still_fails() {
+        let p = pipe(
+            vec![
+                ("c", node("t/emptycfg", &[])),
+                ("p", node("t/emptyports", &[])),
+            ],
+            None,
+        );
+        assert_eq!(paths(&p), ["blocks.c.with", "blocks.p.with"]);
+        assert!(msg(&p, "blocks.c.with").contains("without details"));
+    }
+
+    #[test]
+    fn validate_config_failure_skips_ports_and_does_not_cascade() {
+        // both validate_config and resolve_ports fail: one error, and nothing downstream.
+        let p = pipe(
+            vec![
+                ("src", node("t/src", &[])),
+                ("f", node("t/bothfail", &[("in", "src.out")])),
+                ("a", node("t/mid", &[("in", "f.out")])),
+            ],
+            Some("f.out"),
+        );
+        assert_eq!(paths(&p), ["blocks.f.with.x"]);
+    }
+
+    #[test]
+    fn validate_serve_block_with_edges_does_not_cascade() {
+        let p = pipe(
+            vec![
+                ("src", node("t/src", &[])),
+                ("s", node("t/serve", &[("in", "src.out")])),
+                ("a", node("t/mid", &[("in", "s.out")])),
+            ],
+            Some("s.out"),
+        );
+        assert_eq!(paths(&p), ["blocks.s.use"]);
     }
 }

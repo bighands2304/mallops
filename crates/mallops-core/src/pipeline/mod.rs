@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub use builder::{NodeBuilder, PipelineBuilder};
 
-use crate::config::{BlockConfig, PipelineConfig, ServeConfig};
+use crate::config::{BlockConfig, PipelineConfig};
 use crate::{Block, ResolvedPorts};
 
 mod validate;
@@ -57,11 +57,5 @@ impl ValidatedPipeline {
     #[must_use]
     pub fn nodes(&self) -> &[ValidatedNode] {
         &self.nodes
-    }
-
-    /// The validated `serve:` section, if any.
-    #[must_use]
-    pub fn serve(&self) -> Option<&ServeConfig> {
-        self.config.serve.as_ref()
     }
 }

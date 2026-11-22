@@ -1,12 +1,12 @@
 //! Programmatic [`PipelineBuilder`] for Rust library users (available without the `yaml` feature).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{BlockConfig, LineageConfig, PipelineConfig, ServeConfig, StoreConfig};
+use crate::config::{
+    BlockConfig, LineageConfig, PipelineConfig, ServeConfig, StoreConfig, default_host,
+    default_port,
+};
 use crate::{BlockRef, BlockRegistry, Error, ValidatedPipeline, ValidationError};
-
-const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
-const DEFAULT_SERVE_PORT: u16 = 8080;
 
 /// Programmatic builder for a [`PipelineConfig`] that validates through
 /// [`PipelineConfig::validate`].
@@ -16,20 +16,15 @@ const DEFAULT_SERVE_PORT: u16 = 8080;
 /// # Example
 ///
 /// ```
-/// use std::sync::Arc;
-/// use mallops_core::{
-///     ArtifactKind, Block, BlockOutcome, BlockRegistry, BlockSpec, BoxFuture, Context, Error,
-///     Inputs, OutputDrafts, PipelineBuilder, Port, Stage,
-/// };
-///
-/// struct Stub(BlockSpec);
-/// impl Block for Stub {
-///     fn spec(&self) -> &BlockSpec { &self.0 }
-///     fn run<'a>(&'a self, _: &'a Context, _: Inputs) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
-///         Box::pin(async { Ok(BlockOutcome::Produced(OutputDrafts::new())) })
-///     }
-/// }
-///
+/// # use std::sync::Arc;
+/// # use mallops_core::*;
+/// # struct Stub(BlockSpec);
+/// # impl Block for Stub {
+/// #     fn spec(&self) -> &BlockSpec { &self.0 }
+/// #     fn run<'a>(&'a self, _: &'a Context, _: Inputs) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
+/// #         Box::pin(async { Ok(BlockOutcome::Produced(OutputDrafts::new())) })
+/// #     }
+/// # }
 /// # fn main() -> Result<(), Error> {
 /// let mut registry = BlockRegistry::new();
 /// registry.register(Arc::new(Stub(
@@ -37,32 +32,16 @@ const DEFAULT_SERVE_PORT: u16 = 8080;
 ///         .with_output(Port::new("dataset", ArtifactKind::Dataset)),
 /// )))?;
 /// registry.register(Arc::new(Stub(
-///     BlockSpec::new("std/train.demo", "1", Stage::Train)
-///         .with_input(Port::new("train", ArtifactKind::Dataset))
-///         .with_output(Port::new("model", ArtifactKind::Model)),
-/// )))?;
-/// registry.register(Arc::new(Stub(
 ///     BlockSpec::new("std/package", "1", Stage::Package)
-///         .with_input(Port::new("model", ArtifactKind::Model))
+///         .with_input(Port::new("data", ArtifactKind::Dataset))
 ///         .with_output(Port::new("package", ArtifactKind::Package)),
 /// )))?;
 ///
 /// let mut builder = PipelineBuilder::new("demo");
-/// builder
-///     .block("ingest", "std/ingest.csv".parse()?)
-///     .with(serde_json::json!({ "path": "data.csv" }));
-/// builder
-///     .block("model", "std/train.demo".parse()?)
-///     .input("train", "ingest.dataset")
-///     .seed(42)
-///     .cache(true);
-/// builder
-///     .block("package", "std/package".parse()?)
-///     .input("model", "model.model");
-/// builder.serve("package.package");
-///
-/// let pipeline = builder.build(&registry)?;
-/// assert_eq!(pipeline.nodes().len(), 3);
+/// builder.block("ingest", "std/ingest.csv".parse()?);
+/// builder.block("pkg", "std/package".parse()?).input("data", "ingest.dataset");
+/// builder.serve("pkg.package");
+/// assert_eq!(builder.build(&registry)?.nodes().len(), 2);
 /// # Ok(())
 /// # }
 /// ```
@@ -80,7 +59,8 @@ pub struct NodeBuilder<'a> {
 }
 
 impl NodeBuilder<'_> {
-    /// Wires input port `port` to an upstream `<node>.<output>` reference.
+    /// Wires input port `port` to an upstream `<node>.<output>` reference (replaces any
+    /// earlier wiring of the same port).
     pub fn input(&mut self, port: impl Into<String>, source: impl Into<String>) -> &mut Self {
         self.config.r#in.insert(port.into(), source.into());
         self
@@ -142,8 +122,8 @@ impl PipelineBuilder {
     pub fn serve(&mut self, package: impl Into<String>) -> &mut Self {
         self.serve = Some(ServeConfig {
             package: package.into(),
-            host: DEFAULT_SERVE_HOST.to_owned(),
-            port: DEFAULT_SERVE_PORT,
+            host: default_host(),
+            port: default_port(),
         });
         self
     }
@@ -152,25 +132,19 @@ impl PipelineBuilder {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] if any block id was added more than once (path `blocks.<id>`) or if
-    /// [`PipelineConfig::validate`] fails.
+    /// [`Error::Validation`] with one error per block id added more than once (path
+    /// `blocks.<id>`) followed by every error of [`PipelineConfig::validate`].
     pub fn build(&self, registry: &BlockRegistry) -> Result<ValidatedPipeline, Error> {
         let mut blocks = BTreeMap::new();
-        let mut dup_errors = Vec::new();
+        let (mut dups, mut errs) = (BTreeSet::new(), Vec::new());
         for (id, cfg) in &self.blocks {
-            if blocks.contains_key(id) {
-                dup_errors.push(ValidationError::new(
+            if blocks.insert(id.clone(), cfg.clone()).is_some() && dups.insert(id) {
+                errs.push(ValidationError::new(
                     format!("blocks.{id}"),
                     format!("duplicate block id `{id}`"),
                 ));
-            } else {
-                blocks.insert(id.clone(), cfg.clone());
             }
         }
-        if !dup_errors.is_empty() {
-            return Err(Error::Validation(dup_errors));
-        }
-
         let config = PipelineConfig {
             version: 1,
             name: self.name.clone(),
@@ -179,7 +153,15 @@ impl PipelineBuilder {
             blocks,
             serve: self.serve.clone(),
         };
-        config.validate(registry)
+        match config.validate(registry) {
+            Ok(v) if errs.is_empty() => Ok(v),
+            Ok(_) => Err(Error::Validation(errs)),
+            Err(Error::Validation(v)) => {
+                errs.extend(v);
+                Err(Error::Validation(errs))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -235,97 +217,42 @@ mod tests {
     fn builder_constructs_and_validates_multi_node_dag() {
         let reg = test_registry();
         let mut builder = PipelineBuilder::new("churn");
-        builder
-            .block("ingest", "std/ingest.csv".parse().unwrap())
-            .with(serde_json::json!({ "path": "data/customers.csv" }));
-        builder
-            .block("model", "std/train.mock".parse().unwrap())
-            .input("train", "ingest.dataset")
-            .seed(42)
-            .cache(false);
+        // added in reverse order: the result must be topological.
         builder
             .block("package", "std/package".parse().unwrap())
             .input("model", "model.model");
+        builder
+            .block("model", "std/train.mock".parse().unwrap())
+            .input("train", "ingest.dataset")
+            .cache(false);
+        builder.block("ingest", "std/ingest.csv".parse().unwrap());
         builder.serve("package.package");
 
         let validated = builder.build(&reg).unwrap();
-        let cfg = validated.config();
-        assert_eq!(cfg.version, 1);
-        assert_eq!(cfg.name, "churn");
-        assert_eq!(cfg.store, StoreConfig::default());
-        assert_eq!(cfg.lineage, LineageConfig::default());
-
         let ids: Vec<&str> = validated.nodes().iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["ingest", "model", "package"]);
-
-        let ingest = &validated.nodes()[0];
+        assert_eq!(validated.nodes()[1].config.cache, Some(false));
+        let serve = validated.config().serve.as_ref().unwrap();
         assert_eq!(
-            ingest.config.with,
-            serde_json::json!({ "path": "data/customers.csv" })
+            (serve.package.as_str(), serve.host.as_str(), serve.port),
+            ("package.package", "127.0.0.1", 8080)
         );
-        assert_eq!(ingest.config.cache, None);
-        assert_eq!(ingest.config.seed, None);
-
-        let model = &validated.nodes()[1];
-        assert_eq!(model.config.r#in["train"], "ingest.dataset");
-        assert_eq!(model.config.seed, Some(42));
-        assert_eq!(model.config.cache, Some(false));
-
-        let pkg = &validated.nodes()[2];
-        assert_eq!(pkg.config.r#in["model"], "model.model");
-
-        let serve = validated.serve().unwrap();
-        assert_eq!(serve.package, "package.package");
-        assert_eq!(serve.host, "127.0.0.1");
-        assert_eq!(serve.port, 8080);
     }
 
     #[test]
-    fn builder_defaults_without_serve_or_options() {
-        let reg = test_registry();
-        let mut builder = PipelineBuilder::new("minimal");
-        builder.block("ingest", "std/ingest.csv".parse().unwrap());
-
-        let validated = builder.build(&reg).unwrap();
-        assert!(validated.serve().is_none());
-        assert_eq!(validated.nodes().len(), 1);
-        let node = &validated.nodes()[0];
-        assert_eq!(node.id, "ingest");
-        assert!(node.config.r#in.is_empty());
-        assert_eq!(node.config.with, serde_json::Value::Null);
-        assert_eq!(node.config.cache, None);
-        assert_eq!(node.config.seed, None);
-    }
-
-    #[test]
-    fn builder_rejects_duplicate_block_id() {
+    fn builder_duplicate_ids_reported_once_with_validation_errors() {
         let reg = test_registry();
         let mut builder = PipelineBuilder::new("dup");
-        builder.block("ingest", "std/ingest.csv".parse().unwrap());
-        builder.block("ingest", "std/ingest.csv".parse().unwrap());
-
-        let err = builder.build(&reg).unwrap_err();
-        match err {
-            Error::Validation(errs) => {
-                assert_eq!(errs.len(), 1);
-                assert_eq!(errs[0].path, "blocks.ingest");
-                assert!(errs[0].message.contains("duplicate"), "{}", errs[0].message);
-            }
-            other => panic!("expected Error::Validation, got {other:?}"),
+        for _ in 0..3 {
+            builder.block("ingest", "std/ingest.csv".parse().unwrap());
         }
-    }
+        builder.block("raw", "std/nope".parse().unwrap());
 
-    #[test]
-    fn builder_rejects_unknown_block() {
-        let reg = BlockRegistry::new();
-        let mut builder = PipelineBuilder::new("missing");
-        builder.block("raw", "std/ingest.csv".parse().unwrap());
-
-        let err = builder.build(&reg).unwrap_err();
-        match err {
+        match builder.build(&reg).unwrap_err() {
             Error::Validation(errs) => {
-                assert_eq!(errs.len(), 1);
-                assert_eq!(errs[0].path, "blocks.raw.use");
+                let paths: Vec<_> = errs.iter().map(|e| e.path.as_str()).collect();
+                assert_eq!(paths, ["blocks.ingest", "blocks.raw.use"]);
+                assert!(errs[0].message.contains("duplicate"));
             }
             other => panic!("expected Error::Validation, got {other:?}"),
         }

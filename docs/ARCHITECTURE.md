@@ -167,7 +167,7 @@ sequenceDiagram
     participant Store
     participant B as Block
     CLI->>Core: run(mallops.yaml)
-    Core->>Core: parse, validate config & resolved ports, topo-sort (`PipelineConfig::validate`)
+    Core->>Core: parse, validate config & resolved ports, topo-sort (PipelineConfig::validate)
     loop each ready node (parallel when independent)
         Core->>B: cache_policy(ctx)
         Core->>Core: cache key = hash(block id, version, config_hash, input ids, extra_hash)

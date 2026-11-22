@@ -1,6 +1,7 @@
 //! In-memory [`ArtifactStore`] for tests and ephemeral runs.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -42,7 +43,12 @@ fn read_all(payload: PayloadSource<'_>) -> Result<Files, Error> {
         .into_iter()
         .map(|(path, entry)| {
             let bytes = match entry {
-                PayloadEntry::File(p) => std::fs::read(p).map_err(StoreError::from)?,
+                PayloadEntry::File { .. } => {
+                    let mut file = entry.open_verified()?;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).map_err(StoreError::from)?;
+                    buf
+                }
                 PayloadEntry::Bytes(b) => b.to_vec(),
             };
             Ok((path, bytes))

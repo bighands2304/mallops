@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crate::store::payload::{self, PayloadEntry};
@@ -22,7 +22,6 @@ const META_DIR: &str = "meta";
 const TMP_DIR: &str = ".tmp";
 const MANIFEST_FILE: &str = "manifest.json";
 const PAYLOAD_DIR: &str = "payload";
-const IO_BUF_SIZE: usize = 64 * 1024;
 
 /// Local filesystem-backed, immutable, content-addressed [`ArtifactStore`].
 ///
@@ -269,7 +268,6 @@ fn put_sync(
     fs::create_dir(&payload_stage).map_err(StoreError::from)?;
 
     let mut payload_files = Vec::with_capacity(entries.len());
-    let mut buf = vec![0u8; IO_BUF_SIZE];
 
     for (rel, entry) in &entries {
         let dest_path = payload_stage.join(rel.as_path());
@@ -282,7 +280,7 @@ fn put_sync(
                 fs::write(&dest_path, bytes).map_err(StoreError::from)?;
                 (bytes.len() as u64, Digest::hash(bytes))
             }
-            PayloadEntry::File(src_path) => copy_and_hash_file(src_path, &dest_path, &mut buf)?,
+            PayloadEntry::File { .. } => copy_and_hash_entry(entry, &dest_path)?,
         };
 
         payload_files.push(PayloadFile::new(rel.clone(), len, digest));
@@ -334,51 +332,45 @@ fn publish_staged_artifact(
     }
 }
 
-fn copy_and_hash_file(src: &Path, dest: &Path, buf: &mut [u8]) -> Result<(u64, Digest), Error> {
-    let meta = fs::symlink_metadata(src).map_err(StoreError::from)?;
-    let ft = meta.file_type();
-    if ft.is_symlink() || !ft.is_file() {
-        return Err(StoreError::InvalidPayload(format!(
-            "payload source changed to non-regular file: {}",
-            src.display()
-        ))
-        .into());
-    }
-
-    let mut reader = File::open(src).map_err(StoreError::from)?;
-    let mut writer = File::create(dest).map_err(StoreError::from)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut total_len = 0u64;
-
-    loop {
-        let n = reader.read(buf).map_err(StoreError::from)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        writer.write_all(&buf[..n]).map_err(StoreError::from)?;
-        total_len += n as u64;
-    }
-
-    writer.flush().map_err(StoreError::from)?;
-    Ok((total_len, Digest::from_bytes(*hasher.finalize().as_bytes())))
+struct HashingWriter<W> {
+    inner: W,
+    hasher: blake3::Hasher,
 }
 
-fn hash_file_streaming(path: &Path, buf: &mut [u8]) -> Result<(u64, Digest), io::Error> {
-    let mut reader = File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut total_len = 0u64;
-
-    loop {
-        let n = reader.read(buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        total_len += n as u64;
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
     }
 
-    Ok((total_len, Digest::from_bytes(*hasher.finalize().as_bytes())))
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn copy_and_hash_entry(entry: &PayloadEntry<'_>, dest: &Path) -> Result<(u64, Digest), Error> {
+    let mut reader = entry.open_verified()?;
+    let mut writer = HashingWriter {
+        inner: File::create(dest).map_err(StoreError::from)?,
+        hasher: blake3::Hasher::new(),
+    };
+    let total_len = io::copy(&mut reader, &mut writer).map_err(StoreError::from)?;
+    writer.flush().map_err(StoreError::from)?;
+    Ok((
+        total_len,
+        Digest::from_bytes(*writer.hasher.finalize().as_bytes()),
+    ))
+}
+
+fn hash_file_streaming(path: &Path) -> Result<(u64, Digest), io::Error> {
+    let mut reader = File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(&mut reader)?;
+    Ok((
+        hasher.count(),
+        Digest::from_bytes(*hasher.finalize().as_bytes()),
+    ))
 }
 
 fn get_sync(root: &Path, id: ArtifactId) -> Result<Option<Artifact>, Error> {
@@ -535,14 +527,12 @@ fn verify_sync(root: &Path, id: ArtifactId) -> Result<(), Error> {
 
     let stored_files = walk_stored_payload(&payload_dir, id)?;
     let mut payload_files = Vec::with_capacity(stored_files.len());
-    let mut buf = vec![0u8; IO_BUF_SIZE];
 
     for (rel, path) in stored_files {
-        let (len, digest) =
-            hash_file_streaming(&path, &mut buf).map_err(|err| StoreError::Corrupted {
-                id,
-                reason: format!("failed to read stored payload file '{rel}': {err}"),
-            })?;
+        let (len, digest) = hash_file_streaming(&path).map_err(|err| StoreError::Corrupted {
+            id,
+            reason: format!("failed to read stored payload file '{rel}': {err}"),
+        })?;
         payload_files.push(PayloadFile::new(rel, len, digest));
     }
 

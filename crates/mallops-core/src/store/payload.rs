@@ -3,9 +3,11 @@
 //!
 //! Callers in async contexts should invoke [`collect`] inside `tokio::task::spawn_blocking`.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
 use crate::{Error, PayloadSource, RelPath, StoreError};
 
@@ -13,9 +15,156 @@ use crate::{Error, PayloadSource, RelPath, StoreError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PayloadEntry<'a> {
     /// A regular file on the local filesystem (verified non-symlink at collection time).
-    File(PathBuf),
+    File {
+        path: PathBuf,
+        #[cfg(unix)]
+        dev: u64,
+        #[cfg(unix)]
+        ino: u64,
+    },
     /// An in-memory byte slice.
     Bytes(&'a [u8]),
+}
+
+impl PayloadEntry<'_> {
+    fn from_file(path: PathBuf, _meta: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self::File {
+                path,
+                dev: _meta.dev(),
+                ino: _meta.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self::File { path }
+        }
+    }
+
+    /// Opens a collected file entry and verifies via `fstat` that the open descriptor still
+    /// refers to a regular file with the same `(dev, ino)` observed during collection.
+    ///
+    /// ponytail: residual TOCTOU risks accepted for v0.1 without extra dependencies:
+    /// (a) non-Unix targets do not expose a stable `(dev, ino)` pair in `std`;
+    /// (b) a file swapped for a FIFO between `collect` and `open` can still block `File::open`,
+    /// since passing `O_NONBLOCK` portably would require `libc` (not in the core allowlist).
+    pub(crate) fn open_verified(&self) -> Result<fs::File, Error> {
+        let Self::File {
+            path,
+            #[cfg(unix)]
+            dev,
+            #[cfg(unix)]
+            ino,
+        } = self
+        else {
+            return Err(StoreError::InvalidPayload(
+                "cannot open an in-memory payload entry as a file".to_owned(),
+            )
+            .into());
+        };
+
+        let file = fs::File::open(path).map_err(StoreError::from)?;
+        let meta = file.metadata().map_err(StoreError::from)?;
+        if !meta.file_type().is_file() {
+            return Err(StoreError::InvalidPayload(format!(
+                "payload source changed to non-regular file: {}",
+                path.display()
+            ))
+            .into());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.dev() != *dev || meta.ino() != *ino {
+                return Err(StoreError::InvalidPayload(format!(
+                    "payload source changed after inspection: {}",
+                    path.display()
+                ))
+                .into());
+            }
+        }
+
+        Ok(file)
+    }
+}
+
+/// A single filesystem entry produced by [`walk_files`].
+pub(crate) struct WalkEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) meta: fs::Metadata,
+}
+
+/// Iteratively walks `root` with [`fs::symlink_metadata`] (never following symlinks).
+///
+/// Returns every entry discovered under `root` (excluding `root` itself) in parent-before-child
+/// order. When `ignore_not_found` is `true`, entries or subdirectories that vanish concurrently
+/// during the walk are skipped instead of failing.
+pub(crate) fn walk_files(root: &Path, ignore_not_found: bool) -> io::Result<Vec<WalkEntry>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(err) if ignore_not_found && err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+
+        for entry_res in read_dir {
+            let entry = match entry_res {
+                Ok(e) => e,
+                Err(err) if ignore_not_found && err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            let path = entry.path();
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(err) if ignore_not_found && err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            let is_dir = meta.file_type().is_dir();
+            out.push(WalkEntry {
+                path: path.clone(),
+                meta,
+            });
+            if is_dir {
+                stack.push(path);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Converts `path` under `root` into a validated [`RelPath`].
+pub(crate) fn rel_path_from_root(root: &Path, path: &Path) -> Result<RelPath, Error> {
+    let rel = path.strip_prefix(root).map_err(|_| {
+        Error::InvalidPath(format!(
+            "path '{}' is not under '{}'",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let mut joined = String::new();
+    for comp in rel.components() {
+        let Component::Normal(part) = comp else {
+            return Err(Error::InvalidPath(format!(
+                "unexpected path component in '{}'",
+                path.display()
+            )));
+        };
+        let part_str = part.to_str().ok_or_else(|| {
+            Error::InvalidPath(format!("non-UTF-8 path component: {}", path.display()))
+        })?;
+        if !joined.is_empty() {
+            joined.push('/');
+        }
+        joined.push_str(part_str);
+    }
+    RelPath::parse(&joined)
 }
 
 /// Collects and validates all files described by `payload` into a deterministic map keyed by
@@ -57,10 +206,7 @@ pub(crate) fn collect<'a>(
     Ok(entries)
 }
 
-fn collect_single_file<'a>(
-    path: &Path,
-    entries: &mut BTreeMap<RelPath, PayloadEntry<'a>>,
-) -> Result<(), Error> {
+fn regular_file(path: &Path) -> Result<fs::Metadata, Error> {
     let meta = fs::symlink_metadata(path).map_err(StoreError::from)?;
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -77,7 +223,14 @@ fn collect_single_file<'a>(
         ))
         .into());
     }
+    Ok(meta)
+}
 
+fn collect_single_file<'a>(
+    path: &Path,
+    entries: &mut BTreeMap<RelPath, PayloadEntry<'a>>,
+) -> Result<(), Error> {
+    let meta = regular_file(path)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -88,7 +241,7 @@ fn collect_single_file<'a>(
             ))
         })?;
     let rel = RelPath::parse(file_name)?;
-    entries.insert(rel, PayloadEntry::File(path.to_path_buf()));
+    entries.insert(rel, PayloadEntry::from_file(path.to_path_buf(), &meta));
     Ok(())
 }
 
@@ -113,50 +266,26 @@ fn collect_dir<'a>(
         .into());
     }
 
-    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
-    while let Some((dir_path, rel_prefix)) = stack.pop() {
-        let read_dir = fs::read_dir(&dir_path).map_err(StoreError::from)?;
-        for entry_res in read_dir {
-            let entry = entry_res.map_err(StoreError::from)?;
-            let entry_path = entry.path();
-            let meta = fs::symlink_metadata(&entry_path).map_err(StoreError::from)?;
-            let ft = meta.file_type();
+    for WalkEntry { path, meta } in walk_files(root, false).map_err(StoreError::from)? {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            return Err(StoreError::InvalidPayload(format!(
+                "payload contains symlink: {}",
+                path.display()
+            ))
+            .into());
+        }
+        if !ft.is_file() && !ft.is_dir() {
+            return Err(StoreError::InvalidPayload(format!(
+                "payload contains special file: {}",
+                path.display()
+            ))
+            .into());
+        }
 
-            if ft.is_symlink() {
-                return Err(StoreError::InvalidPayload(format!(
-                    "payload contains symlink: {}",
-                    entry_path.display()
-                ))
-                .into());
-            }
-            if !ft.is_file() && !ft.is_dir() {
-                return Err(StoreError::InvalidPayload(format!(
-                    "payload contains special file: {}",
-                    entry_path.display()
-                ))
-                .into());
-            }
-
-            let file_name = entry.file_name();
-            let name_str = file_name.to_str().ok_or_else(|| {
-                Error::InvalidPath(format!(
-                    "payload contains non-UTF-8 path component: {}",
-                    entry_path.display()
-                ))
-            })?;
-
-            let rel_str = if rel_prefix.is_empty() {
-                name_str.to_owned()
-            } else {
-                format!("{rel_prefix}/{name_str}")
-            };
-
-            let rel = RelPath::parse(&rel_str)?;
-            if ft.is_dir() {
-                stack.push((entry_path, rel_str));
-            } else {
-                entries.insert(rel, PayloadEntry::File(entry_path));
-            }
+        let rel = rel_path_from_root(root, &path)?;
+        if ft.is_file() {
+            entries.insert(rel, PayloadEntry::from_file(path, &meta));
         }
     }
 
@@ -164,42 +293,31 @@ fn collect_dir<'a>(
 }
 
 fn check_path_collisions(entries: &BTreeMap<RelPath, PayloadEntry<'_>>) -> Result<(), Error> {
-    let mut seen_files: HashMap<String, &RelPath> = HashMap::with_capacity(entries.len());
-    let mut seen_dirs: HashMap<String, String> = HashMap::new();
+    // Maps ASCII-lowercased path -> (original spelling, is_dir).
+    let mut seen: HashMap<String, (&str, bool)> = HashMap::with_capacity(entries.len());
 
     for rel in entries.keys() {
         let raw = rel.as_str();
-        let folded = raw.to_ascii_lowercase();
-
-        if let Some(existing) = seen_files.get(&folded) {
+        if let Some((prev, _)) = seen.insert(raw.to_ascii_lowercase(), (raw, false)) {
             return Err(Error::InvalidPath(format!(
-                "case-insensitive path collision between '{existing}' and '{rel}'"
+                "path collision: '{prev}' vs '{raw}'"
             )));
         }
-        if let Some(existing_dir) = seen_dirs.get(&folded) {
-            return Err(Error::InvalidPath(format!(
-                "path collision between directory '{existing_dir}' and file '{rel}'"
-            )));
-        }
-        seen_files.insert(folded, rel);
 
         for (idx, _) in raw.match_indices('/') {
-            let dir_prefix = &raw[..idx];
-            let folded_dir = dir_prefix.to_ascii_lowercase();
-
-            if let Some(existing_file) = seen_files.get(&folded_dir) {
-                return Err(Error::InvalidPath(format!(
-                    "path collision between file '{existing_file}' and directory '{dir_prefix}'"
-                )));
-            }
-            if let Some(existing_dir) = seen_dirs.get(&folded_dir) {
-                if existing_dir != dir_prefix {
-                    return Err(Error::InvalidPath(format!(
-                        "case-insensitive directory collision between '{existing_dir}' and '{dir_prefix}'"
-                    )));
+            let dir = &raw[..idx];
+            match seen.entry(dir.to_ascii_lowercase()) {
+                Entry::Vacant(slot) => {
+                    slot.insert((dir, true));
                 }
-            } else {
-                seen_dirs.insert(folded_dir, dir_prefix.to_owned());
+                Entry::Occupied(slot) => {
+                    let &(prev, prev_is_dir) = slot.get();
+                    if !prev_is_dir || prev != dir {
+                        return Err(Error::InvalidPath(format!(
+                            "path collision: '{prev}' vs '{dir}'"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -275,10 +393,10 @@ mod tests {
 
         let map = collect(PayloadSource::File(&file_path)).unwrap();
         assert_eq!(map.len(), 1);
-        assert_eq!(
+        assert!(matches!(
             map.get(&RelPath::parse("model.bin").unwrap()),
-            Some(&PayloadEntry::File(file_path.clone()))
-        );
+            Some(PayloadEntry::File { path, .. }) if *path == file_path
+        ));
     }
 
     #[test]
@@ -303,14 +421,14 @@ mod tests {
 
         let map = collect(PayloadSource::Dir(dir.path())).unwrap();
         assert_eq!(map.len(), 2);
-        assert_eq!(
+        assert!(matches!(
             map.get(&RelPath::parse("root.txt").unwrap()),
-            Some(&PayloadEntry::File(f1))
-        );
-        assert_eq!(
+            Some(PayloadEntry::File { path, .. }) if *path == f1
+        ));
+        assert!(matches!(
             map.get(&RelPath::parse("sub/deep/leaf.bin").unwrap()),
-            Some(&PayloadEntry::File(f2))
-        );
+            Some(PayloadEntry::File { path, .. }) if *path == f2
+        ));
     }
 
     #[test]
@@ -404,5 +522,56 @@ mod tests {
 
         let err = collect(PayloadSource::Dir(dir.path())).unwrap_err();
         assert!(matches!(err, Error::InvalidPath(_)), "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_verified_rejects_symlink_swap_after_collect() {
+        use std::io::Read;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        fs::write(&secret, b"top-secret").unwrap();
+
+        // Direct file swap: collect -> replace file with symlink -> open_verified Err.
+        let src_file = dir.path().join("model.bin");
+        fs::write(&src_file, b"legit").unwrap();
+        let entries = collect(PayloadSource::File(&src_file)).unwrap();
+        let key = RelPath::parse("model.bin").unwrap();
+
+        let mut ok_file = entries[&key].open_verified().unwrap();
+        let mut buf = Vec::new();
+        ok_file.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"legit");
+
+        fs::remove_file(&src_file).unwrap();
+        symlink(&secret, &src_file).unwrap();
+        let err = entries[&key].open_verified().unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "expected InvalidPayload after file symlink swap, got {err:?}"
+        );
+
+        // Intermediate directory swap: collect -> replace subdir with symlink -> open_verified Err.
+        let tree = dir.path().join("tree");
+        let sub = tree.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("weights.bin"), b"ok").unwrap();
+
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("weights.bin"), b"exfiltrated").unwrap();
+
+        let dir_entries = collect(PayloadSource::Dir(&tree)).unwrap();
+        let sub_key = RelPath::parse("sub/weights.bin").unwrap();
+        fs::remove_dir_all(&sub).unwrap();
+        symlink(&outside, &sub).unwrap();
+
+        let err = dir_entries[&sub_key].open_verified().unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "expected InvalidPayload after subdir symlink swap, got {err:?}"
+        );
     }
 }

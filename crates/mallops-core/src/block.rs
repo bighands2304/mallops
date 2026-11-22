@@ -441,8 +441,8 @@ pub trait Block: Send + Sync {
     /// # Errors
     ///
     /// An [`Error`] if the policy cannot be determined.
-    fn cache_policy(&self, _ctx: &Context) -> Result<CachePolicy, Error> {
-        Ok(CachePolicy::default())
+    fn cache_policy(&self, _ctx: &Context) -> BoxFuture<'_, Result<CachePolicy, Error>> {
+        Box::pin(async { Ok(CachePolicy::default()) })
     }
 
     /// Runs the block and returns output drafts for the runtime to commit.
@@ -642,15 +642,18 @@ mod tests {
         assert!(matches!(out, BlockOutcome::Skipped { .. }));
     }
 
-    #[test]
-    fn trait_defaults() {
+    #[tokio::test]
+    async fn trait_defaults() {
         let p = Plain(toy(false).spec);
         assert!(p.validate_config(&serde_json::json!({"any": 1})).is_ok());
         assert_eq!(
             p.resolve_ports(&serde_json::Value::Null).unwrap(),
             ResolvedPorts::from(p.spec())
         );
-        assert_eq!(p.cache_policy(&ctx()).unwrap(), CachePolicy::default());
+        assert_eq!(
+            p.cache_policy(&ctx()).await.unwrap(),
+            CachePolicy::default()
+        );
     }
 
     #[test]

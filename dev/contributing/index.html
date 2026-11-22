@@ -1045,6 +1045,13 @@ git<span class="w"> </span>push<span class="w"> </span>--force-with-lease
 cargo<span class="w"> </span>clippy<span class="w"> </span>--workspace<span class="w"> </span>--all-targets<span class="w"> </span>--all-features<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
 cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--workspace<span class="w"> </span>--all-features
 </code></pre></div>
+<p>CI also runs, and <code>ci-ok</code> requires:</p>
+<ul>
+<li><strong>Coverage:</strong> <code>cargo llvm-cov --workspace --all-features --fail-under-lines 85</code> (install with <code>cargo install cargo-llvm-cov</code>).</li>
+<li><strong>SAST:</strong> CodeQL (<code>security-and-quality</code>) on Rust and on the workflows; any error or warning fails the PR. Alerts are in the Security tab.</li>
+<li><strong>SCA:</strong> <code>cargo deny check</code> on the whole dependency tree (advisories, licenses, sources), plus GitHub dependency review on the dependencies a PR adds or updates.</li>
+<li><strong>Workflow security:</strong> <a href="https://docs.zizmor.sh">zizmor</a> on <code>.github/</code> (<code>uvx zizmor .</code>; config in <code>.github/zizmor.yml</code>).</li>
+</ul>
 <h2 id="documentation">Documentation<a class="headerlink" href="#documentation" title="Permanent link">&para;</a></h2>
 <p>The site is built with <a href="https://squidfunk.github.io/mkdocs-material/">MkDocs Material</a> from <code>docs/</code> and published on GitHub Pages, versioned with <a href="https://github.com/jimporter/mike">mike</a>: <code>/dev/</code> follows the <code>dev</code> branch, <code>/X.Y/</code> is published at each release, <code>/latest/</code> points to the newest stable one.</p>
 <div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>docs/requirements.txt

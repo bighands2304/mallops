@@ -1,38 +1,25 @@
 //! Explicit, instance-local block registry and block references (ADR-0007 D8).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::{Block, BlockSpec, Error};
 
-/// Validated reference to a block: `namespace/stage[.name]` (e.g. `std/ingest.csv`).
+/// Validated reference to a block: `namespace/stage[.variant]` (e.g. `std/ingest.csv`).
 ///
 /// Segments are non-empty and made of `[a-z0-9_-]`. The `wasm:`/`grpc:` prefixes and the
 /// `plugin/` namespace are reserved and rejected in v0.1.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub struct BlockRef(String);
 
 fn segment_ok(s: &str) -> bool {
     !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
-
-impl BlockRef {
-    /// The namespace (the part before `/`).
-    #[must_use]
-    pub fn namespace(&self) -> &str {
-        self.0.split_once('/').map_or("", |(ns, _)| ns)
-    }
-
-    /// The name (the part after `/`, i.e. `stage[.name]`).
-    #[must_use]
-    pub fn name(&self) -> &str {
-        self.0.split_once('/').map_or("", |(_, n)| n)
-    }
+        && s.bytes().enumerate().all(|(i, b)| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && (b == b'_' || b == b'-'))
+        })
 }
 
 impl FromStr for BlockRef {
@@ -46,13 +33,10 @@ impl FromStr for BlockRef {
         }
         let malformed = || Error::Config(format!("malformed block reference `{s}`"));
         let (ns, name) = s.split_once('/').ok_or_else(malformed)?;
-        let mut parts = name.split('.');
-        let (stage, sub) = (parts.next().unwrap_or(""), parts.next());
-        if !segment_ok(ns)
-            || !segment_ok(stage)
-            || sub.is_some_and(|n| !segment_ok(n))
-            || parts.next().is_some()
-        {
+        let (stage, sub) = name
+            .split_once('.')
+            .map_or((name, None), |(a, b)| (a, Some(b)));
+        if !segment_ok(ns) || !segment_ok(stage) || sub.is_some_and(|n| !segment_ok(n)) {
             return Err(malformed());
         }
         Ok(Self(s.to_owned()))
@@ -67,7 +51,13 @@ impl fmt::Display for BlockRef {
 
 /// Instance-local registry of blocks, keyed by block id. No global state.
 #[derive(Default)]
-pub struct BlockRegistry(BTreeMap<String, Arc<dyn Block>>);
+pub struct BlockRegistry(BTreeMap<BlockRef, Arc<dyn Block>>);
+
+impl fmt::Debug for BlockRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
+    }
+}
 
 impl BlockRegistry {
     /// Creates an empty registry.
@@ -83,27 +73,29 @@ impl BlockRegistry {
     /// [`Error::Config`] if the id is not a valid [`BlockRef`]; [`Error::Validation`] if a
     /// block with the same id is already registered (the original is kept).
     pub fn register(&mut self, block: Arc<dyn Block>) -> Result<(), Error> {
-        let id = block.spec().id.to_string();
-        id.parse::<BlockRef>()?;
-        if self.0.contains_key(&id) {
-            return Err(Error::Validation(format!(
-                "block `{id}` is already registered"
-            )));
+        let id: BlockRef = block.spec().id.parse()?;
+        match self.0.entry(id) {
+            Entry::Occupied(e) => Err(Error::Validation(format!(
+                "block `{}` is already registered",
+                e.key()
+            ))),
+            Entry::Vacant(e) => {
+                e.insert(block);
+                Ok(())
+            }
         }
-        self.0.insert(id, block);
-        Ok(())
     }
 
     /// Returns the block registered under `r`, if any.
     #[must_use]
     pub fn get(&self, r: &BlockRef) -> Option<Arc<dyn Block>> {
-        self.0.get(&r.0).cloned()
+        self.0.get(r).cloned()
     }
 
     /// Whether a block is registered under `r`.
     #[must_use]
     pub fn contains(&self, r: &BlockRef) -> bool {
-        self.0.contains_key(&r.0)
+        self.0.contains_key(r)
     }
 
     /// Specs of all registered blocks, sorted by id.
@@ -186,10 +178,11 @@ mod tests {
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 std::thread::spawn(move || {
+                    let id: &'static str = Box::leak(format!("std/custom.t{i}").into_boxed_str());
                     let mut reg = BlockRegistry::new();
-                    assert!(reg.list().is_empty());
-                    reg.register(dummy("std/package", "1")).unwrap();
-                    assert_eq!(reg.list().len(), 1, "thread {i}");
+                    reg.register(dummy(id, "1")).unwrap();
+                    let ids: Vec<_> = reg.list().iter().map(|s| s.id.to_string()).collect();
+                    assert_eq!(ids, [id]);
                 })
             })
             .collect();
@@ -200,11 +193,21 @@ mod tests {
 
     #[test]
     fn parse_valid() {
-        let b = r("std/ingest.csv");
-        assert_eq!((b.namespace(), b.name()), ("std", "ingest.csv"));
-        assert_eq!(b.to_string(), "std/ingest.csv");
-        assert_eq!(r("std/package").name(), "package");
-        assert_eq!(r("core/noop").namespace(), "core");
+        for s in [
+            "std/ingest.csv",
+            "std/package",
+            "core/noop",
+            "std/custom.t1",
+        ] {
+            assert_eq!(r(s).to_string(), s);
+        }
+    }
+
+    fn err_msg(s: &str) -> String {
+        match s.parse::<BlockRef>() {
+            Err(Error::Config(m)) => m,
+            other => panic!("{s}: {other:?}"),
+        }
     }
 
     #[test]
@@ -221,23 +224,17 @@ mod tests {
             "std/pack age",
             "std//x",
             "a/b/c",
+            "-/package",
+            "std/-ingest",
         ] {
-            match s.parse::<BlockRef>() {
-                Err(Error::Config(m)) => {
-                    assert!(m.contains("malformed block reference"), "{s}: {m}")
-                }
-                other => panic!("{s}: {other:?}"),
-            }
+            assert!(err_msg(s).contains("malformed block reference"), "{s}");
         }
     }
 
     #[test]
     fn parse_unsupported_plugins() {
         for s in ["wasm:mod.wasm", "grpc:127.0.0.1:50051", "plugin/custom"] {
-            match s.parse::<BlockRef>() {
-                Err(Error::Config(m)) => assert!(m.contains("not supported in v0.1"), "{s}: {m}"),
-                other => panic!("{s}: {other:?}"),
-            }
+            assert!(err_msg(s).contains("not supported in v0.1"), "{s}");
         }
     }
 }

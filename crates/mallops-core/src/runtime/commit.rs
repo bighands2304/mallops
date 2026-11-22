@@ -19,7 +19,6 @@ use crate::{ArtifactId, ArtifactStore, Error, OutputDrafts, ResolvedPorts};
 /// # Errors
 ///
 /// [`Error::Validation`] with every violation, paths `out.<port>`; store errors as returned.
-#[allow(dead_code)] // 7.1 wires it into the scheduler.
 pub(crate) async fn commit_outputs(
     store: &dyn ArtifactStore,
     ports: &ResolvedPorts,

@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use crate::config::{BlockConfig, PipelineConfig, ServeConfig};
-use crate::{Block, BlockRegistry, Error, ResolvedPorts};
+use crate::{Block, ResolvedPorts};
+
+mod validate;
 
 /// One validated DAG node.
 #[derive(Clone)]
@@ -57,34 +59,5 @@ impl ValidatedPipeline {
     #[must_use]
     pub fn serve(&self) -> Option<&ServeConfig> {
         self.config.serve.as_ref()
-    }
-}
-
-impl PipelineConfig {
-    /// Validates this pipeline against `registry` without running any block.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] with every problem found, each with a dotted path
-    /// (e.g. `blocks.eval.in.test`).
-    pub fn validate(&self, registry: &BlockRegistry) -> Result<ValidatedPipeline, Error> {
-        // ponytail: skeleton from task 6.0, the real checks land in 6.1.
-        let mut nodes = Vec::new();
-        for (id, cfg) in &self.blocks {
-            let block = registry
-                .get(&cfg.r#use)
-                .ok_or_else(|| Error::validation(format!("blocks.{id}.use"), "unknown block"))?;
-            let ports = block.resolve_ports(&cfg.with)?;
-            nodes.push(ValidatedNode {
-                id: id.clone(),
-                block,
-                config: cfg.clone(),
-                ports,
-            });
-        }
-        Ok(ValidatedPipeline {
-            config: self.clone(),
-            nodes,
-        })
     }
 }

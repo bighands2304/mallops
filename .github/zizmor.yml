@@ -1,0 +1,7 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/).
+rules:
+  cache-poisoning:
+    ignore:
+      # ci.yml only checks code and publishes nothing; release artifacts are built
+      # by build-binaries.yml without a shared Rust cache.
+      - ci.yml

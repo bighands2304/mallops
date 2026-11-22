@@ -109,6 +109,78 @@ jobs:
           arguments: --all-features
           command-arguments: ${{ github.event_name == 'schedule' && 'advisories' || '' }}
 
+  # Line coverage gate (cargo-llvm-cov). Raise the threshold as coverage grows.
+  coverage:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --all-features --locked --summary-only --fail-under-lines 85
+
+  # SAST: CodeQL on Rust and on the workflows themselves. Alerts go to the
+  # Security tab; any error/warning result fails the job (and ci-ok).
+  codeql:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: rust, actions
+          build-mode: none
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          output: sarif-results
+          # Fork PRs get a read-only token: analyze but don't upload.
+          upload: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'never' || 'always' }}
+      - name: Fail on findings
+        run: |
+          set -euo pipefail
+          jq -s -r '.[].runs[].results[] | select(.level == "error" or .level == "warning")
+            | "::error file=\(.locations[0].physicalLocation.artifactLocation.uri),line=\(.locations[0].physicalLocation.region.startLine)::\(.ruleId): \(.message.text)"' \
+            sarif-results/*.sarif | tee findings.txt
+          test ! -s findings.txt
+
+  # SCA on the PR diff: new or updated dependencies (cargo, pip, actions) with
+  # known vulnerabilities fail the PR. cargo-deny covers the full tree.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
+        with:
+          fail-on-severity: low
+
+  # Static analysis of the GitHub workflows (config in .github/zizmor.yml).
+  zizmor:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@bd12b495c90993a4301c73398142281a61499af3 # v0.9.0
+        with:
+          version: 1.33.0
+          advanced-security: false
+          min-severity: medium
+
   # Developer Certificate of Origin: every commit in a PR must carry a
   # Signed-off-by trailer matching its author. Merge commits are rejected on
   # feature PRs; only verified bot commits (dependabot[bot], github-actions[bot])
@@ -187,7 +259,7 @@ jobs:
   # Single required status check for branch protection.
   ci-ok:
     if: always() && github.event_name != 'schedule'
-    needs: [fmt, clippy, test, msrv, docs, deny, dco]
+    needs: [fmt, clippy, test, msrv, docs, deny, dco, coverage, codeql, dependency-review, zizmor]
     permissions: {}
     runs-on: ubuntu-latest
     steps:

@@ -210,7 +210,8 @@ Rules:
 - `use` references a block by `namespace/name`, where `name` is `stage[.variant]` (e.g. `std/ingest.csv`, `std/package`). Each segment starts with `[a-z0-9]` and contains only `[a-z0-9_-]`; anything else fails as a malformed block reference (`std/…` built-in in v0.1; `plugin/…`, `wasm:path.wasm`, and `grpc:host:port` are reserved for post-v0.1 plugin runtimes and fail with a clear error in v0.1).
 - `in` wires named inputs to `<block>.<output>`; this defines the DAG. Cycles are rejected.
 - `with` is block-specific config, validated by `Block::validate_config` (using `serde` in v0.1; optional JSON Schema validation behind the `schema-validate` feature). Each block also supports `cache: false` to bypass caching.
-- Values may reference environment variables `${env:NAME}` (resolved into `config` and included in `config_hash`) and secrets `${secret:NAME}` (resolved on demand via `MALLOPS_SECRET_<NAME>` in v0.1 into a redacted `Secret`, never written to `config.json`, cache keys, logs, or lineage).
+- Values may reference environment variables `${env:NAME}` (resolved into `config` and included in `config_hash`; interpolated only in string values of each block's `with`, of lineage sink `with`, and in `store.path`, with no escape syntax; a missing variable is an error naming the file and the block or sink) and secrets `${secret:NAME}` (kept literally in the config, never resolved at load time; resolved on demand via `MALLOPS_SECRET_<NAME>` in v0.1 into a redacted `Secret`, never written to `config.json`, cache keys, logs, or lineage).
+- Unknown keys are rejected (`deny_unknown_fields`); `lineage` accepts only `off` or a list of sinks. Syntax and schema errors are reported as `<file>:<line>:<column>: <message>`.
 - A JSON Schema for `mallops.yaml` can be generated via the optional `schema` feature (`schemars`) for editor completion.
 
 ## 6. Artifact contract

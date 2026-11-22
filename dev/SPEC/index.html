@@ -967,6 +967,62 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0008-edge-build-profiles-and-on-device-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0008 — Edge build profiles and on-device online learning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0009-mqtt-blocks-and-serve-transport/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0009 — MQTT blocks and MQTT serving transport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1477,13 +1533,13 @@
 <ul>
 <li>FR-ING-1: read from local files (CSV, JSON/NDJSON, Parquet, arbitrary files) — v0.1.</li>
 <li>FR-ING-2: read from HTTP(S) and object stores (S3, GCS, Azure) — v0.2.</li>
-<li>FR-ING-3: read from databases (PostgreSQL, SQLite) and streams (Kafka, MQTT) — v0.3+.</li>
+<li>FR-ING-3: read from databases (PostgreSQL, SQLite) and streams (Kafka, MQTT) — v0.3+. MQTT: <code>std/ingest.mqtt</code>, a bounded read (<code>max_messages</code>, <code>max_duration</code> or <code>idle_timeout</code>) into a <code>dataset</code>, uncacheable, at-least-once up to the block return (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</li>
 <li>FR-ING-4: optional schema validation; ingest is incremental when the source supports it.</li>
 </ul>
 <h3 id="32-data-storage">3.2 Data storage<a class="headerlink" href="#32-data-storage" title="Permanent link">&para;</a></h3>
 <p>Two distinct concerns, deliberately kept apart (<a href="../adr/0006-store-and-lineage-contracts/">ADR-0006</a>):</p>
 <p><strong>a) Data storage blocks</strong> — persisting <em>user data</em> to external systems is an ordinary, optional stage.
-- FR-STO-1: blocks that write datasets/features to object stores, data lakes (Delta, Iceberg), databases and feature stores — v0.2+.</p>
+- FR-STO-1: blocks that write datasets/features to object stores, data lakes (Delta, Iceberg), databases and feature stores — v0.2+; <code>std/storage.mqtt</code> publishes artifacts to MQTT topics — v0.3 (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</p>
 <p><strong>b) Artifact store</strong> — the internal mechanism through which blocks hand artifacts to each other. Not a block: it sits on every edge of the DAG.
 - FR-STO-2: the core defines the immutable <code>ArtifactStore</code> contract (plus an auxiliary metadata API for cache entries, run lineage records, and future registry entries) and ships two minimal implementations: <code>local</code> (filesystem, default) and <code>memory</code> (ephemeral, for tests and throwaway runs) — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).
 - FR-STO-3: remote backends (S3, GCS, Azure, …) are optional (<code>mallops-std</code> features or plugins) — v0.2.
@@ -1534,6 +1590,7 @@
 <ul>
 <li>FR-SRV-1: HTTP/JSON inference server (<code>mallops serve [package-id]</code>) running outside the batch DAG, consuming a <code>package</code> artifact produced by <code>mallops run</code> — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 <li>FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.</li>
+<li>FR-SRV-4: MQTT transport (<code>serve.transport: mqtt</code>): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</li>
 <li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (linfa, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) and is promoted to <code>mallops-core</code> before 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 </ul>
 <h3 id="311-monitoring-and-logging">3.11 Monitoring and logging<a class="headerlink" href="#311-monitoring-and-logging" title="Permanent link">&para;</a></h3>
@@ -1549,11 +1606,12 @@
 </ul>
 <h3 id="313-edge">3.13 Edge<a class="headerlink" href="#313-edge" title="Permanent link">&para;</a></h3>
 <ul>
-<li>FR-EDG-1: <code>mallops-edge</code> agent: single static binary, cross-compiled for aarch64/armv7/x86_64 — v0.4.</li>
+<li>FR-EDG-1: <code>mallops-edge</code> agent: single static binary, cross-compiled for aarch64/armv7/x86_64, inference-only by default (<code>profile-edge</code> of <code>mallops-std</code>, which includes HTTP and MQTT serving) — v0.4 (<a href="../adr/0008-edge-build-profiles-and-on-device-training/">ADR-0008</a>).</li>
 <li>FR-EDG-2: local serving with any <code>Predictor</code> backend, offline-capable.</li>
 <li>FR-EDG-3: distributed monitoring: nodes buffer metrics/drift stats locally and push them when connected.</li>
 <li>FR-EDG-4: federated learning: central aggregator (FedAvg, FedProx as plugin), nodes train locally, only model updates leave the device; optional secure aggregation and differential privacy as plugins.</li>
 <li>FR-EDG-5: fleet deploy: pull-based model updates with signature verification.</li>
+<li>FR-EDG-6: on-device online learning (<code>online</code> feature): a finite DAG (ingest new labelled samples, e.g. from MQTT → train from the current model via an optional <code>base</code> input → evaluate gate → package) produces a new immutable package; serving hot-swaps to it only if the gate passes, with rollback and bounded retention (<a href="../adr/0008-edge-build-profiles-and-on-device-training/">ADR-0008</a>).</li>
 </ul>
 <h3 id="314-lineage">3.14 Lineage<a class="headerlink" href="#314-lineage" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1781,11 +1839,11 @@
 </tr>
 <tr>
 <td>v0.3</td>
-<td>monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy</td>
+<td>monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport</td>
 </tr>
 <tr>
 <td>v0.4</td>
-<td><code>mallops-edge</code>, federated learning, fleet deploy, distributed monitoring</td>
+<td><code>mallops-edge</code> (edge build profiles), on-device online learning, federated learning, fleet deploy, distributed monitoring</td>
 </tr>
 <tr>
 <td>v1.0</td>

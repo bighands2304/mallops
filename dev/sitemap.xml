@@ -48,4 +48,12 @@
          <loc>https://bighands2304.github.io/mallops/dev/adr/0007-core-contracts-revision/</loc>
          <lastmod>2026-11-22</lastmod>
     </url>
+    <url>
+         <loc>https://bighands2304.github.io/mallops/dev/adr/0008-edge-build-profiles-and-on-device-training/</loc>
+         <lastmod>2026-11-22</lastmod>
+    </url>
+    <url>
+         <loc>https://bighands2304.github.io/mallops/dev/adr/0009-mqtt-blocks-and-serve-transport/</loc>
+         <lastmod>2026-11-22</lastmod>
+    </url>
 </urlset>

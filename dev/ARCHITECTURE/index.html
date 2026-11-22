@@ -801,6 +801,62 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0008-edge-build-profiles-and-on-device-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0008 — Edge build profiles and on-device online learning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adr/0009-mqtt-blocks-and-serve-transport/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0009 — MQTT blocks and MQTT serving transport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1116,8 +1172,8 @@
 </tr>
 <tr>
 <td><code>mallops-edge</code></td>
-<td>core, std (subset)</td>
-<td><code>tonic</code></td>
+<td>core, std (<code>profile-edge</code>, ADR-0008)</td>
+<td><code>tonic</code>, <code>rumqttc</code> (via <code>serve-mqtt</code>)</td>
 </tr>
 </tbody>
 </table>
@@ -1380,9 +1436,9 @@
 <li>Caching does <strong>not</strong> depend on lineage: it uses artifact hashes and <code>cache/&lt;key&gt;.json</code> in the store.</li>
 </ul>
 <h2 id="7-serving">7. Serving<a class="headerlink" href="#7-serving" title="Permanent link">&para;</a></h2>
-<p>Serving runs outside the batch DAG via <code>mallops serve [package-id]</code> (using the package artifact produced by <code>mallops run</code> or configured in the top-level <code>serve:</code> section of <code>mallops.yaml</code>).</p>
+<p>Serving runs outside the batch DAG via <code>mallops serve [package-id]</code> (using the package artifact produced by <code>mallops run</code> or configured in the top-level <code>serve:</code> section of <code>mallops.yaml</code>). Transports: HTTP (v0.1), gRPC (v0.2) and MQTT (v0.3, <code>serve.transport: mqtt</code>: request topic in, prediction topic out, see <a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</p>
 <pre class="mermaid"><code>flowchart LR
-    C[Client] --&gt;|HTTP/gRPC| S[mallops serve]
+    C[Client] --&gt;|HTTP/gRPC/MQTT| S[mallops serve]
     S --&gt; T[Preprocess transform&lt;br/&gt;from package]
     T --&gt; P{Predictor by flavor}
     P --&gt; LF[linfa]
@@ -1417,17 +1473,22 @@
         COL[Metrics collector]
     end
     subgraph Edge["Edge node (mallops-edge)"]
-        SV[Local serving]
-        LT[Local training]
+        SV[Local serving HTTP/MQTT]
+        OL[Online learning DAG]
+        LT[FL local training]
         BUF[Metrics buffer]
     end
     REGI -- signed model pull --&gt; SV
     AGG -- global weights --&gt; LT
     LT -- weight deltas only --&gt; AGG
+    SEN[Sensor] -- MQTT readings --&gt; SV -- MQTT predictions --&gt; CON[Consumer]
+    SEN -- labelled samples --&gt; OL -- new package if gate passes --&gt; SV
     SV --&gt; BUF -- push when online --&gt; COL
     COL -- drift alert --&gt; RT[Retrain trigger]</code></pre>
 <ul>
-<li>Transport: gRPC (<code>tonic</code>) with mTLS; nodes initiate connections (NAT-friendly).</li>
+<li>Transport: gRPC (<code>tonic</code>) with mTLS for the fleet control plane and FL; nodes initiate connections (NAT-friendly). MQTT for device data: serving reads requests from a topic and publishes predictions (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</li>
+<li>Build: <code>mallops-edge</code> is inference-only by default (<code>profile-edge</code>); <code>online</code> and <code>fl</code> add only the training backends they need (<a href="../adr/0008-edge-build-profiles-and-on-device-training/">ADR-0008</a>).</li>
+<li>Online learning: a finite DAG on the device produces a new immutable package from the current model (<code>base</code> input of incremental train blocks); serving hot-swaps only after the evaluate gate passes, keeps the previous accepted and base packages for rollback, and never mutates a served model.</li>
 <li>Aggregation strategies are blocks (FedAvg default); privacy techniques plug in at the aggregator.</li>
 <li>Model weights exchanged in whatever format the flavor defines; the aggregator delegates averaging to a flavor-aware plugin.</li>
 </ul>

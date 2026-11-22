@@ -2,8 +2,10 @@
 //!
 //! See `docs/ARCHITECTURE.md` §6.1 and `docs/adr/0007-core-contracts-revision.md` (D3).
 
-#[allow(dead_code)] // Used by store implementations (LocalStore, MemoryStore).
+mod local;
 pub(crate) mod payload;
+
+pub use local::LocalStore;
 
 use std::collections::BTreeMap;
 use std::future::Future;

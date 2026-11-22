@@ -338,6 +338,8 @@ fn put_sync(
         .write_all(&manifest_bytes)
         .map_err(StoreError::from)?;
     manifest_file.sync_all().map_err(StoreError::from)?;
+    // Windows refuses to rename a directory while a handle inside it is still open.
+    drop(manifest_file);
 
     let final_dir = artifact_dir(root, id);
     ensure_within_root(root, &final_dir)?;

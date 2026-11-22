@@ -493,6 +493,8 @@ mod tests {
                         reason: "gate closed".into(),
                         outputs: OutputDrafts::new(),
                     }),
+                    "bad_kind" => Ok(BlockOutcome::Produced(bad_drafts("out"))),
+                    "bad_port" => Ok(BlockOutcome::Produced(bad_drafts("bogus"))),
                     "wait_cancel" => {
                         p.started.notify_one();
                         ctx.cancel().cancelled().await;
@@ -516,6 +518,15 @@ mod tests {
                 result
             })
         }
+    }
+
+    /// A `Dataset` draft on `port`: wrong kind for the `Blob` output `out`.
+    fn bad_drafts(port: &str) -> OutputDrafts {
+        let draft = OutputDraft::new(
+            Manifest::new(ArtifactKind::Dataset, "csv"),
+            DraftPayload::Bytes(b"bad".to_vec()),
+        );
+        OutputDrafts::new().with(port, draft)
     }
 
     /// `t/src` (no input), `t/one` (required `a`), `t/two` (required `a`, `b`),
@@ -729,13 +740,106 @@ mod tests {
         let joined = store.get(&ids("join")).await.unwrap().unwrap();
         let mut expected = vec![ids("a"), ids("b")];
         expected.sort();
-        let mut parents = joined.manifest().parents.clone();
-        parents.sort();
         assert_ne!(ids("a"), ids("b"));
-        assert_eq!(parents, expected);
+        assert_eq!(joined.manifest().parents, expected);
         let source = store.get(&ids("a")).await.unwrap().unwrap();
         assert!(source.manifest().parents.is_empty());
         // The per-run workdir is removed at the end of the run.
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_draft_violating_output_port_fails_node() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "kind", "src", "bad_kind", &[]);
+        node(&mut b, "port", "src", "bad_port", &[]);
+        node(&mut b, "after", "one", "ok", &[("a", "kind.out")]);
+        node(&mut b, "ok", "src", "ok", &[]);
+        let p = b.build(&registry(&probe)).unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let s = run(&runtime(Arc::clone(&store), 4), &p).await;
+
+        for (id, port) in [("kind", "out.out"), ("port", "out.bogus")] {
+            assert_eq!(status(&s, id), Status::Failed);
+            let Some(Error::Validation(errs)) = &s.nodes[id].error else {
+                panic!(
+                    "{id}: expected validation error, got {:?}",
+                    s.nodes[id].error
+                )
+            };
+            assert!(errs.iter().any(|e| e.path == port), "{id}: {errs:?}");
+            assert!(s.nodes[id].outputs.is_empty());
+        }
+        assert_eq!(status(&s, "after"), Status::Cancelled);
+        assert!(reason(&s, "after").contains("`kind` failed"));
+        assert_eq!(status(&s, "ok"), Status::Succeeded);
+        // Ids are content-addressed: the rejected draft would have had this id.
+        let draft = bad_drafts("out").into_iter().next().unwrap().1;
+        let rejected = MemoryStore::new()
+            .put(draft.manifest, draft.payload.as_source())
+            .await
+            .unwrap();
+        assert!(store.get(&rejected).await.unwrap().is_none());
+    }
+
+    /// No-op block: optional input `a`, emits an empty `out`.
+    struct Noop(BlockSpec);
+
+    impl Block for Noop {
+        fn spec(&self) -> &BlockSpec {
+            &self.0
+        }
+
+        fn run<'a>(
+            &'a self,
+            _: &'a Context,
+            _: Inputs,
+        ) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
+            Box::pin(async {
+                let draft = OutputDraft::new(
+                    Manifest::new(ArtifactKind::Blob, "empty"),
+                    DraftPayload::Bytes(Vec::new()),
+                );
+                Ok(BlockOutcome::Produced(
+                    OutputDrafts::new().with("out", draft),
+                ))
+            })
+        }
+    }
+
+    /// NFR-1: median core overhead per block < 5 ms on `MemoryStore`.
+    /// Run with `cargo test -p mallops-core runtime -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "benchmark (NFR-1)"]
+    async fn runtime_nfr1_block_overhead() {
+        const N: usize = 200;
+        const RUNS: usize = 9;
+        let mut reg = BlockRegistry::new();
+        let spec = BlockSpec::new("t/noop", "1", Stage::Custom)
+            .with_input(Port::new("a", ArtifactKind::Blob).optional())
+            .with_output(Port::new("out", ArtifactKind::Blob));
+        reg.register(Arc::new(Noop(spec))).unwrap();
+        // A chain: every block waits for the previous one, so overheads add up.
+        let mut b = PipelineBuilder::new("nfr1");
+        b.block("n0", "t/noop".parse().unwrap());
+        for i in 1..N {
+            b.block(format!("n{i}"), "t/noop".parse().unwrap())
+                .input("a", format!("n{}.out", i - 1));
+        }
+        let p = b.build(&reg).unwrap();
+        let rt = runtime(Arc::new(MemoryStore::new()), 4);
+
+        assert!(run(&rt, &p).await.is_success()); // warm-up
+        let mut per_block = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            assert!(run(&rt, &p).await.is_success());
+            per_block.push(start.elapsed() / u32::try_from(N).unwrap());
+        }
+        per_block.sort();
+        let median = per_block[RUNS / 2];
+        eprintln!("NFR-1 median overhead per block: {median:?} ({N} blocks, {RUNS} runs)");
+        assert!(median < Duration::from_millis(5), "median {median:?}");
     }
 }

@@ -51,14 +51,14 @@ Each stage below lists what the **standard library of blocks** (`mallops-std`) m
 ### 3.1 Data ingestion
 - FR-ING-1: read from local files (CSV, JSON/NDJSON, Parquet, arbitrary files) — v0.1.
 - FR-ING-2: read from HTTP(S) and object stores (S3, GCS, Azure) — v0.2.
-- FR-ING-3: read from databases (PostgreSQL, SQLite) and streams (Kafka, MQTT) — v0.3+.
+- FR-ING-3: read from databases (PostgreSQL, SQLite) and streams (Kafka, MQTT) — v0.3+. MQTT: `std/ingest.mqtt`, a bounded read (`max_messages`, `max_duration` or `idle_timeout`) into a `dataset`, uncacheable, at-least-once up to the block return ([ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
 - FR-ING-4: optional schema validation; ingest is incremental when the source supports it.
 
 ### 3.2 Data storage
 Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-lineage-contracts.md)):
 
 **a) Data storage blocks** — persisting *user data* to external systems is an ordinary, optional stage.
-- FR-STO-1: blocks that write datasets/features to object stores, data lakes (Delta, Iceberg), databases and feature stores — v0.2+.
+- FR-STO-1: blocks that write datasets/features to object stores, data lakes (Delta, Iceberg), databases and feature stores — v0.2+; `std/storage.mqtt` publishes artifacts to MQTT topics — v0.3 ([ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
 
 **b) Artifact store** — the internal mechanism through which blocks hand artifacts to each other. Not a block: it sits on every edge of the DAG.
 - FR-STO-2: the core defines the immutable `ArtifactStore` contract (plus an auxiliary metadata API for cache entries, run lineage records, and future registry entries) and ships two minimal implementations: `local` (filesystem, default) and `memory` (ephemeral, for tests and throwaway runs) — v0.1 ([ADR-0007](adr/0007-core-contracts-revision.md)).
@@ -103,6 +103,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 ### 3.10 Model serving
 - FR-SRV-1: HTTP/JSON inference server (`mallops serve [package-id]`) running outside the batch DAG, consuming a `package` artifact produced by `mallops run` — v0.1 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 - FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.
+- FR-SRV-4: MQTT transport (`serve.transport: mqtt`): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 ([ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
 - FR-SRV-3: **backend-agnostic**: the server dispatches to a `Predictor` chosen by the package flavor (linfa, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) and is promoted to `mallops-core` before 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 
 ### 3.11 Monitoring and logging
@@ -115,11 +116,12 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-RET-2: a trigger starts a pipeline run; evaluation gates decide promotion.
 
 ### 3.13 Edge
-- FR-EDG-1: `mallops-edge` agent: single static binary, cross-compiled for aarch64/armv7/x86_64 — v0.4.
+- FR-EDG-1: `mallops-edge` agent: single static binary, cross-compiled for aarch64/armv7/x86_64, inference-only by default (`profile-edge` of `mallops-std`, which includes HTTP and MQTT serving) — v0.4 ([ADR-0008](adr/0008-edge-build-profiles-and-on-device-training.md)).
 - FR-EDG-2: local serving with any `Predictor` backend, offline-capable.
 - FR-EDG-3: distributed monitoring: nodes buffer metrics/drift stats locally and push them when connected.
 - FR-EDG-4: federated learning: central aggregator (FedAvg, FedProx as plugin), nodes train locally, only model updates leave the device; optional secure aggregation and differential privacy as plugins.
 - FR-EDG-5: fleet deploy: pull-based model updates with signature verification.
+- FR-EDG-6: on-device online learning (`online` feature): a finite DAG (ingest new labelled samples, e.g. from MQTT → train from the current model via an optional `base` input → evaluate gate → package) produces a new immutable package; serving hot-swaps to it only if the gate passes, with rollback and bounded retention ([ADR-0008](adr/0008-edge-build-profiles-and-on-device-training.md)).
 
 ### 3.14 Lineage
 - FR-LIN-1: the runtime emits lineage events (`RunStarted`, `BlockStarted`, `ArtifactProduced`, `BlockFinished`, `RunFinished`) carrying config hash, block versions, input/output artifact ids, seed, git commit, timings, host info — v0.1.
@@ -268,8 +270,8 @@ Inputs and outputs of blocks declare the accepted `kind` and optionally accepted
 |---|---|
 | **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, HTTP serving) |
 | v0.2 | remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry & versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging |
-| v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy |
-| v0.4 | `mallops-edge`, federated learning, fleet deploy, distributed monitoring |
+| v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport |
+| v0.4 | `mallops-edge` (edge build profiles), on-device online learning, federated learning, fleet deploy, distributed monitoring |
 | v1.0 | stable public API, plugin protocol v1 frozen |
 
 ## 8. Open questions

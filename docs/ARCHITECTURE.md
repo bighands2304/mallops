@@ -63,7 +63,7 @@ Crates are created only when implemented. Splitting `mallops-std` into per-stage
 | `mallops-core` | — | Core allowlist: `tokio`, `serde`, `serde_json`, `blake3`, `tracing`, `thiserror`, `ulid`, `tempfile`; optional features: `yaml` (`yaml_serde`, default), `schema` (`schemars`) ([ADR-0007](adr/0007-core-contracts-revision.md)) |
 | `mallops-std` | core | per feature: `arrow`, `polars`, `linfa`, `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
 | `mallops-cli` | core, std | `clap`, `anyhow` |
-| `mallops-edge` | core, std (subset) | `tonic` |
+| `mallops-edge` | core, std (`profile-edge`, ADR-0008) | `tonic`, `rumqttc` (via `serve-mqtt`) |
 
 ## 3. Core abstractions
 
@@ -293,11 +293,11 @@ pub trait LineageSink: Send + Sync {
 
 ## 7. Serving
 
-Serving runs outside the batch DAG via `mallops serve [package-id]` (using the package artifact produced by `mallops run` or configured in the top-level `serve:` section of `mallops.yaml`).
+Serving runs outside the batch DAG via `mallops serve [package-id]` (using the package artifact produced by `mallops run` or configured in the top-level `serve:` section of `mallops.yaml`). Transports: HTTP (v0.1), gRPC (v0.2) and MQTT (v0.3, `serve.transport: mqtt`: request topic in, prediction topic out, see [ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
 
 ```mermaid
 flowchart LR
-    C[Client] -->|HTTP/gRPC| S[mallops serve]
+    C[Client] -->|HTTP/gRPC/MQTT| S[mallops serve]
     S --> T[Preprocess transform<br/>from package]
     T --> P{Predictor by flavor}
     P --> LF[linfa]
@@ -340,18 +340,23 @@ flowchart TB
         COL[Metrics collector]
     end
     subgraph Edge["Edge node (mallops-edge)"]
-        SV[Local serving]
-        LT[Local training]
+        SV[Local serving HTTP/MQTT]
+        OL[Online learning DAG]
+        LT[FL local training]
         BUF[Metrics buffer]
     end
     REGI -- signed model pull --> SV
     AGG -- global weights --> LT
     LT -- weight deltas only --> AGG
+    SEN[Sensor] -- MQTT readings --> SV -- MQTT predictions --> CON[Consumer]
+    SEN -- labelled samples --> OL -- new package if gate passes --> SV
     SV --> BUF -- push when online --> COL
     COL -- drift alert --> RT[Retrain trigger]
 ```
 
-- Transport: gRPC (`tonic`) with mTLS; nodes initiate connections (NAT-friendly).
+- Transport: gRPC (`tonic`) with mTLS for the fleet control plane and FL; nodes initiate connections (NAT-friendly). MQTT for device data: serving reads requests from a topic and publishes predictions ([ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
+- Build: `mallops-edge` is inference-only by default (`profile-edge`); `online` and `fl` add only the training backends they need ([ADR-0008](adr/0008-edge-build-profiles-and-on-device-training.md)).
+- Online learning: a finite DAG on the device produces a new immutable package from the current model (`base` input of incremental train blocks); serving hot-swaps only after the evaluate gate passes, keeps the previous accepted and base packages for rollback, and never mutates a served model.
 - Aggregation strategies are blocks (FedAvg default); privacy techniques plug in at the aggregator.
 - Model weights exchanged in whatever format the flavor defines; the aggregator delegates averaging to a flavor-aware plugin.
 

@@ -11,3 +11,5 @@ Format: [MADR](https://adr.github.io/madr/) light. One decision per file, number
 | [0005](0005-gitflow-and-release.md) | GitFlow branching and automated releases | Accepted |
 | [0006](0006-store-and-lineage-contracts.md) | Artifact store and lineage: contracts in the core, implementations pluggable | Accepted |
 | [0007](0007-core-contracts-revision.md) | Core contracts revision before v0.1 implementation | Accepted |
+| [0008](0008-edge-build-profiles-and-on-device-training.md) | Edge build profiles and on-device online learning | Accepted |
+| [0009](0009-mqtt-blocks-and-serve-transport.md) | MQTT blocks and MQTT serving transport | Accepted |

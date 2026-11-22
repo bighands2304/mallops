@@ -438,8 +438,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ArtifactKind, Block, BlockRegistry, BlockSpec, BoxFuture, DraftPayload, Manifest,
-        MemoryStore, OutputDraft, OutputDrafts, PipelineBuilder, Port, Stage,
+        ArtifactKind, Block, BlockRegistry, BlockSpec, BoxFuture, DraftPayload, LocalStore,
+        Manifest, MemoryStore, OutputDraft, OutputDrafts, PipelineBuilder, Port, Stage,
     };
 
     const LIMIT: Duration = Duration::from_secs(10);
@@ -448,13 +448,15 @@ mod tests {
     #[derive(Default)]
     struct Probe {
         barrier: Option<Barrier>,
+        calls: AtomicUsize,
         running: AtomicUsize,
         peak: AtomicUsize,
         started: Notify,
     }
 
     /// Test block whose behavior is picked by `with: {"mode": ...}`:
-    /// `ok` (default), `fail`, `skip`, `barrier`, `wait_cancel`.
+    /// `ok` (default), `fail`, `panic`, `skip`, `skip_out` (skipped, still provides `out`),
+    /// `barrier`, `wait_cancel`, `file` / `dir` (payload written in `ctx.workdir()`).
     struct TestBlock {
         spec: BlockSpec,
         probe: Arc<Probe>,
@@ -472,6 +474,7 @@ mod tests {
         ) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
             Box::pin(async move {
                 let p = &self.probe;
+                p.calls.fetch_add(1, Ordering::SeqCst);
                 let now = p.running.fetch_add(1, Ordering::SeqCst) + 1;
                 p.peak.fetch_max(now, Ordering::SeqCst);
                 for _ in 0..10 {
@@ -480,6 +483,31 @@ mod tests {
                 let mode = ctx.config()["mode"].as_str().unwrap_or("ok");
                 let result = match mode {
                     "fail" => Err(Error::Runtime("boom".into())),
+                    "panic" => panic!("block panicked on purpose"),
+                    "skip_out" => Ok(BlockOutcome::Skipped {
+                        reason: "partial".into(),
+                        outputs: OutputDrafts::new().with("out", blob(b"partial".to_vec())),
+                    }),
+                    "file" | "dir" => {
+                        let canonical = std::fs::canonicalize(ctx.workdir()).unwrap();
+                        if ctx.workdir() != canonical {
+                            return Err(Error::Runtime("workdir is not canonical".into()));
+                        }
+                        let dir = ctx.workdir().join("dir");
+                        std::fs::create_dir(&dir).unwrap();
+                        std::fs::write(dir.join("a.bin"), b"a").unwrap();
+                        std::fs::write(ctx.workdir().join("out.bin"), b"o").unwrap();
+                        let payload = if mode == "file" {
+                            DraftPayload::File(ctx.workdir().join("out.bin"))
+                        } else {
+                            DraftPayload::Dir(dir)
+                        };
+                        let draft =
+                            OutputDraft::new(Manifest::new(ArtifactKind::Blob, mode), payload);
+                        Ok(BlockOutcome::Produced(
+                            OutputDrafts::new().with("out", draft),
+                        ))
+                    }
                     "skip" => Ok(BlockOutcome::Skipped {
                         reason: "gate closed".into(),
                         outputs: OutputDrafts::new(),
@@ -509,6 +537,13 @@ mod tests {
                 result
             })
         }
+    }
+
+    fn blob(bytes: Vec<u8>) -> OutputDraft {
+        OutputDraft::new(
+            Manifest::new(ArtifactKind::Blob, "text"),
+            DraftPayload::Bytes(bytes),
+        )
     }
 
     /// A `Dataset` draft on `port`: wrong kind for the `Blob` output `out`.
@@ -772,6 +807,114 @@ mod tests {
             .await
             .unwrap();
         assert!(store.get(&rejected).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_panicking_block_fails_without_deadlock() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "boom", "src", "panic", &[]);
+        node(&mut b, "child", "one", "ok", &[("a", "boom.out")]);
+        node(&mut b, "good", "src", "ok", &[]);
+        let p = b.build(&registry(&probe)).unwrap();
+        // With a single job slot, the panicking task must still release it.
+        let s = run(&runtime(Arc::new(MemoryStore::new()), 1), &p).await;
+
+        assert_eq!(status(&s, "boom"), Status::Failed);
+        assert!(matches!(s.nodes["boom"].error, Some(Error::Runtime(_))));
+        assert_eq!(s.nodes["boom"].duration, Duration::ZERO);
+        assert_eq!(status(&s, "child"), Status::Cancelled);
+        assert!(reason(&s, "child").contains("`boom` failed"));
+        assert_eq!(status(&s, "good"), Status::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn runtime_max_jobs_zero_runs_like_one() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "a", "src", "ok", &[]);
+        node(&mut b, "b", "src", "ok", &[]);
+        node(&mut b, "c", "one", "ok", &[("a", "a.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+        let s = run(&runtime(Arc::new(MemoryStore::new()), 0), &p).await;
+        assert!(s.is_success());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(probe.peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_cancelled_before_run_invokes_no_block() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "a", "src", "ok", &[]);
+        node(&mut b, "b", "one", "ok", &[("a", "a.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+        let source = CancelSource::new();
+        source.cancel();
+        let mut cfg = RuntimeConfig::new(Arc::new(MemoryStore::new()));
+        cfg.cancel = source.token();
+        let s = run(&Runtime::new(cfg), &p).await;
+
+        for id in ["a", "b"] {
+            assert_eq!(status(&s, id), Status::Cancelled);
+            assert_eq!(reason(&s, id), "run cancelled");
+        }
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_skipped_output_reaches_optional_consumer_only() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "gate", "src", "skip_out", &[]);
+        node(&mut b, "optional", "opt", "ok", &[("a", "gate.out")]);
+        node(&mut b, "required", "one", "ok", &[("a", "gate.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let s = run(&runtime(Arc::clone(&store), 2), &p).await;
+
+        assert!(s.is_success());
+        assert_eq!(status(&s, "gate"), Status::Skipped);
+        let provided = s.nodes["gate"].outputs["out"];
+        assert_eq!(status(&s, "optional"), Status::Succeeded);
+        // The optional consumer ran with the skipped node's output as input.
+        let out = store
+            .get(&s.nodes["optional"].outputs["out"])
+            .await
+            .unwrap();
+        assert_eq!(out.unwrap().manifest().parents, [provided]);
+        assert_eq!(status(&s, "required"), Status::Skipped);
+        assert!(reason(&s, "required").contains("skipped node `gate`"));
+    }
+
+    /// `ctx.workdir()` is canonical for a relative `workdir_root` and for one behind a
+    /// symlink (the system temp dir on macOS), and `File`/`Dir` payloads in it commit.
+    #[tokio::test]
+    async fn runtime_relative_workdir_root_commits_file_and_dir_on_local_store() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "file", "src", "file", &[]);
+        node(&mut b, "dir", "src", "dir", &[]);
+        let p = b.build(&registry(&probe)).unwrap();
+        let store_root = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalStore::new(store_root.path()).unwrap());
+
+        // A relative root under the cwd (which is never changed), then the system temp dir.
+        let local = tempfile::tempdir_in(".").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let relative = local.path().strip_prefix(&cwd).unwrap().to_path_buf();
+        assert!(relative.is_relative());
+        let system = tempfile::tempdir().unwrap();
+        for root in [relative, system.path().to_path_buf()] {
+            let mut cfg = RuntimeConfig::new(Arc::clone(&store) as Arc<dyn ArtifactStore>);
+            cfg.workdir_root = root.clone();
+            let s = run(&Runtime::new(cfg), &p).await;
+            for id in ["file", "dir"] {
+                assert_eq!(status(&s, id), Status::Succeeded, "{id}: {:?}", s.nodes[id]);
+                store.verify(&s.nodes[id].outputs["out"]).await.unwrap();
+            }
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "{root:?}");
+        }
     }
 
     /// No-op block: optional input `a`, emits an empty `out`.

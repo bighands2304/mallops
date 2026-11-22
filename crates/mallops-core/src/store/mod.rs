@@ -148,7 +148,10 @@ pub trait ArtifactStore: Send + Sync {
     /// - **Always materializes a copy**: must never return a writable path inside the
     ///   store itself. Modifying or deleting files in `dest` after `fetch` must not
     ///   mutate the stored artifact or break subsequent [`verify`](Self::verify) calls.
-    /// - Creates `dest` and any nested subdirectories required by payload [`RelPath`]s.
+    /// - **Isolated destination**: `dest` must either not exist or be an empty directory
+    ///   (and must not be a symlink or fall inside a filesystem-backed store's root);
+    ///   otherwise returns [`StoreError::InvalidPayload`]. Creates `dest` and any nested
+    ///   subdirectories required by payload [`RelPath`]s without following symlinks.
     /// - Returns [`StoreError::NotFound`] (wrapped in [`Error::Store`]) if no artifact
     ///   with `id` exists.
     fn fetch<'a>(

@@ -118,10 +118,86 @@ pub(crate) async fn fetch_is_an_isolated_copy<S: ArtifactStore>(store: &S) {
     assert_eq!(std::fs::read(dest2.join("sub/dir/b.bin")).unwrap(), b"bbb");
 }
 
-pub(crate) async fn put_rejects_symlinks<S: ArtifactStore>(store: &S) {
+pub(crate) async fn fetch_rejects_non_empty_or_symlinked_dest<S: ArtifactStore>(store: &S) {
+    let id = store
+        .put(
+            manifest(),
+            files(&[("a.bin", b"aaa"), ("sub/b.bin", b"bbb")]),
+        )
+        .await
+        .unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Non-empty directory destination must be rejected and left untouched.
+    let non_empty = tmp.path().join("non_empty");
+    std::fs::create_dir(&non_empty).unwrap();
+    let preexisting = non_empty.join("keep.txt");
+    std::fs::write(&preexisting, b"keep").unwrap();
+    let err = store.fetch(&id, &non_empty).await.unwrap_err();
+    assert!(
+        matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+        "expected InvalidPayload for non-empty dest, got {err:?}"
+    );
+    assert_eq!(std::fs::read(&preexisting).unwrap(), b"keep");
+    assert!(!non_empty.join("a.bin").exists());
+
+    // Existing regular file as destination must be rejected.
+    let file_dest = tmp.path().join("existing_file");
+    std::fs::write(&file_dest, b"unchanged").unwrap();
+    let err = store.fetch(&id, &file_dest).await.unwrap_err();
+    assert!(
+        matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+        "expected InvalidPayload for file dest, got {err:?}"
+    );
+    assert_eq!(std::fs::read(&file_dest).unwrap(), b"unchanged");
+
+    // Existing empty directory destination is allowed.
+    let empty_dir = tmp.path().join("empty_dir");
+    std::fs::create_dir(&empty_dir).unwrap();
+    store.fetch(&id, &empty_dir).await.unwrap();
+    assert_eq!(std::fs::read(empty_dir.join("a.bin")).unwrap(), b"aaa");
+    assert_eq!(std::fs::read(empty_dir.join("sub/b.bin")).unwrap(), b"bbb");
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
+
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let target = outside.join("victim.txt");
+        std::fs::write(&target, b"untouched").unwrap();
+
+        // Destination directory containing a symlink to an external file -> Err, target untouched.
+        let dest_with_link = tmp.path().join("dest_with_link");
+        std::fs::create_dir(&dest_with_link).unwrap();
+        symlink(&target, dest_with_link.join("a.bin")).unwrap();
+        let err = store.fetch(&id, &dest_with_link).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "expected InvalidPayload for symlinked entry in dest, got {err:?}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+
+        // Destination itself being a symlink to an empty directory -> Err, target remains empty.
+        let empty_target = outside.join("empty_target");
+        std::fs::create_dir(&empty_target).unwrap();
+        let dest_link = tmp.path().join("dest_link");
+        symlink(&empty_target, &dest_link).unwrap();
+        let err = store.fetch(&id, &dest_link).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "expected InvalidPayload for symlink dest, got {err:?}"
+        );
+        assert!(std::fs::read_dir(&empty_target).unwrap().next().is_none());
+    }
+}
+
+pub(crate) async fn put_rejects_malicious_inputs<S: ArtifactStore>(store: &S) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
 
         let tmp = tempfile::tempdir().unwrap();
         let outside = tmp.path().join("outside");
@@ -163,6 +239,29 @@ pub(crate) async fn put_rejects_symlinks<S: ArtifactStore>(store: &S) {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Store(StoreError::InvalidPayload(_))));
+
+        // Special file (Unix domain socket) inside Dir and directly as File.
+        let sock_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let sock_path = sock_dir.path().join("s.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        let err = store
+            .put(manifest(), PayloadSource::Dir(sock_dir.path()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "expected InvalidPayload for socket in dir, got {err:?}"
+        );
+
+        let err = store
+            .put(manifest(), PayloadSource::File(&sock_path))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "expected InvalidPayload for socket file, got {err:?}"
+        );
     }
     #[cfg(not(unix))]
     let _ = store;
@@ -234,7 +333,8 @@ macro_rules! conformance_tests {
         $crate::store::conformance::conformance_tests!(@case $factory, store_concurrent_put_is_idempotent, concurrent_put_is_idempotent, owned);
         $crate::store::conformance::conformance_tests!(@case $factory, store_unknown_id_is_none, unknown_id_is_none, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_fetch_is_an_isolated_copy, fetch_is_an_isolated_copy, ref);
-        $crate::store::conformance::conformance_tests!(@case $factory, store_put_rejects_symlinks, put_rejects_symlinks, ref);
+        $crate::store::conformance::conformance_tests!(@case $factory, store_fetch_rejects_non_empty_or_symlinked_dest, fetch_rejects_non_empty_or_symlinked_dest, ref);
+        $crate::store::conformance::conformance_tests!(@case $factory, store_put_rejects_malicious_inputs, put_rejects_malicious_inputs, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_put_rejects_case_collisions, put_rejects_case_collisions, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_meta_round_trip, meta_round_trip, ref);
     };

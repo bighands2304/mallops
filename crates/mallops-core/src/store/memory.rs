@@ -121,14 +121,12 @@ impl ArtifactStore for MemoryStore {
                 .ok_or(StoreError::NotFound(*id))?;
             let dest = dest.to_path_buf();
             blocking(move || {
-                for (path, bytes) in &files {
-                    let target = dest.join(path.as_path());
-                    if let Some(parent) = target.parent() {
-                        std::fs::create_dir_all(parent).map_err(StoreError::from)?;
-                    }
-                    std::fs::write(&target, bytes).map_err(StoreError::from)?;
-                }
-                std::fs::create_dir_all(&dest).map_err(StoreError::from)?;
+                payload::materialize(
+                    &dest,
+                    files
+                        .iter()
+                        .map(|(rel, bytes)| Ok((rel.clone(), bytes.as_slice()))),
+                )?;
                 Ok(dest)
             })
             .await

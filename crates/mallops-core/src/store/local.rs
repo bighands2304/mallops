@@ -405,7 +405,65 @@ fn exists_sync(root: &Path, id: ArtifactId) -> Result<bool, Error> {
     }
 }
 
+/// Rejects a `fetch` destination that resolves inside `root` (including non-existent paths whose
+/// nearest existing ancestor canonicalizes inside `root`).
+fn ensure_dest_outside_root(root: &Path, dest: &Path) -> Result<(), Error> {
+    let abs = if dest.is_absolute() {
+        dest.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(StoreError::from)?
+            .join(dest)
+    };
+
+    let mut existing = abs.as_path();
+    let mut tail = Vec::new();
+    let mut resolved = loop {
+        match fs::canonicalize(existing) {
+            Ok(canon) => break canon,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let Some(last) = existing.components().next_back() else {
+                    return Err(StoreError::Io(err).into());
+                };
+                tail.push(last.as_os_str().to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return Err(StoreError::Io(err).into());
+                };
+                existing = parent;
+            }
+            Err(err) => return Err(StoreError::Io(err).into()),
+        }
+    };
+
+    if resolved.starts_with(root) {
+        return Err(StoreError::InvalidPayload(format!(
+            "fetch destination must not be inside store root: {}",
+            dest.display()
+        ))
+        .into());
+    }
+
+    for part in tail.into_iter().rev() {
+        if part == ".." {
+            resolved.pop();
+        } else if part != "." {
+            resolved.push(part);
+        }
+        if resolved.starts_with(root) {
+            return Err(StoreError::InvalidPayload(format!(
+                "fetch destination must not be inside store root: {}",
+                dest.display()
+            ))
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 fn fetch_sync(root: &Path, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error> {
+    ensure_dest_outside_root(root, dest)?;
+
     let dir = artifact_dir(root, id);
     ensure_within_root(root, &dir)?;
 
@@ -438,19 +496,13 @@ fn fetch_sync(root: &Path, id: ArtifactId, dest: &Path) -> Result<PathBuf, Error
     }
 
     let stored_files = walk_stored_payload(&payload_dir, id)?;
-    fs::create_dir_all(dest).map_err(StoreError::from)?;
-
-    for (rel, src_path) in stored_files {
-        let out_path = dest.join(rel.as_path());
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(StoreError::from)?;
-        }
-        // Stream copy instead of `fs::copy` so materialized files do not inherit `0444` mode bits.
-        let mut reader = File::open(&src_path).map_err(StoreError::from)?;
-        let mut writer = File::create(&out_path).map_err(StoreError::from)?;
-        io::copy(&mut reader, &mut writer).map_err(StoreError::from)?;
-        writer.flush().map_err(StoreError::from)?;
-    }
+    payload::materialize(
+        dest,
+        stored_files.into_iter().map(|(rel, src_path)| {
+            let file = File::open(&src_path).map_err(StoreError::from)?;
+            Ok((rel, file))
+        }),
+    )?;
 
     Ok(dest.to_path_buf())
 }
@@ -1319,6 +1371,44 @@ mod tests {
         assert!(matches!(err, Error::Store(StoreError::PathOutsideRoot(_))));
         let err = store.exists(&id).await.unwrap_err();
         assert!(matches!(err, Error::Store(StoreError::PathOutsideRoot(_))));
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_dest_inside_store_root() {
+        let ts = TestStore::new();
+        let store = &ts.store;
+        let id = store
+            .put(sample_manifest(), PayloadSource::Bytes(b"payload"))
+            .await
+            .unwrap();
+
+        for dest in [
+            store.root().to_path_buf(),
+            store.root().join(ARTIFACTS_DIR).join("injected"),
+            store.root().join("new_dir/nested"),
+        ] {
+            let err = store.fetch(&id, &dest).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+                "expected InvalidPayload for dest {}, got {err:?}",
+                dest.display()
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            let link_to_root = outside.path().join("into_store");
+            std::os::unix::fs::symlink(store.root(), &link_to_root).unwrap();
+            let err = store
+                .fetch(&id, &link_to_root.join("artifacts/fake"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+                "expected InvalidPayload for symlinked dest inside store root, got {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

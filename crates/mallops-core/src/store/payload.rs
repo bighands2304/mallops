@@ -4,9 +4,9 @@
 //! Callers in async contexts should invoke [`collect`] inside `tokio::task::spawn_blocking`.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crate::{Error, PayloadSource, RelPath, StoreError};
@@ -137,6 +137,82 @@ pub(crate) fn walk_files(root: &Path, ignore_not_found: bool) -> io::Result<Vec<
     }
 
     Ok(out)
+}
+
+/// Materializes payload entries into `dest`, which must either not exist or be an empty directory.
+///
+/// Subdirectories are created step-by-step with [`fs::create_dir`] and files are opened with
+/// [`fs::OpenOptions::create_new`] (`O_EXCL`) so pre-existing files or planted symlinks cannot be
+/// followed or overwritten.
+pub(crate) fn materialize<R, I>(dest: &Path, entries: I) -> Result<(), Error>
+where
+    R: io::Read,
+    I: IntoIterator<Item = Result<(RelPath, R), Error>>,
+{
+    match fs::symlink_metadata(dest) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                return Err(StoreError::InvalidPayload(format!(
+                    "fetch destination must not be a symlink: {}",
+                    dest.display()
+                ))
+                .into());
+            }
+            if !ft.is_dir() {
+                return Err(StoreError::InvalidPayload(format!(
+                    "fetch destination must be a directory: {}",
+                    dest.display()
+                ))
+                .into());
+            }
+            if fs::read_dir(dest)
+                .map_err(StoreError::from)?
+                .next()
+                .is_some()
+            {
+                return Err(StoreError::InvalidPayload(format!(
+                    "fetch destination must be empty: {}",
+                    dest.display()
+                ))
+                .into());
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(dest).map_err(StoreError::from)?;
+        }
+        Err(err) => return Err(StoreError::Io(err).into()),
+    }
+
+    let mut created_dirs: HashSet<PathBuf> = HashSet::new();
+
+    for entry_res in entries {
+        let (rel, mut reader) = entry_res?;
+        let mut cur = dest.to_path_buf();
+        if let Some(parent) = rel.as_path().parent() {
+            for comp in parent.components() {
+                if let Component::Normal(part) = comp {
+                    cur.push(part);
+                    if created_dirs.insert(cur.clone()) {
+                        fs::create_dir(&cur).map_err(StoreError::from)?;
+                    }
+                }
+            }
+        }
+        if let Some(file_name) = rel.as_path().file_name() {
+            cur.push(file_name);
+        }
+
+        let mut writer = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&cur)
+            .map_err(StoreError::from)?;
+        io::copy(&mut reader, &mut writer).map_err(StoreError::from)?;
+        writer.flush().map_err(StoreError::from)?;
+    }
+
+    Ok(())
 }
 
 /// Converts `path` under `root` into a validated [`RelPath`].

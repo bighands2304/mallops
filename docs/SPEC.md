@@ -207,7 +207,7 @@ serve:                   # optional serving config read by `mallops serve` (not 
 
 Rules:
 - `blocks:` defines the finite batch DAG executed by `mallops run`. Long-running serving lives in the optional top-level `serve:` section (read by `mallops serve`, never started by `mallops run`).
-- `use` references a block by `namespace/name` (`std/…` built-in in v0.1; `plugin/…`, `wasm:path.wasm`, and `grpc:host:port` are reserved for post-v0.1 plugin runtimes and fail with a clear error in v0.1).
+- `use` references a block by `namespace/name`, where `name` is `stage[.variant]` (e.g. `std/ingest.csv`, `std/package`). Each segment starts with `[a-z0-9]` and contains only `[a-z0-9_-]`; anything else fails as a malformed block reference (`std/…` built-in in v0.1; `plugin/…`, `wasm:path.wasm`, and `grpc:host:port` are reserved for post-v0.1 plugin runtimes and fail with a clear error in v0.1).
 - `in` wires named inputs to `<block>.<output>`; this defines the DAG. Cycles are rejected.
 - `with` is block-specific config, validated by `Block::validate_config` (using `serde` in v0.1; optional JSON Schema validation behind the `schema-validate` feature). Each block also supports `cache: false` to bypass caching.
 - Values may reference environment variables `${env:NAME}` (resolved into `config` and included in `config_hash`) and secrets `${secret:NAME}` (resolved on demand via `MALLOPS_SECRET_<NAME>` in v0.1 into a redacted `Secret`, never written to `config.json`, cache keys, logs, or lineage).

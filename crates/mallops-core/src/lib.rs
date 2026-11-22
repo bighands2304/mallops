@@ -6,6 +6,7 @@ mod artifact;
 mod block;
 mod context;
 mod error;
+mod registry;
 pub mod store;
 
 pub use artifact::{Artifact, ArtifactId, ArtifactKind, Digest, Manifest, PayloadFile, RelPath};
@@ -18,4 +19,5 @@ pub use context::{
     SecretProvider,
 };
 pub use error::Error;
+pub use registry::{BlockRef, BlockRegistry};
 pub use store::{ArtifactStore, BoxFuture, LocalStore, MemoryStore, PayloadSource, StoreError};

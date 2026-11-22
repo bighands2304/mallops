@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Error, PayloadSource, RelPath, StoreError};
+use crate::{Error, Manifest, PayloadSource, RelPath, StoreError};
 
 /// A single validated payload entry ready for ingestion into a store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,10 @@ impl PayloadEntry<'_> {
     /// ponytail: residual TOCTOU risks accepted for v0.1 without extra dependencies:
     /// (a) non-Unix targets do not expose a stable `(dev, ino)` pair in `std`;
     /// (b) a file swapped for a FIFO between `collect` and `open` can still block `File::open`,
-    /// since passing `O_NONBLOCK` portably would require `libc` (not in the core allowlist).
+    /// since passing `O_NONBLOCK` portably would require `libc` (not in the core allowlist);
+    /// (c) swapping an intermediate directory *during* the walk (between `lstat` and `read_dir`)
+    /// is not detected: it needs a same-user writer still active while the put commits (trusted,
+    /// ADR-0007 D7). Full closure needs `openat(O_NOFOLLOW)` traversal, deferred to v0.2.
     pub(crate) fn open_verified(&self) -> Result<fs::File, Error> {
         let Self::File {
             path,
@@ -89,6 +92,17 @@ impl PayloadEntry<'_> {
 
         Ok(file)
     }
+}
+
+/// Rejects a manifest whose `schema_version` is not supported (shared by every store's `put`).
+pub(crate) fn check_schema(manifest: &Manifest) -> Result<(), Error> {
+    if manifest.schema_version != Manifest::SCHEMA_VERSION {
+        return Err(Error::UnsupportedSchemaVersion {
+            found: manifest.schema_version,
+            expected: Manifest::SCHEMA_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// A single filesystem entry produced by [`walk_files`].
@@ -144,6 +158,9 @@ pub(crate) fn walk_files(root: &Path, ignore_not_found: bool) -> io::Result<Vec<
 /// Subdirectories are created step-by-step with [`fs::create_dir`] and files are opened with
 /// [`fs::OpenOptions::create_new`] (`O_EXCL`) so pre-existing files or planted symlinks cannot be
 /// followed or overwritten.
+///
+/// This protects against content planted in `dest` *before* the call, not against a concurrent
+/// writer in `dest`. On error `dest` may be left partially populated: retry with a new directory.
 pub(crate) fn materialize<R, I>(dest: &Path, entries: I) -> Result<(), Error>
 where
     R: io::Read,
@@ -598,6 +615,43 @@ mod tests {
 
         let err = collect(PayloadSource::Dir(dir.path())).unwrap_err();
         assert!(matches!(err, Error::InvalidPath(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn materialize_refuses_to_overwrite_with_duplicate_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        let entry = |bytes: &'static [u8]| Ok((RelPath::parse("sub/a.bin").unwrap(), bytes));
+
+        let err = materialize(&dest, [entry(b"first"), entry(b"second")]).unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::Io(_))),
+            "got {err:?}"
+        );
+        assert_eq!(fs::read(dest.join("sub/a.bin")).unwrap(), b"first");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_does_not_follow_planted_symlink_between_entries() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, b"untouched").unwrap();
+
+        let planted = dest.clone();
+        let victim2 = victim.clone();
+        let entries = (0..2).map(move |i| {
+            if i == 1 {
+                symlink(&victim2, planted.join("b.bin")).unwrap();
+            }
+            let name = if i == 0 { "a.bin" } else { "b.bin" };
+            Ok((RelPath::parse(name).unwrap(), b"new".as_slice()))
+        });
+        assert!(materialize(&dest, entries).is_err());
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched");
     }
 
     #[cfg(unix)]

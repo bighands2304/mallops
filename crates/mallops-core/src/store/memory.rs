@@ -39,7 +39,12 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 /// Blocking: reads a validated payload fully into memory.
 fn read_all(payload: PayloadSource<'_>) -> Result<Files, Error> {
-    payload::collect(payload)?
+    read_entries(payload::collect(payload)?)
+}
+
+/// Blocking: reads collected entries (re-verifying every file source) into memory.
+fn read_entries(entries: BTreeMap<RelPath, PayloadEntry<'_>>) -> Result<Files, Error> {
+    entries
         .into_iter()
         .map(|(path, entry)| {
             let bytes = match entry {
@@ -97,6 +102,7 @@ impl ArtifactStore for MemoryStore {
         payload: PayloadSource<'a>,
     ) -> BoxFuture<'a, Result<ArtifactId, Error>> {
         Box::pin(async move {
+            payload::check_schema(&manifest)?;
             let files = load(payload).await?;
             let id = id_of(&manifest, &files)?;
             write(&self.artifacts)
@@ -206,7 +212,27 @@ impl ArtifactStore for MemoryStore {
 
 #[cfg(test)]
 mod tests {
-    use super::MemoryStore;
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn read_entries_rejects_symlink_swap_after_collect() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("model.bin");
+        let secret = dir.path().join("secret");
+        std::fs::write(&src, b"legit").unwrap();
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let entries = payload::collect(PayloadSource::File(&src)).unwrap();
+        std::fs::remove_file(&src).unwrap();
+        std::os::unix::fs::symlink(&secret, &src).unwrap();
+
+        let err = read_entries(entries).unwrap_err();
+        assert!(
+            matches!(err, Error::Store(StoreError::InvalidPayload(_))),
+            "got {err:?}"
+        );
+    }
 
     super::super::conformance::conformance_tests!(|| (MemoryStore::new(), ()));
 }

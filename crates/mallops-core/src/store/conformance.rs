@@ -267,6 +267,19 @@ pub(crate) async fn put_rejects_malicious_inputs<S: ArtifactStore>(store: &S) {
     let _ = store;
 }
 
+pub(crate) async fn put_rejects_unsupported_schema<S: ArtifactStore>(store: &S) {
+    let mut bad = manifest();
+    bad.schema_version = Manifest::SCHEMA_VERSION + 1;
+    let err = store
+        .put(bad, PayloadSource::Bytes(b"x"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::UnsupportedSchemaVersion { .. }),
+        "{err:?}"
+    );
+}
+
 pub(crate) async fn put_rejects_case_collisions<S: ArtifactStore>(store: &S) {
     let mut map: BTreeMap<RelPath, &[u8]> = BTreeMap::new();
     map.insert(rel("A.bin"), b"1");
@@ -359,6 +372,7 @@ macro_rules! conformance_tests {
         $crate::store::conformance::conformance_tests!(@case $factory, store_fetch_is_an_isolated_copy, fetch_is_an_isolated_copy, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_fetch_rejects_non_empty_or_symlinked_dest, fetch_rejects_non_empty_or_symlinked_dest, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_put_rejects_malicious_inputs, put_rejects_malicious_inputs, ref);
+        $crate::store::conformance::conformance_tests!(@case $factory, store_put_rejects_unsupported_schema, put_rejects_unsupported_schema, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_put_rejects_case_collisions, put_rejects_case_collisions, ref);
         $crate::store::conformance::conformance_tests!(@case $factory, store_meta_round_trip, meta_round_trip, ref);
     };

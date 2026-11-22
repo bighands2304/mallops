@@ -9,7 +9,7 @@ use crate::{Block, BlockSpec, Error};
 
 /// Validated reference to a block: `namespace/stage[.variant]` (e.g. `std/ingest.csv`).
 ///
-/// Segments are non-empty and made of `[a-z0-9_-]`. The `wasm:`/`grpc:` prefixes and the
+/// Segments start with `[a-z0-9]` and then contain only `[a-z0-9_-]`. The `wasm:`/`grpc:` prefixes and the
 /// `plugin/` namespace are reserved and rejected in v0.1.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]

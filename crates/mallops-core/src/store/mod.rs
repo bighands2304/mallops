@@ -116,7 +116,7 @@ pub trait ArtifactStore: Send + Sync {
     ///   existing stored data.
     /// - **Atomicity and read-only storage**: filesystem-backed stores must stage
     ///   writes into a same-filesystem temporary directory, publish via idempotent
-    ///   rename, enforce canonical root-boundary checks, and mark stored payload
+    ///   rename, reject symlinks that escape the store root (`lstat` on each path component), and mark stored payload
     ///   files/directories read-only (`0444`/`0555` on Unix where supported).
     /// - **Input validation**: rejects unsupported `manifest.schema_version` with
     ///   [`Error::UnsupportedSchemaVersion`], symlinks and special files with

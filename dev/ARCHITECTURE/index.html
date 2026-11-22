@@ -1449,7 +1449,7 @@
 </tr>
 <tr>
 <td>Config</td>
-<td><code>serde</code> + <code>serde_json</code> + <code>yaml_serde</code> (<code>yaml</code> feature) + optional <code>schemars</code> (<code>schema</code> feature)</td>
+<td><code>serde</code> + <code>serde_json</code> + <code>yaml_serde</code> (<code>yaml</code> feature, enabled by default) + optional <code>schemars</code> (<code>schema</code> feature); <code>${env:NAME}</code> interpolated at load time in <code>with</code>/<code>store.path</code> only, <code>${secret:NAME}</code> stays symbolic</td>
 </tr>
 <tr>
 <td>Async</td>

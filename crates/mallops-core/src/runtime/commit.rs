@@ -28,9 +28,13 @@ pub(crate) async fn commit_outputs(
     workdir: &Path,
     produced: bool,
 ) -> Result<BTreeMap<String, ArtifactId>, Error> {
-    // 7.2: implementation.
-    let _ = (store, ports, drafts, parents, workdir, produced);
-    Err(Error::Runtime(
-        "commit_outputs not implemented yet".to_string(),
-    ))
+    // 7.2: port checks and workdir confinement; this minimal version only sets parents and puts.
+    let _ = (ports, workdir, produced);
+    let mut committed = BTreeMap::new();
+    for (port, draft) in drafts {
+        let manifest = draft.manifest.with_parents(parents.iter().copied());
+        let id = store.put(manifest, draft.payload.as_source()).await?;
+        committed.insert(port, id);
+    }
+    Ok(committed)
 }

@@ -3,7 +3,6 @@
 use serde_json::Value;
 
 use crate::Error;
-use crate::context::secret::check_name as check_secret_name;
 
 const ENV_PREFIX: &str = "env:";
 const SECRET_PREFIX: &str = "secret:";
@@ -12,7 +11,7 @@ const SECRET_PREFIX: &str = "secret:";
 /// references in all string values of `value`.
 ///
 /// Object keys and non-string primitives are left untouched. `${secret:NAME}` references
-/// are validated with [`crate::context::secret::check_name`] and preserved literally;
+/// are validated with the same charset as env names and preserved literally;
 /// secret values are never resolved here. Replaced text is not re-scanned.
 pub(crate) fn interpolate(
     value: &mut Value,
@@ -36,78 +35,56 @@ pub(crate) fn interpolate(
     }
 }
 
-fn is_valid_env_name(name: &str) -> bool {
+fn is_valid_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-fn interpolate_str(input: &mut String, env: &dyn Fn(&str) -> Option<String>) -> Result<(), Error> {
+/// Interpolates `${env:NAME}` in `input` in place; `${secret:NAME}` is validated and kept.
+pub(crate) fn interpolate_str(
+    input: &mut String,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), Error> {
     let s = input.as_str();
+    let mut out = String::with_capacity(s.len());
     let mut cursor = 0;
-    let mut out: Option<String> = None;
 
-    while let Some(rel_start) = s[cursor..].find("${") {
-        let start = cursor + rel_start;
-        let after_open = start + 2;
-        let rest = &s[after_open..];
-
-        if let Some(after_prefix) = rest.strip_prefix(ENV_PREFIX) {
-            let name_start = after_open + ENV_PREFIX.len();
-            let Some(rel_end) = after_prefix.find('}') else {
-                return Err(Error::Config(
-                    "unterminated `${env:...}` reference: missing `}`".to_string(),
-                ));
-            };
-            let end = name_start + rel_end;
-            let name = &s[name_start..end];
-            if !is_valid_env_name(name) {
-                return Err(Error::Config(format!(
-                    "invalid environment variable name `{name}` in `${{env:{name}}}`"
-                )));
-            }
-            let replacement = env(name)
-                .ok_or_else(|| Error::Config(format!("missing environment variable `{name}`")))?;
-
-            let buf = match out.as_mut() {
-                Some(buf) => {
-                    buf.push_str(&s[cursor..start]);
-                    buf
-                }
-                None => {
-                    let mut buf = String::with_capacity(s.len());
-                    buf.push_str(&s[..start]);
-                    out.insert(buf)
-                }
-            };
-            buf.push_str(&replacement);
-            cursor = end + 1;
-        } else if let Some(after_prefix) = rest.strip_prefix(SECRET_PREFIX) {
-            let name_start = after_open + SECRET_PREFIX.len();
-            let Some(rel_end) = after_prefix.find('}') else {
-                return Err(Error::Config(
-                    "unterminated `${secret:...}` reference: missing `}`".to_string(),
-                ));
-            };
-            let end = name_start + rel_end;
-            let name = &s[name_start..end];
-            check_secret_name(name)?;
-
-            if let Some(buf) = out.as_mut() {
-                buf.push_str(&s[cursor..=end]);
-            }
-            cursor = end + 1;
+    while let Some(rel) = s[cursor..].find("${") {
+        let start = cursor + rel;
+        let rest = &s[start + 2..];
+        let (kind, is_env) = if rest.starts_with(ENV_PREFIX) {
+            (ENV_PREFIX, true)
+        } else if rest.starts_with(SECRET_PREFIX) {
+            (SECRET_PREFIX, false)
         } else {
-            if let Some(buf) = out.as_mut() {
-                buf.push_str(&s[cursor..after_open]);
-            }
-            cursor = after_open;
+            // other `${...}` stays literal
+            out.push_str(&s[cursor..start + 2]);
+            cursor = start + 2;
+            continue;
+        };
+        let after = &rest[kind.len()..];
+        let Some(len) = after.find('}') else {
+            return Err(Error::Config(format!(
+                "unterminated `${{{kind}...}}` reference: missing `}}`"
+            )));
+        };
+        let name = &after[..len];
+        if !is_valid_name(name) {
+            return Err(Error::Config(format!(
+                "invalid name `{name}` in `${{{kind}{name}}}`: expected [A-Za-z0-9_]+"
+            )));
         }
+        out.push_str(&s[cursor..start]);
+        if is_env {
+            let value = env(name)
+                .ok_or_else(|| Error::Config(format!("missing environment variable `{name}`")))?;
+            out.push_str(&value);
+        } else {
+            out.push_str(&s[start..start + 2 + kind.len() + len + 1]);
+        }
+        cursor = start + 2 + kind.len() + len + 1;
     }
-
-    if let Some(mut buf) = out {
-        buf.push_str(&s[cursor..]);
-        *input = buf;
-    }
-
+    out.push_str(&s[cursor..]);
+    *input = out;
     Ok(())
 }
 
@@ -226,78 +203,43 @@ mod tests {
     }
 
     #[test]
-    fn invalid_names_return_error() {
-        let env = env_from(&[]);
-
+    fn errors_table() {
+        let env = env_from(&[("FOO", "bar")]);
         for bad in [
             "${env:}",
             "${env:FOO-BAR}",
-            "${env:FOO.BAR}",
-            "${env:FOO BAR}",
             "${env:FOO$}",
             "${env:café}",
-        ] {
-            let mut val = json!(bad);
-            let err = interpolate(&mut val, &env).expect_err(bad);
-            assert!(
-                matches!(err, Error::Config(_)),
-                "expected Error::Config for {bad}, got {err:?}"
-            );
-        }
-
-        let mut empty_secret = json!("${secret:}");
-        let err = interpolate(&mut empty_secret, &env).expect_err("empty secret name must fail");
-        assert!(
-            matches!(err, Error::Secret(_)),
-            "expected Error::Secret for empty secret name, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn missing_closing_brace_returns_config_error() {
-        let env = env_from(&[("FOO", "bar")]);
-
-        for bad in [
+            "${secret:}",
+            "${secret:A-B}",
+            "${secret:A${env:FOO}}",
             "${env:FOO",
             "${env:",
-            "prefix ${env:FOO",
-            "${secret:API_KEY",
-            "${secret:",
             "prefix ${secret:API_KEY",
+            "${secret:",
         ] {
-            let mut val = json!(bad);
-            let err = interpolate(&mut val, &env).expect_err(bad);
-            assert!(
-                matches!(err, Error::Config(_)),
-                "expected Error::Config for {bad}, got {err:?}"
-            );
+            let err = interpolate(&mut json!(bad), &env).expect_err(bad);
+            assert!(matches!(err, Error::Config(_)), "{bad}: {err:?}");
         }
     }
 
     #[test]
-    fn other_dollar_braces_remain_literal() {
+    fn literals_table() {
         let env = env_from(&[("SUB", "data")]);
-
-        let mut val = json!({
-            "shell": "${HOME}/bin/${USER:-root}",
-            "empty_braces": "${}",
-            "unclosed_other": "${HOME",
-            "almost_env": "${env_var}",
-            "mixed": "${HOME}/${env:SUB}/${OTHER}"
-        });
-
-        interpolate(&mut val, &env).expect("non-env/secret placeholders stay literal");
-
-        assert_eq!(
-            val,
-            json!({
-                "shell": "${HOME}/bin/${USER:-root}",
-                "empty_braces": "${}",
-                "unclosed_other": "${HOME",
-                "almost_env": "${env_var}",
-                "mixed": "${HOME}/data/${OTHER}"
-            })
-        );
+        for (input, want) in [
+            ("${HOME}/bin/${USER:-root}", "${HOME}/bin/${USER:-root}"),
+            ("${}", "${}"),
+            ("${HOME", "${HOME"),
+            ("${env_var}", "${env_var}"),
+            ("abc${", "abc${"),
+            ("${HOME}/${env:SUB}/${OTHER}", "${HOME}/data/${OTHER}"),
+            ("è–日本 ${env:SUB} ✓", "è–日本 data ✓"),
+            ("日本${", "日本${"),
+        ] {
+            let mut v = json!(input);
+            interpolate(&mut v, &env).expect(input);
+            assert_eq!(v, json!(want), "{input}");
+        }
     }
 
     #[test]

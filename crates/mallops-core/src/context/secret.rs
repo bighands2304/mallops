@@ -91,7 +91,7 @@ impl SecretProvider for EnvSecretProvider {
     }
 }
 
-pub(crate) fn check_name(name: &str) -> Result<(), Error> {
+fn check_name(name: &str) -> Result<(), Error> {
     if name.is_empty() {
         return Err(Error::Secret("secret name must not be empty".to_string()));
     }

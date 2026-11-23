@@ -83,19 +83,39 @@ pub(crate) enum GraphFormat {
 }
 
 /// Blocks available to the CLI. `mallops_std::register_std` joins in #11.
-pub(crate) fn registry() -> BlockRegistry {
+pub(crate) fn registry() -> anyhow::Result<BlockRegistry> {
     let mut r = BlockRegistry::new();
-    // ponytail: a fresh registry cannot hold a duplicate id.
-    if let Err(e) = r.register(Arc::new(noop::Noop::new())) {
-        unreachable!("core/noop registration failed: {e}");
-    }
-    r
+    r.register(Arc::new(noop::Noop::new()))?;
+    Ok(r)
 }
 
 /// Parses `file` (with `${env:…}` interpolation) and validates it against [`registry`].
 pub(crate) fn load(file: &Path) -> anyhow::Result<ValidatedPipeline> {
     let config = PipelineConfig::from_yaml_file(file, &|n| std::env::var(n).ok())?;
-    Ok(config.validate(&registry())?)
+    Ok(config.validate(&registry()?)?)
+}
+
+/// Formats an `anyhow` error chain without repeating causes already present in the preceding message.
+fn format_error_chain(err: &anyhow::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for cause in err.chain() {
+        let text = cause.to_string();
+        if parts.last().is_some_and(|prev| prev.contains(&text)) {
+            continue;
+        }
+        parts.push(text);
+    }
+    parts.join(": ")
+}
+
+fn print_error(err: &anyhow::Error) {
+    if let Some(mallops_core::Error::Validation(errs)) = err.downcast_ref::<mallops_core::Error>() {
+        for ve in errs {
+            eprintln!("error: {ve}");
+        }
+        return;
+    }
+    eprintln!("error: {}", format_error_chain(err));
 }
 
 fn main() -> ExitCode {
@@ -123,10 +143,31 @@ fn main() -> ExitCode {
     match res {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            if !e.is::<inspect::Reported>() {
-                eprintln!("error: {e:#}");
-            }
+            print_error(&e);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mallops_core::{Error, StoreError};
+
+    #[test]
+    fn format_error_chain_skips_redundant_causes() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing file");
+        let core_err: anyhow::Error = Error::Store(StoreError::Io(io_err)).into();
+        let formatted = format_error_chain(&core_err);
+        assert_eq!(formatted.matches("missing file").count(), 1, "{formatted}");
+
+        let wrapped = core_err.context("outer context");
+        let wrapped_fmt = format_error_chain(&wrapped);
+        assert!(wrapped_fmt.starts_with("outer context: "), "{wrapped_fmt}");
+        assert_eq!(
+            wrapped_fmt.matches("missing file").count(),
+            1,
+            "{wrapped_fmt}"
+        );
     }
 }

@@ -114,6 +114,9 @@ blocks:
     in:
       in: nonexistent.out
       extra: good.out
+
+serve:
+  package: nope.out
 ";
     fs::write(dir.path().join("mallops.yaml"), yaml).unwrap();
 
@@ -141,10 +144,31 @@ fn inspect_validate_parse_error_exits_1() {
 #[test]
 fn inspect_no_execution_on_validate_and_graph() {
     let dir = tempfile::tempdir().unwrap();
-    let init = run_cli(dir.path(), &["init"]);
-    assert_eq!(init.status.code(), Some(0));
+    // Write a valid pipeline whose `core/noop` node fails if `Block::run` is ever executed.
+    // Because `validate` and `graph` must never invoke `Runtime::run`, `Block::run`, `git`,
+    // `LocalStore::new`, or create a run workdir under `TMPDIR`/`TMP`/`TEMP`:
+    // - Calling `Runtime::run` would fail on `with: { fail: ... }`, touch `empty_tmp` (and fail
+    //   when `TMPDIR`/`TMP`/`TEMP` is a missing path), and create `.mallops/`.
+    // - Spawning `git` would create `marker`.
+    // The positive control at the end runs `mallops run` on the exact same files and verifies
+    // all three effects happen when execution is actually requested.
+    fs::write(
+        dir.path().join("mallops.yaml"),
+        "\
+version: 1
+name: no-exec
+blocks:
+  boom:
+    use: core/noop
+    with:
+      fail: must-not-execute
+",
+    )
+    .unwrap();
 
     let fake_bin = tempfile::tempdir().unwrap();
+    let empty_tmp = tempfile::tempdir().unwrap();
+    let missing_tmp = empty_tmp.path().join("does-not-exist");
     let marker = dir.path().join("git-was-called.marker");
 
     #[cfg(unix)]
@@ -168,23 +192,29 @@ fn inspect_no_execution_on_validate_and_graph() {
         fs::write(&git_path, script).unwrap();
     }
 
-    for args in [
-        &["validate"][..],
-        &["graph", "--format", "mermaid"][..],
-        &["graph", "--format", "dot"][..],
-    ] {
-        let out = Command::new(BIN)
-            .current_dir(dir.path())
-            .env("PATH", fake_bin.path())
-            .args(args)
-            .output()
-            .expect("failed to run mallops binary");
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "args {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+    for tmp_dir in [empty_tmp.path(), missing_tmp.as_path()] {
+        for args in [
+            &["validate"][..],
+            &["graph", "--format", "mermaid"][..],
+            &["graph", "--format", "dot"][..],
+        ] {
+            let out = Command::new(BIN)
+                .current_dir(dir.path())
+                .env("PATH", fake_bin.path())
+                .env("TMPDIR", tmp_dir)
+                .env("TMP", tmp_dir)
+                .env("TEMP", tmp_dir)
+                .args(args)
+                .output()
+                .expect("failed to run mallops binary");
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "args {args:?} (tmp={}) failed: {}",
+                tmp_dir.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 
     assert!(
@@ -194,6 +224,32 @@ fn inspect_no_execution_on_validate_and_graph() {
     assert!(
         !dir.path().join(".mallops").exists(),
         "validate/graph must never create the artifact store"
+    );
+    assert!(
+        fs::read_dir(empty_tmp.path()).unwrap().next().is_none(),
+        "validate/graph must leave TMPDIR empty"
+    );
+
+    // Positive control: `mallops run` on the same pipeline touches git, store, and `Block::run`.
+    let run = Command::new(BIN)
+        .current_dir(dir.path())
+        .env("PATH", fake_bin.path())
+        .env("TMPDIR", empty_tmp.path())
+        .env("TMP", empty_tmp.path())
+        .env("TEMP", empty_tmp.path())
+        .args(["run"])
+        .output()
+        .expect("failed to run mallops binary");
+    assert_eq!(run.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("must-not-execute"),
+        "expected Block::run to execute in positive control: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(marker.exists(), "positive control: run must spawn git");
+    assert!(
+        dir.path().join(".mallops").exists(),
+        "positive control: run must create .mallops store"
     );
 }
 

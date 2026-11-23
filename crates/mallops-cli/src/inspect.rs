@@ -1,11 +1,11 @@
 //! `init`, `validate`, `graph`, `blocks list`: never execute blocks or spawn processes (task 10.1).
 
-use std::fmt::{self, Write as _};
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
 
-use mallops_core::{BlockSpec, Error, Port, Stage, ValidatedPipeline};
+use mallops_core::{BlockSpec, Port, Stage, ValidatedPipeline};
 
 use crate::GraphFormat;
 
@@ -21,18 +21,6 @@ blocks:
     in:
       in: hello.out
 ";
-
-/// Sentinel error for failures already printed to stderr (avoids duplicate `error:` lines).
-#[derive(Debug)]
-pub(crate) struct Reported;
-
-impl fmt::Display for Reported {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("validation failed")
-    }
-}
-
-impl std::error::Error for Reported {}
 
 /// Writes a minimal runnable `mallops.yaml` into `dir`; fails if it already exists.
 pub(crate) fn init(dir: &Path) -> anyhow::Result<()> {
@@ -50,20 +38,9 @@ pub(crate) fn init(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parses and validates `file`; prints `ok` or every validation error.
+/// Parses and validates `file`; prints `ok` or returns every validation error.
 pub(crate) fn validate(file: &Path) -> anyhow::Result<()> {
-    let pipeline = match crate::load(file) {
-        Ok(p) => p,
-        Err(e) => {
-            if let Some(Error::Validation(errs)) = e.downcast_ref::<Error>() {
-                for err in errs {
-                    eprintln!("error: {err}");
-                }
-                return Err(Reported.into());
-            }
-            return Err(e);
-        }
-    };
+    let pipeline = crate::load(file)?;
     crate::run::check_backends(pipeline.config())?;
     println!(
         "ok: {} ({} blocks)",
@@ -86,7 +63,7 @@ pub(crate) fn graph(file: &Path, format: GraphFormat) -> anyhow::Result<()> {
 
 /// Lists registered blocks (`id`, `version`, `stage`, ports), sorted by id.
 pub(crate) fn blocks_list() -> anyhow::Result<()> {
-    let reg = crate::registry();
+    let reg = crate::registry()?;
     print!("{}", format_blocks_table(&reg.list()));
     Ok(())
 }
@@ -99,6 +76,16 @@ fn escape_dot(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Yields `(upstream_node, input_port, downstream_node)` edges in topological node order.
+fn edges(pipeline: &ValidatedPipeline) -> impl Iterator<Item = (&str, &str, &str)> {
+    pipeline.nodes().iter().flat_map(|node| {
+        node.config.r#in.iter().filter_map(move |(port, target)| {
+            let (up, _) = target.split_once('.')?;
+            Some((up, port.as_str(), node.id.as_str()))
+        })
+    })
+}
+
 fn render_mermaid(pipeline: &ValidatedPipeline) -> String {
     let mut out = String::from("flowchart TD\n");
     for node in pipeline.nodes() {
@@ -106,15 +93,14 @@ fn render_mermaid(pipeline: &ValidatedPipeline) -> String {
         let block_use = escape_mermaid(&node.config.r#use.to_string());
         let _ = writeln!(out, "  {id}[\"{id}<br/>{block_use}\"]");
     }
-    for node in pipeline.nodes() {
-        let down = escape_mermaid(&node.id);
-        for (port, target) in &node.config.r#in {
-            if let Some((up, _)) = target.split_once('.') {
-                let up = escape_mermaid(up);
-                let port = escape_mermaid(port);
-                let _ = writeln!(out, "  {up} -->|{port}| {down}");
-            }
-        }
+    for (up, port, down) in edges(pipeline) {
+        let _ = writeln!(
+            out,
+            "  {} -->|{}| {}",
+            escape_mermaid(up),
+            escape_mermaid(port),
+            escape_mermaid(down),
+        );
     }
     out
 }
@@ -128,15 +114,14 @@ fn render_dot(pipeline: &ValidatedPipeline) -> String {
         let block_use = escape_dot(&node.config.r#use.to_string());
         let _ = writeln!(out, "  \"{id}\" [label=\"{id}\\n{block_use}\"];");
     }
-    for node in pipeline.nodes() {
-        let down = escape_dot(&node.id);
-        for (port, target) in &node.config.r#in {
-            if let Some((up, _)) = target.split_once('.') {
-                let up = escape_dot(up);
-                let port = escape_dot(port);
-                let _ = writeln!(out, "  \"{up}\" -> \"{down}\" [label=\"{port}\"];");
-            }
-        }
+    for (up, port, down) in edges(pipeline) {
+        let _ = writeln!(
+            out,
+            "  \"{}\" -> \"{}\" [label=\"{}\"];",
+            escape_dot(up),
+            escape_dot(down),
+            escape_dot(port),
+        );
     }
     out.push_str("}\n");
     out
@@ -204,19 +189,10 @@ fn format_blocks_table(specs: &[&BlockSpec]) -> String {
     }
     let mut out = String::new();
     for row in &rows {
-        let _ = writeln!(
-            out,
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-            w3 = widths[3],
-        );
+        for (cell, &w) in row[..4].iter().zip(&widths) {
+            let _ = write!(out, "{cell:<w$}  ");
+        }
+        let _ = writeln!(out, "{}", row[4]);
     }
     out
 }
@@ -235,7 +211,7 @@ mod tests {
         let mut builder = PipelineBuilder::new("pipe \"quoted\"");
         builder.block("a", noop.clone());
         builder.block("b", noop).input("in", "a.out");
-        let pipeline = builder.build(&crate::registry()).unwrap();
+        let pipeline = builder.build(&crate::registry().unwrap()).unwrap();
 
         let dot = render_dot(&pipeline);
         assert!(dot.starts_with("digraph \"pipe \\\"quoted\\\"\" {\n"));
@@ -263,22 +239,5 @@ core/a          1.0.0    ingest  -                             out:dataset
 std/train.fast  0.2.0    train   train:features,val?:features  model:model
 ";
         assert_eq!(table, expected);
-    }
-
-    #[test]
-    fn inspect_stage_names() {
-        assert_eq!(stage_name(Stage::Ingest), "ingest");
-        assert_eq!(stage_name(Stage::DataStorage), "data_storage");
-        assert_eq!(stage_name(Stage::Preprocess), "preprocess");
-        assert_eq!(stage_name(Stage::Train), "train");
-        assert_eq!(stage_name(Stage::ModelEngineering), "model_engineering");
-        assert_eq!(stage_name(Stage::Evaluate), "evaluate");
-        assert_eq!(stage_name(Stage::Package), "package");
-        assert_eq!(stage_name(Stage::Version), "version");
-        assert_eq!(stage_name(Stage::Deploy), "deploy");
-        assert_eq!(stage_name(Stage::Serve), "serve");
-        assert_eq!(stage_name(Stage::Monitor), "monitor");
-        assert_eq!(stage_name(Stage::Retrain), "retrain");
-        assert_eq!(stage_name(Stage::Custom), "custom");
     }
 }

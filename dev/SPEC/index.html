@@ -1615,10 +1615,10 @@
 </ul>
 <h3 id="314-lineage">3.14 Lineage<a class="headerlink" href="#314-lineage" title="Permanent link">&para;</a></h3>
 <ul>
-<li>FR-LIN-1: the runtime emits lineage events (<code>RunStarted</code>, <code>BlockStarted</code>, <code>ArtifactProduced</code>, <code>BlockFinished</code>, <code>RunFinished</code>) carrying config hash, block versions, input/output artifact ids, seed, git commit, timings, host info — v0.1.</li>
-<li>FR-LIN-2: events go to pluggable <strong>lineage sinks</strong>; the core ships <code>json</code> (one <code>lineage.json</code> per run in the store, default) — v0.1. SQLite, OpenLineage and MLflow sinks are optional — v0.2+.</li>
-<li>FR-LIN-3: multiple sinks can be active at once; <code>lineage: off</code> disables lineage entirely (caching still works, since it relies on artifact hashes, not on lineage).</li>
-<li>FR-LIN-4: secrets are never written to any sink.</li>
+<li>FR-LIN-1: the runtime emits lineage events (<code>RunStarted</code>, <code>BlockStarted</code>, <code>ArtifactProduced</code>, <code>BlockFinished</code>, <code>RunFinished</code>) with RFC 3339 UTC millisecond timestamps (<code>YYYY-MM-DDTHH:MM:SS.mmmZ</code>, computed from <code>SystemTime</code> without an external date crate) — v0.1. <code>RunStarted</code> carries <code>pipeline_hash</code> (domain-separated BLAKE3 <code>"mallops pipeline v1"</code> over canonical JSON of the topologically ordered nodes: <code>id</code>, <code>use</code>, <code>BlockSpec.version</code>, <code>config_hash</code>, <code>in</code>, <code>seed</code>), <code>git_commit</code> (<code>None</code> in the core library; populated by <code>mallops-cli</code>), and <code>host</code> (<code>os</code>, <code>arch</code>, <code>hostname</code> from <code>HOSTNAME</code>/<code>COMPUTERNAME</code> or <code>"unknown"</code>, <code>mallops_version</code>). Each started node emits <code>BlockStarted</code> (<code>block</code> string, <code>block_version</code>, <code>config_hash</code>, <code>seed</code>, <code>inputs</code>), one <code>ArtifactProduced</code> per output (including cache hits), and <code>BlockFinished</code> (<code>status</code>, <code>duration_ms</code>, <code>cached: true</code> on cache hits). Nodes that never start (<code>Skipped</code> or <code>Cancelled</code> before execution) emit only <code>BlockFinished</code> with <code>duration_ms: 0</code>. <code>RunFinished</code> reports <code>Cancelled</code> if the run was cancelled, else <code>Succeeded</code> if <code>RunSummary::is_success()</code>, else <code>Failed</code>.</li>
+<li>FR-LIN-2: events go to pluggable <code>LineageSink</code>s; the core ships <code>JsonSink</code> (default in <code>RuntimeConfig::new</code>), writing <code>runs/&lt;run-id&gt;/lineage.json</code> = <code>{"v":1,"run":"&lt;run-id&gt;","events":[...]}</code> (events internally tagged with <code>"event"</code> in <code>snake_case</code>) via <code>ArtifactStore::put_meta</code>, rewritten on every event so the file stays valid JSON after a crash — v0.1. <code>mallops_core::lineage::conformance::check_sink</code> provides a shared conformance suite reusable by future sinks. SQLite, OpenLineage and MLflow sinks are optional — v0.2+.</li>
+<li>FR-LIN-3: multiple sinks can be active at once via <code>RuntimeConfig::lineage</code> (YAML <code>lineage:</code> mapping lives in <code>mallops-cli</code>); an empty sink list (<code>lineage: off</code>) disables lineage entirely while caching still works (it relies on artifact hashes and <code>cache/&lt;key&gt;.json</code>, not on lineage). A sink returning <code>Err</code> logs a <code>tracing::warn!</code> and never fails the run.</li>
+<li>FR-LIN-4: secrets are never written to any sink, log, workdir, or store (verified by <code>lineage_anti_leak_*</code>).</li>
 </ul>
 <h2 id="4-non-functional-requirements">4. Non-functional requirements<a class="headerlink" href="#4-non-functional-requirements" title="Permanent link">&para;</a></h2>
 <table>
@@ -1643,11 +1643,11 @@
 </tr>
 <tr>
 <td>NFR-4 Security</td>
-<td>Secrets only via redacted <code>${secret:NAME}</code> references (never written to <code>config.json</code>, cache keys, logs, or lineage); <code>mallops.yaml</code>, native blocks, and external processes are trusted code — sandboxing applies only to WASM plugins; unsafe code-executing model flavors require explicit opt-in at serve time; signed artifacts from v0.3.</td>
+<td>Secrets only via redacted <code>${secret:NAME}</code> references (never written to <code>config.json</code>, cache keys, <code>config_hash</code>, logs, workdir, store, or lineage; checked by <code>lineage_anti_leak_*</code>); <code>mallops.yaml</code>, native blocks, and external processes are trusted code — sandboxing applies only to WASM plugins; unsafe code-executing model flavors require explicit opt-in at serve time; signed artifacts from v0.3.</td>
 </tr>
 <tr>
 <td>NFR-5 Observability</td>
-<td>Every run emits structured logs and, unless <code>lineage: off</code>, a lineage record.</td>
+<td>Every run emits structured <code>tracing</code> logs (per-node <code>node</code> span, warnings on cache or lineage sink errors) and, unless <code>lineage: off</code> (<code>RuntimeConfig::lineage</code> empty), a lineage record (<code>runs/&lt;run-id&gt;/lineage.json</code> by default, rewritten incrementally per event).</td>
 </tr>
 <tr>
 <td>NFR-6 Stability</td>

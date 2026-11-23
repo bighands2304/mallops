@@ -180,7 +180,12 @@ pub(crate) fn run(file: &Path, jobs: Option<usize>, no_cache: bool) -> anyhow::R
     let cfg = pipeline.config();
     check_backends(cfg)?;
 
-    let base = base_dir(file);
+    // Relative paths in block configs (e.g. `std/ingest.csv` `path`) resolve like `store.path`:
+    // against the directory of `mallops.yaml`.
+    let dir = base_dir(file);
+    std::env::set_current_dir(dir)
+        .with_context(|| format!("cannot enter pipeline directory {}", dir.display()))?;
+    let base = Path::new(".");
     let store = open_store(base, cfg)?;
     let lineage = build_lineage(cfg, &store)?;
 

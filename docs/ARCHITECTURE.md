@@ -160,6 +160,7 @@ pub struct RuntimeConfig {
     pub secret_provider: Arc<dyn SecretProvider>,
     pub workdir_root: PathBuf,               // per-run temporary workdirs are created here
     pub cancel: CancelToken,                 // external cancellation, seen by blocks via ctx.cancel()
+    pub no_cache: bool,                      // `--no-cache`: every node runs, no cache entry read or written
 }
 
 pub struct Runtime { /* config */ }
@@ -179,6 +180,7 @@ pub struct NodeSummary {
     pub outputs: BTreeMap<String, ArtifactId>, // committed outputs by port
     pub reason: Option<String>,              // why skipped / cancelled
     pub error: Option<Error>,                // Failed node, or Error::Cancelled from a cancelled block
+    pub cached: bool,                        // outputs served from the cache, block not run
 }
 
 #[non_exhaustive]
@@ -220,7 +222,7 @@ sequenceDiagram
 ```
 
 - Scheduler: nodes in topological order start as soon as all their upstream nodes have finished, as `tokio` tasks in a `JoinSet`, bounded by a `Semaphore` of `max_jobs` permits (`--jobs`); `spawn_blocking` for heavy CPU/hashing/filesystem work (+ `kill_on_drop` for external child processes). Each node runs through one function (`run_node`: job slot → `Context` → `cache_policy` → cache lookup → on a miss load inputs with `store.get` → `block.run` → commit → cache record), the single place where caching (#8) and lineage (#9) hook in. Once the node holds a job slot and the run is not cancelled, its execution is wrapped with `.instrument(info_span!("node", id, block))`; the span never lives in `Context`. A block that panics makes its node `Failed` (`Error::Runtime`) instead of crashing the run.
-- Cache (`runtime/cache.rs`): `cache_policy` errors fail the node. The key is bypassed (no lookup, no record) when the policy is `Uncacheable`, the node has `cache: false`, or `RuntimeConfig::no_cache` is set. A hit makes the node `Succeeded` with `NodeSummary::cached = true` and outputs from the entry; the block does not run and inputs are not loaded (the node span still exists). On a miss the node runs as usual and, only if `Succeeded`, `record` stores the entry; `Skipped`, `Failed` and `Cancelled` are never cached. A `record` error is a `tracing::warn!`, never a node failure. An unreadable or other-version entry, or one referencing an artifact missing from the store (`exists`), is a miss and gets overwritten.
+- Cache (`runtime/cache.rs`): The cache is bypassed (no lookup, no record) when the node has `cache: false` or `RuntimeConfig::no_cache` is set; `cache_policy` is then not called. Otherwise `cache_policy` is asked (an error fails the node) and an `Uncacheable` policy bypasses it too. `extra_hash` must not depend on secret values (NFR-4). A hit makes the node `Succeeded` with `NodeSummary::cached = true` and outputs from the entry; the block does not run and inputs are not loaded (the node span still exists). On a miss the node runs as usual and, only if `Succeeded`, `record` stores the entry; `Skipped`, `Failed` and `Cancelled` are never cached. A `record` error, or a store error during `lookup`, is a `tracing::warn!` (the lookup error counts as a miss and the entry is rewritten), never a node failure. An unreadable or other-version entry, or one referencing an artifact missing from the store (`exists`), is a miss and gets overwritten.
 - Failure: a node whose block or commit fails is `Status::Failed` (with its `error`); all its descendants are `Cancelled` without running, with a reason naming the failed node. Independent branches still finish. Re-running resumes from cache.
 - Skipping: `BlockOutcome::Skipped` (e.g. a failed quality gate) marks the node `Skipped`; outputs it still returns are committed. A consumer with any **required** input from a `Skipped` node, or whose required upstream output was not committed, is `Skipped` without running, even when its other inputs succeeded (fan-in). Optional inputs without a committed artifact are absent from `Inputs`. A failed or cancelled parent wins over a skipped one (`Cancelled`).
 - Cancellation: cooperative through `RuntimeConfig::cancel`, the token blocks see as `ctx.cancel()`. Once it fires no new node starts (`Cancelled`, reason `run cancelled`); a block that returns `Error::Cancelled` is `Cancelled` with that error, not `Failed`. In-flight tasks are never aborted.
@@ -286,6 +288,7 @@ pub trait ArtifactStore: Send + Sync {
 - Optional: `ObjectStore` adapter over the `object_store` crate (S3, GCS, Azure) behind `mallops-std` features; anything else as a plugin.
 - What depends on it: data hand-off between nodes and processes, caching (`cache/<key>.json`), resume via cached re-runs, `JsonSink` (`runs/<run-id>/lineage.json`), and model registry (v0.2).
 - Layout (`LocalStore`): `artifacts/<hash>/…`, `meta/cache/<key>.json`, `meta/runs/<run-id>/lineage.json`, `meta/registry/<model>/<version>.json` (v0.2), `.tmp/` (staging).
+- Cache key (`cache_key`, domain-separated BLAKE3): block id, `BlockSpec.version`, `config_hash` (canonical JSON of `with:`, secrets stay as literal `${secret:NAME}` so rotating a value does not invalidate), `seed`, the sorted `(port, input artifact id)` pairs, and `extra_hash` of `CachePolicy::Deterministic`. Node id and `use:` are not part of it. Entry: `cache/<key-hex>.json` = `{"v":1,"outputs":{"<port>":"<artifact-id>"}}`, stored through `put_meta`.
 
 ### 6.2 Lineage
 
@@ -330,7 +333,6 @@ pub trait LineageSink: Send + Sync {
 - Core sink: `JsonSink`, writing `runs/<run-id>/lineage.json` through `ArtifactStore::put_meta`.
 - Optional sinks: SQLite (queryable), OpenLineage (Marquez, DataHub…), MLflow — `mallops-std` features or plugins.
 - Zero or more sinks; `lineage: off` disables it. A failing sink logs a warning and never fails the run.
-- Cache key (`cache_key`, domain-separated BLAKE3): block id, `BlockSpec.version`, `config_hash` (canonical JSON of `with:`, secrets stay as literal `${secret:NAME}` so rotating a value does not invalidate), `seed`, the sorted `(port, input artifact id)` pairs, and `extra_hash` of `CachePolicy::Deterministic`. Node id and `use:` are not part of it. Entry: `cache/<key-hex>.json` = `{"v":1,"outputs":{"<port>":"<artifact-id>"}}`, stored through `put_meta`.
 - Caching does **not** depend on lineage: it uses artifact hashes and `cache/<key>.json` in the store.
 
 ## 7. Serving

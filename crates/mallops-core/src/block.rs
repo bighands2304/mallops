@@ -437,6 +437,9 @@ pub trait Block: Send + Sync {
 
     /// Cache policy for this run (default: [`CachePolicy::default`]).
     ///
+    /// `extra_hash` must not depend on secret values (NFR-4: secrets never enter cache keys).
+    /// Not called when the node or the run bypasses the cache.
+    ///
     /// # Errors
     ///
     /// An [`Error`] if the policy cannot be determined.

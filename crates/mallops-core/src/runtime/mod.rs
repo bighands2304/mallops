@@ -35,7 +35,7 @@ pub struct RuntimeConfig {
     pub workdir_root: PathBuf,
     /// External cancellation; blocks observe it through `ctx.cancel()`.
     pub cancel: CancelToken,
-    /// Run-level cache bypass (`--no-cache`): every node executes and no cache entry is read.
+    /// Run-level cache bypass (`--no-cache`): every node executes; no cache entry is read or written.
     pub no_cache: bool,
 }
 
@@ -419,15 +419,19 @@ async fn execute(
         env.cancel.clone(),
         Arc::clone(&env.secrets),
     );
-    let policy = node.block.cache_policy(&ctx).await?;
+    // `cache_policy` is only asked when the cache may be used.
     let key = if node.config.cache == Some(false) || env.no_cache {
         None
     } else {
+        let policy = node.block.cache_policy(&ctx).await?;
         cache::cache_key(node, &inputs, &policy)
     };
     if let Some(key) = &key {
-        if let Some(outputs) = cache::lookup(&*env.store, key).await? {
-            return Ok((outputs, None, true));
+        // A store error while reading is a miss (symmetric with `record`); the entry is rewritten.
+        match cache::lookup(&*env.store, key).await {
+            Ok(Some(outputs)) => return Ok((outputs, None, true)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "cannot read cache entry, running the block"),
         }
     }
     let mut block_inputs = Inputs::new();
@@ -464,7 +468,7 @@ async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tokio::sync::{Barrier, Notify};
 
@@ -1184,6 +1188,7 @@ mod tests {
         cache_no_cache_runtime_flag_executes_everything => scenario_no_cache,
         cache_resume_after_failure_reruns_failed_and_descendants => scenario_resume,
         cache_missing_output_artifact_is_a_miss => scenario_missing_output,
+        cache_store_error_on_lookup_is_a_miss => scenario_lookup_error,
     }
 
     async fn scenario_rerun(store: Arc<dyn ArtifactStore>) {
@@ -1312,6 +1317,7 @@ mod tests {
     struct HidingStore {
         inner: Arc<dyn ArtifactStore>,
         hidden: Mutex<Option<ArtifactId>>,
+        fail_get_meta: AtomicBool,
     }
 
     impl ArtifactStore for HidingStore {
@@ -1363,6 +1369,9 @@ mod tests {
             &'a self,
             key: &'a RelPath,
         ) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
+            if self.fail_get_meta.load(Ordering::SeqCst) {
+                return Box::pin(async { Err(Error::Runtime("get_meta failed".into())) });
+            }
             self.inner.get_meta(key)
         }
 
@@ -1382,6 +1391,7 @@ mod tests {
         let hiding = Arc::new(HidingStore {
             inner: store,
             hidden: Mutex::new(None),
+            fail_get_meta: AtomicBool::new(false),
         });
         let store: Arc<dyn ArtifactStore> = hiding.clone();
         let log = Log::default();
@@ -1393,5 +1403,27 @@ mod tests {
         assert!(!s.nodes["a"].cached);
         // Same bytes, same id: the descendants still hit.
         assert_eq!(cached_nodes(&s), ["b", "c", "x"]);
+    }
+
+    async fn scenario_lookup_error(store: Arc<dyn ArtifactStore>) {
+        let hiding = Arc::new(HidingStore {
+            inner: store,
+            hidden: Mutex::new(None),
+            fail_get_meta: AtomicBool::new(false),
+        });
+        let store: Arc<dyn ArtifactStore> = hiding.clone();
+        let log = Log::default();
+        let setup = Setup::default();
+        cache_run_plain(&store, &log, &setup).await;
+        hiding.fail_get_meta.store(true, Ordering::SeqCst);
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert!(s.is_success());
+        assert_eq!(executed, ["a", "b", "c", "x"]);
+        assert!(cached_nodes(&s).is_empty());
+        // The entries were rewritten: once reads work again everything hits.
+        hiding.fail_get_meta.store(false, Ordering::SeqCst);
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert!(executed.is_empty());
+        assert_eq!(cached_nodes(&s), ["a", "b", "c", "x"]);
     }
 }

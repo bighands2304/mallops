@@ -4,6 +4,7 @@
 //! commits block output drafts to the store, propagates failure, skip and cancellation,
 //! and reports per-node results in a [`RunSummary`].
 
+mod cache;
 mod commit;
 
 use std::collections::{BTreeMap, HashMap};
@@ -34,6 +35,8 @@ pub struct RuntimeConfig {
     pub workdir_root: PathBuf,
     /// External cancellation; blocks observe it through `ctx.cancel()`.
     pub cancel: CancelToken,
+    /// Run-level cache bypass (`--no-cache`): every node executes; no cache entry is read or written.
+    pub no_cache: bool,
 }
 
 impl RuntimeConfig {
@@ -48,6 +51,7 @@ impl RuntimeConfig {
             workdir_root: std::env::temp_dir(),
             // A dropped source never fires (see `CancelToken::cancelled`).
             cancel: CancelSource::new().token(),
+            no_cache: false,
         }
     }
 }
@@ -60,6 +64,7 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("secret_provider", &"<SecretProvider>")
             .field("workdir_root", &self.workdir_root)
             .field("cancel", &self.cancel)
+            .field("no_cache", &self.no_cache)
             .finish()
     }
 }
@@ -92,6 +97,8 @@ pub struct NodeSummary {
     pub reason: Option<String>,
     /// The error of a [`Status::Failed`] node (or `Error::Cancelled` from a cancelled block).
     pub error: Option<Error>,
+    /// `true` when the outputs were served from the cache and the block did not run.
+    pub cached: bool,
 }
 
 /// Result of a pipeline run.
@@ -160,6 +167,7 @@ impl Runtime {
             secrets: Arc::clone(&self.config.secret_provider),
             cancel: self.config.cancel.clone(),
             jobs: Arc::new(Semaphore::new(self.config.max_jobs.max(1))),
+            no_cache: self.config.no_cache,
         };
 
         let nodes = pipeline.nodes();
@@ -241,6 +249,7 @@ struct NodeEnv {
     secrets: Arc<dyn SecretProvider>,
     cancel: CancelToken,
     jobs: Arc<Semaphore>,
+    no_cache: bool,
 }
 
 /// `<node>` of a validated `<node>.<port>` reference.
@@ -260,6 +269,7 @@ fn finished(
         outputs,
         reason,
         error: None,
+        cached: false,
     }
 }
 
@@ -359,8 +369,14 @@ async fn run_node(
     let result = execute(&node, inputs, workdir, &env).instrument(span).await;
     let duration = start.elapsed();
     match result {
-        Ok((outputs, None)) => finished(Status::Succeeded, duration, outputs, None),
-        Ok((outputs, Some(reason))) => finished(Status::Skipped, duration, outputs, Some(reason)),
+        Ok((outputs, None, cached)) => {
+            let mut summary = finished(Status::Succeeded, duration, outputs, None);
+            summary.cached = cached;
+            summary
+        }
+        Ok((outputs, Some(reason), _)) => {
+            finished(Status::Skipped, duration, outputs, Some(reason))
+        }
         Err(Error::Cancelled) => {
             let reason = if env.cancel.is_cancelled() {
                 "run cancelled"
@@ -379,8 +395,8 @@ async fn run_node(
     }
 }
 
-/// Committed outputs and, for a skipped block, its reason.
-type Executed = (BTreeMap<String, ArtifactId>, Option<String>);
+/// Committed outputs, the reason for a skipped block, and whether they came from the cache.
+type Executed = (BTreeMap<String, ArtifactId>, Option<String>, bool);
 
 async fn execute(
     node: &ValidatedNode,
@@ -388,17 +404,6 @@ async fn execute(
     workdir: PathBuf,
     env: &NodeEnv,
 ) -> Result<Executed, Error> {
-    let mut block_inputs = Inputs::new();
-    let mut parents = Vec::with_capacity(inputs.len());
-    for (port, id) in inputs {
-        let artifact = env
-            .store
-            .get(&id)
-            .await?
-            .ok_or_else(|| Error::Runtime(format!("input artifact {id} not found in store")))?;
-        parents.push(id);
-        block_inputs = block_inputs.with(port, artifact);
-    }
     // ponytail: sync mkdir on the async thread, one cheap syscall per node.
     std::fs::create_dir(&workdir).map_err(|e| {
         Error::Runtime(format!(
@@ -414,6 +419,32 @@ async fn execute(
         env.cancel.clone(),
         Arc::clone(&env.secrets),
     );
+    // `cache_policy` is only asked when the cache may be used.
+    let key = if node.config.cache == Some(false) || env.no_cache {
+        None
+    } else {
+        let policy = node.block.cache_policy(&ctx).await?;
+        cache::cache_key(node, &inputs, &policy)
+    };
+    if let Some(key) = &key {
+        // A store error while reading is a miss (symmetric with `record`); the entry is rewritten.
+        match cache::lookup(&*env.store, key).await {
+            Ok(Some(outputs)) => return Ok((outputs, None, true)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "cannot read cache entry, running the block"),
+        }
+    }
+    let mut block_inputs = Inputs::new();
+    let mut parents = Vec::with_capacity(inputs.len());
+    for (port, id) in inputs {
+        let artifact = env
+            .store
+            .get(&id)
+            .await?
+            .ok_or_else(|| Error::Runtime(format!("input artifact {id} not found in store")))?;
+        parents.push(id);
+        block_inputs = block_inputs.with(port, artifact);
+    }
     let (drafts, produced, reason) = match node.block.run(&ctx, block_inputs).await? {
         BlockOutcome::Produced(drafts) => (drafts, true, None),
         BlockOutcome::Skipped { reason, outputs } => (outputs, false, Some(reason)),
@@ -427,12 +458,17 @@ async fn execute(
         produced,
     )
     .await?;
-    Ok((outputs, reason))
+    if let (Some(key), None) = (&key, &reason) {
+        if let Err(e) = cache::record(&*env.store, key, &outputs).await {
+            tracing::warn!(error = %e, "cannot record cache entry");
+        }
+    }
+    Ok((outputs, reason, false))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tokio::sync::{Barrier, Notify};
 
@@ -833,7 +869,8 @@ mod tests {
         let probe = Arc::new(Probe::default());
         let mut b = PipelineBuilder::new("t");
         node(&mut b, "a", "src", "ok", &[]);
-        node(&mut b, "b", "src", "ok", &[]);
+        // Different `with` from `a`: an identical node would be a cache hit.
+        node(&mut b, "b", "src", "ok-too", &[]);
         node(&mut b, "c", "one", "ok", &[("a", "a.out")]);
         let p = b.build(&registry(&probe)).unwrap();
         let s = run(&runtime(Arc::new(MemoryStore::new()), 0), &p).await;
@@ -975,5 +1012,418 @@ mod tests {
         let median = per_block[RUNS / 2];
         eprintln!("NFR-1 median overhead per block: {median:?} ({N} blocks, {RUNS} runs)");
         assert!(median < Duration::from_millis(5), "median {median:?}");
+    }
+
+    // ---- cache (#8): scenarios run on `MemoryStore` and `LocalStore` ----
+
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    use crate::{CachePolicy, Digest, MemorySecretProvider, PayloadSource, RelPath};
+
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    /// Deterministic block: its output bytes depend on version, policy, `with:` and inputs,
+    /// so a change anywhere upstream changes every downstream input id. Logs `with.name`
+    /// when it runs; `with.fail == true` makes it fail.
+    struct CacheBlock {
+        spec: BlockSpec,
+        policy: CachePolicy,
+        log: Log,
+    }
+
+    impl Block for CacheBlock {
+        fn spec(&self) -> &BlockSpec {
+            &self.spec
+        }
+
+        fn cache_policy<'a>(
+            &'a self,
+            _ctx: &'a Context,
+        ) -> BoxFuture<'a, Result<CachePolicy, Error>> {
+            Box::pin(async { Ok(self.policy.clone()) })
+        }
+
+        fn run<'a>(
+            &'a self,
+            ctx: &'a Context,
+            inputs: Inputs,
+        ) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
+            Box::pin(async move {
+                let name = ctx.config()["name"].as_str().unwrap_or("?").to_string();
+                self.log.lock().unwrap().push(name);
+                if ctx.config()["fail"] == true {
+                    return Err(Error::Runtime("boom".into()));
+                }
+                let mut text = format!("{:?}|{}|{}", self.policy, self.spec.version, ctx.config());
+                for (port, a) in inputs.iter() {
+                    text.push_str(&format!("|{port}={}", a.id()));
+                }
+                Ok(BlockOutcome::Produced(
+                    OutputDrafts::new().with("out", blob(text.into_bytes())),
+                ))
+            })
+        }
+    }
+
+    /// What a scenario may vary on the pipeline `a -> b -> c` plus the independent `x`.
+    #[derive(Clone)]
+    struct Setup {
+        b_version: &'static str,
+        b_policy: CachePolicy,
+        b_with: serde_json::Value,
+        b_cache: Option<bool>,
+    }
+
+    impl Default for Setup {
+        fn default() -> Self {
+            Self {
+                b_version: "1",
+                b_policy: CachePolicy::default(),
+                b_with: serde_json::json!({ "name": "b" }),
+                b_cache: None,
+            }
+        }
+    }
+
+    fn cache_pipeline(log: &Log, setup: &Setup) -> ValidatedPipeline {
+        let blob_port = |n: &'static str| Port::new(n, ArtifactKind::Blob);
+        let mut reg = BlockRegistry::new();
+        let blocks = [
+            ("c/src", "1", CachePolicy::default(), false),
+            ("c/mid", setup.b_version, setup.b_policy.clone(), true),
+            ("c/one", "1", CachePolicy::default(), true),
+        ];
+        for (id, version, policy, has_input) in blocks {
+            let mut spec = BlockSpec::new(id, version, Stage::Custom).with_output(blob_port("out"));
+            if has_input {
+                spec = spec.with_input(blob_port("a"));
+            }
+            let block = CacheBlock {
+                spec,
+                policy,
+                log: Arc::clone(log),
+            };
+            reg.register(Arc::new(block)).unwrap();
+        }
+        let mut b = PipelineBuilder::new("t");
+        let named = |n: &str| serde_json::json!({ "name": n });
+        b.block("a", "c/src".parse().unwrap()).with(named("a"));
+        b.block("x", "c/src".parse().unwrap()).with(named("x"));
+        {
+            let mut n = b.block("b", "c/mid".parse().unwrap());
+            n.with(setup.b_with.clone()).input("a", "a.out");
+            if let Some(enabled) = setup.b_cache {
+                n.cache(enabled);
+            }
+        }
+        b.block("c", "c/one".parse().unwrap())
+            .with(named("c"))
+            .input("a", "b.out");
+        b.build(&reg).unwrap()
+    }
+
+    /// Runs the pipeline for `setup`; returns the summary and the sorted names of executed blocks.
+    async fn cache_run(
+        store: &Arc<dyn ArtifactStore>,
+        log: &Log,
+        setup: &Setup,
+        no_cache: bool,
+        secrets: MemorySecretProvider,
+    ) -> (RunSummary, Vec<String>) {
+        let mut cfg = RuntimeConfig::new(Arc::clone(store));
+        cfg.max_jobs = 2;
+        cfg.no_cache = no_cache;
+        cfg.secret_provider = Arc::new(secrets);
+        let s = run(&Runtime::new(cfg), &cache_pipeline(log, setup)).await;
+        let mut executed = std::mem::take(&mut *log.lock().unwrap());
+        executed.sort();
+        (s, executed)
+    }
+
+    async fn cache_run_plain(
+        store: &Arc<dyn ArtifactStore>,
+        log: &Log,
+        setup: &Setup,
+    ) -> (RunSummary, Vec<String>) {
+        cache_run(store, log, setup, false, MemorySecretProvider::default()).await
+    }
+
+    fn cached_nodes(s: &RunSummary) -> Vec<&str> {
+        s.nodes
+            .iter()
+            .filter(|(_, n)| n.cached)
+            .map(|(id, _)| id.as_str())
+            .collect()
+    }
+
+    /// Runs `$scenario` once per store kind.
+    macro_rules! cache_tests {
+        ($($name:ident => $scenario:ident),* $(,)?) => {$(
+            mod $name {
+                use super::*;
+
+                #[tokio::test]
+                async fn memory() {
+                    $scenario(Arc::new(MemoryStore::new())).await;
+                }
+
+                #[tokio::test]
+                async fn local() {
+                    let dir = tempfile::tempdir().unwrap();
+                    $scenario(Arc::new(LocalStore::new(dir.path()).unwrap())).await;
+                }
+            }
+        )*};
+    }
+
+    cache_tests! {
+        cache_rerun_unchanged_is_fully_cached => scenario_rerun,
+        cache_changed_with_reruns_node_and_descendants => scenario_with,
+        cache_changed_version_reruns_node_and_descendants => scenario_version,
+        cache_changed_extra_hash_reruns_node_and_descendants => scenario_extra_hash,
+        cache_rotated_secret_value_keeps_hit => scenario_secret,
+        cache_uncacheable_always_executes => scenario_uncacheable,
+        cache_node_flag_false_always_executes => scenario_node_flag,
+        cache_no_cache_runtime_flag_executes_everything => scenario_no_cache,
+        cache_resume_after_failure_reruns_failed_and_descendants => scenario_resume,
+        cache_missing_output_artifact_is_a_miss => scenario_missing_output,
+        cache_store_error_on_lookup_is_a_miss => scenario_lookup_error,
+    }
+
+    async fn scenario_rerun(store: Arc<dyn ArtifactStore>) {
+        let log = Log::default();
+        let setup = Setup::default();
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert_eq!(executed, ["a", "b", "c", "x"]);
+        assert!(cached_nodes(&s).is_empty());
+        let (s2, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert!(executed.is_empty(), "{executed:?}");
+        for (id, n) in &s2.nodes {
+            assert_eq!(n.status, Status::Succeeded, "{id}");
+            assert!(n.cached, "{id}");
+            assert_eq!(n.outputs, s.nodes[id].outputs, "{id}");
+        }
+    }
+
+    /// Baseline run, then `changed` must re-execute exactly `["b", "c"]`.
+    async fn rerun_b_and_c(store: Arc<dyn ArtifactStore>, changed: Setup) {
+        let log = Log::default();
+        cache_run_plain(&store, &log, &Setup::default()).await;
+        let (s, executed) = cache_run_plain(&store, &log, &changed).await;
+        assert_eq!(executed, ["b", "c"]);
+        assert_eq!(cached_nodes(&s), ["a", "x"]);
+    }
+
+    async fn scenario_with(store: Arc<dyn ArtifactStore>) {
+        let changed = Setup {
+            b_with: serde_json::json!({ "name": "b", "k": 2 }),
+            ..Setup::default()
+        };
+        rerun_b_and_c(store, changed).await;
+    }
+
+    async fn scenario_version(store: Arc<dyn ArtifactStore>) {
+        let changed = Setup {
+            b_version: "2",
+            ..Setup::default()
+        };
+        rerun_b_and_c(store, changed).await;
+    }
+
+    async fn scenario_extra_hash(store: Arc<dyn ArtifactStore>) {
+        let changed = Setup {
+            b_policy: CachePolicy::Deterministic {
+                extra_hash: Some(Digest::hash(b"script v2")),
+            },
+            ..Setup::default()
+        };
+        rerun_b_and_c(store, changed).await;
+    }
+
+    async fn scenario_secret(store: Arc<dyn ArtifactStore>) {
+        let log = Log::default();
+        let setup = Setup {
+            b_with: serde_json::json!({ "name": "b", "token": "${secret:TOKEN}" }),
+            ..Setup::default()
+        };
+        let secrets = |v: &str| MemorySecretProvider::default().with_secret("TOKEN", v);
+        let (s, executed) = cache_run(&store, &log, &setup, false, secrets("one")).await;
+        assert!(s.is_success());
+        assert_eq!(executed.len(), 4);
+        let (s, executed) = cache_run(&store, &log, &setup, false, secrets("two")).await;
+        assert!(executed.is_empty(), "{executed:?}");
+        assert_eq!(cached_nodes(&s), ["a", "b", "c", "x"]);
+    }
+
+    /// With `bypass` on `b`, a rerun executes `b` (never served from cache); `c` gets the same
+    /// input id back and stays a hit.
+    async fn bypassed_b(store: Arc<dyn ArtifactStore>, setup: Setup) {
+        let log = Log::default();
+        cache_run_plain(&store, &log, &setup).await;
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert_eq!(executed, ["b"]);
+        assert!(!s.nodes["b"].cached);
+        assert_eq!(s.nodes["b"].status, Status::Succeeded);
+        assert_eq!(cached_nodes(&s), ["a", "c", "x"]);
+    }
+
+    async fn scenario_uncacheable(store: Arc<dyn ArtifactStore>) {
+        let setup = Setup {
+            b_policy: CachePolicy::Uncacheable,
+            ..Setup::default()
+        };
+        bypassed_b(store, setup).await;
+    }
+
+    async fn scenario_node_flag(store: Arc<dyn ArtifactStore>) {
+        let setup = Setup {
+            b_cache: Some(false),
+            ..Setup::default()
+        };
+        bypassed_b(store, setup).await;
+    }
+
+    async fn scenario_no_cache(store: Arc<dyn ArtifactStore>) {
+        let log = Log::default();
+        let setup = Setup::default();
+        cache_run_plain(&store, &log, &setup).await;
+        let secrets = MemorySecretProvider::default();
+        let (s, executed) = cache_run(&store, &log, &setup, true, secrets).await;
+        assert_eq!(executed, ["a", "b", "c", "x"]);
+        assert!(cached_nodes(&s).is_empty());
+        // The bypassing run still leaves the cache usable.
+        let (_, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert!(executed.is_empty());
+    }
+
+    async fn scenario_resume(store: Arc<dyn ArtifactStore>) {
+        let log = Log::default();
+        let broken = Setup {
+            b_with: serde_json::json!({ "name": "b", "fail": true }),
+            ..Setup::default()
+        };
+        let (s, executed) = cache_run_plain(&store, &log, &broken).await;
+        assert_eq!(executed, ["a", "b", "x"]);
+        assert_eq!(status(&s, "b"), Status::Failed);
+        assert_eq!(status(&s, "c"), Status::Cancelled);
+        let (s, executed) = cache_run_plain(&store, &log, &Setup::default()).await;
+        assert_eq!(executed, ["b", "c"]);
+        assert!(s.is_success());
+        assert_eq!(cached_nodes(&s), ["a", "x"]);
+    }
+
+    /// Delegates to `inner` but reports `hidden` as not existing.
+    struct HidingStore {
+        inner: Arc<dyn ArtifactStore>,
+        hidden: Mutex<Option<ArtifactId>>,
+        fail_get_meta: AtomicBool,
+    }
+
+    impl ArtifactStore for HidingStore {
+        fn put<'a>(
+            &'a self,
+            manifest: Manifest,
+            payload: PayloadSource<'a>,
+        ) -> BoxFuture<'a, Result<ArtifactId, Error>> {
+            self.inner.put(manifest, payload)
+        }
+
+        fn get<'a>(
+            &'a self,
+            id: &'a ArtifactId,
+        ) -> BoxFuture<'a, Result<Option<crate::Artifact>, Error>> {
+            self.inner.get(id)
+        }
+
+        fn fetch<'a>(
+            &'a self,
+            id: &'a ArtifactId,
+            dest: &'a Path,
+        ) -> BoxFuture<'a, Result<PathBuf, Error>> {
+            self.inner.fetch(id, dest)
+        }
+
+        fn verify<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<(), Error>> {
+            self.inner.verify(id)
+        }
+
+        fn exists<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<bool, Error>> {
+            Box::pin(async move {
+                if *self.hidden.lock().unwrap() == Some(*id) {
+                    return Ok(false);
+                }
+                self.inner.exists(id).await
+            })
+        }
+
+        fn put_meta<'a>(
+            &'a self,
+            key: &'a RelPath,
+            data: &'a [u8],
+        ) -> BoxFuture<'a, Result<(), Error>> {
+            self.inner.put_meta(key, data)
+        }
+
+        fn get_meta<'a>(
+            &'a self,
+            key: &'a RelPath,
+        ) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
+            if self.fail_get_meta.load(Ordering::SeqCst) {
+                return Box::pin(async { Err(Error::Runtime("get_meta failed".into())) });
+            }
+            self.inner.get_meta(key)
+        }
+
+        fn list_meta<'a>(
+            &'a self,
+            prefix: &'a RelPath,
+        ) -> BoxFuture<'a, Result<Vec<RelPath>, Error>> {
+            self.inner.list_meta(prefix)
+        }
+
+        fn delete_meta<'a>(&'a self, key: &'a RelPath) -> BoxFuture<'a, Result<(), Error>> {
+            self.inner.delete_meta(key)
+        }
+    }
+
+    async fn scenario_missing_output(store: Arc<dyn ArtifactStore>) {
+        let hiding = Arc::new(HidingStore {
+            inner: store,
+            hidden: Mutex::new(None),
+            fail_get_meta: AtomicBool::new(false),
+        });
+        let store: Arc<dyn ArtifactStore> = hiding.clone();
+        let log = Log::default();
+        let setup = Setup::default();
+        let (s, _) = cache_run_plain(&store, &log, &setup).await;
+        *hiding.hidden.lock().unwrap() = Some(s.nodes["a"].outputs["out"]);
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert_eq!(executed, ["a"]);
+        assert!(!s.nodes["a"].cached);
+        // Same bytes, same id: the descendants still hit.
+        assert_eq!(cached_nodes(&s), ["b", "c", "x"]);
+    }
+
+    async fn scenario_lookup_error(store: Arc<dyn ArtifactStore>) {
+        let hiding = Arc::new(HidingStore {
+            inner: store,
+            hidden: Mutex::new(None),
+            fail_get_meta: AtomicBool::new(false),
+        });
+        let store: Arc<dyn ArtifactStore> = hiding.clone();
+        let log = Log::default();
+        let setup = Setup::default();
+        cache_run_plain(&store, &log, &setup).await;
+        hiding.fail_get_meta.store(true, Ordering::SeqCst);
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert!(s.is_success());
+        assert_eq!(executed, ["a", "b", "c", "x"]);
+        assert!(cached_nodes(&s).is_empty());
+        // The entries were rewritten: once reads work again everything hits.
+        hiding.fail_get_meta.store(false, Ordering::SeqCst);
+        let (s, executed) = cache_run_plain(&store, &log, &setup).await;
+        assert!(executed.is_empty());
+        assert_eq!(cached_nodes(&s), ["a", "b", "c", "x"]);
     }
 }

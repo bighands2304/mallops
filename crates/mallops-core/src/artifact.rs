@@ -88,6 +88,16 @@ fn write_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// Compact canonical JSON of `value` (object keys sorted at every level).
+///
+/// Numbers follow serde_json's `Display` (`1` and `1.0` differ; enabling `arbitrary_precision`
+/// would change the text, which only causes spurious cache misses, never wrong hits).
+pub(crate) fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
+    let mut out = String::new();
+    write_canonical_value(&mut out, value);
+    out.into_bytes()
+}
+
 fn write_canonical_value(out: &mut String, value: &serde_json::Value) {
     match value {
         serde_json::Value::Null => out.push_str("null"),

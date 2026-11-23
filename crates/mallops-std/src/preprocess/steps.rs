@@ -4,13 +4,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use arrow_array::cast::AsArray;
+use arrow_array::types::{Float64Type, Int64Type};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Datum, Float64Array, Int64Array, RecordBatch,
     RecordBatchOptions, StringArray,
 };
 use arrow_cast::cast;
 use arrow_ord::cmp;
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use arrow_select::filter::filter_record_batch;
 use mallops_core::Error;
 
@@ -19,6 +21,8 @@ use super::{
     EncodeMethod, EncodeStep, FilterOp, FilterStep, ImputeStep, ImputeStrategy, ScaleMethod,
     ScaleStep, SelectStep, Step,
 };
+
+type CmpFn = fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError>;
 
 /// Keeps the rows of `batch` matching `step` (nulls never match a comparison).
 pub(crate) fn filter(step: &FilterStep, batch: &RecordBatch) -> Result<RecordBatch, Error> {
@@ -29,29 +33,14 @@ pub(crate) fn filter(step: &FilterStep, batch: &RecordBatch) -> Result<RecordBat
     let col = batch.column(idx);
 
     let predicate = match step.op {
-        FilterOp::IsNull => {
-            if step.value.is_some() {
-                return Err(Error::Config(
-                    "filter.value is not allowed with is_null/not_null".into(),
-                ));
-            }
-            BooleanArray::from_iter((0..col.len()).map(|i| Some(col.is_null(i))))
-        }
-        FilterOp::NotNull => {
-            if step.value.is_some() {
-                return Err(Error::Config(
-                    "filter.value is not allowed with is_null/not_null".into(),
-                ));
-            }
-            BooleanArray::from_iter((0..col.len()).map(|i| Some(col.is_valid(i))))
-        }
-        op => {
-            let value = step
-                .value
-                .as_ref()
-                .ok_or_else(|| Error::Config("filter.value is required".into()))?;
-            compare_column(&step.column, col, op, value)?
-        }
+        FilterOp::IsNull => BooleanArray::from_iter((0..col.len()).map(|i| Some(col.is_null(i)))),
+        FilterOp::NotNull => BooleanArray::from_iter((0..col.len()).map(|i| Some(col.is_valid(i)))),
+        FilterOp::Eq => compare_column(&step.column, col, cmp::eq, step.value.as_ref())?,
+        FilterOp::Ne => compare_column(&step.column, col, cmp::neq, step.value.as_ref())?,
+        FilterOp::Lt => compare_column(&step.column, col, cmp::lt, step.value.as_ref())?,
+        FilterOp::Le => compare_column(&step.column, col, cmp::lt_eq, step.value.as_ref())?,
+        FilterOp::Gt => compare_column(&step.column, col, cmp::gt, step.value.as_ref())?,
+        FilterOp::Ge => compare_column(&step.column, col, cmp::gt_eq, step.value.as_ref())?,
     };
 
     filter_record_batch(batch, &predicate).map_err(|e| Error::Runtime(format!("filter: {e}")))
@@ -60,17 +49,19 @@ pub(crate) fn filter(step: &FilterStep, batch: &RecordBatch) -> Result<RecordBat
 fn compare_column(
     name: &str,
     col: &ArrayRef,
-    op: FilterOp,
-    value: &serde_json::Value,
+    cmp_fn: CmpFn,
+    value: Option<&serde_json::Value>,
 ) -> Result<BooleanArray, Error> {
+    let value = value.ok_or_else(|| Error::Config("filter.value is required".into()))?;
+    let map_err = |e: ArrowError| Error::Runtime(format!("filter: {e}"));
     match col.data_type() {
         DataType::Int64 => {
             if let Some(i) = value.as_i64() {
-                apply_cmp(op, col, &Int64Array::new_scalar(i))
+                cmp_fn(col, &Int64Array::new_scalar(i)).map_err(map_err)
             } else if let Some(f) = value.as_f64() {
                 let fcol = cast(col.as_ref(), &DataType::Float64)
                     .map_err(|e| Error::Runtime(format!("filter: column '{name}': {e}")))?;
-                apply_cmp(op, &fcol, &Float64Array::new_scalar(f))
+                cmp_fn(&fcol, &Float64Array::new_scalar(f)).map_err(map_err)
             } else {
                 Err(Error::Runtime(format!(
                     "filter: column '{name}' is int64, incompatible value {value}"
@@ -83,7 +74,7 @@ fn compare_column(
                     "filter: column '{name}' is float64, incompatible value {value}"
                 ))
             })?;
-            apply_cmp(op, col, &Float64Array::new_scalar(f))
+            cmp_fn(col, &Float64Array::new_scalar(f)).map_err(map_err)
         }
         DataType::Utf8 => {
             let s = value.as_str().ok_or_else(|| {
@@ -91,7 +82,7 @@ fn compare_column(
                     "filter: column '{name}' is string, incompatible value {value}"
                 ))
             })?;
-            apply_cmp(op, col, &StringArray::new_scalar(s))
+            cmp_fn(col, &StringArray::new_scalar(s)).map_err(map_err)
         }
         DataType::Boolean => {
             let b = value.as_bool().ok_or_else(|| {
@@ -99,25 +90,12 @@ fn compare_column(
                     "filter: column '{name}' is bool, incompatible value {value}"
                 ))
             })?;
-            apply_cmp(op, col, &BooleanArray::new_scalar(b))
+            cmp_fn(col, &BooleanArray::new_scalar(b)).map_err(map_err)
         }
         dt => Err(Error::Runtime(format!(
             "filter: column '{name}' has unsupported type {dt:?}"
         ))),
     }
-}
-
-fn apply_cmp(op: FilterOp, lhs: &dyn Datum, rhs: &dyn Datum) -> Result<BooleanArray, Error> {
-    let res = match op {
-        FilterOp::Eq => cmp::eq(lhs, rhs),
-        FilterOp::Ne => cmp::neq(lhs, rhs),
-        FilterOp::Lt => cmp::lt(lhs, rhs),
-        FilterOp::Le => cmp::lt_eq(lhs, rhs),
-        FilterOp::Gt => cmp::gt(lhs, rhs),
-        FilterOp::Ge => cmp::gt_eq(lhs, rhs),
-        FilterOp::IsNull | FilterOp::NotNull => unreachable!("handled by caller"),
-    };
-    res.map_err(|e| Error::Runtime(format!("filter: {e}")))
 }
 
 /// Fits `step` (`select`, `impute`, `scale` or `encode`) on `train`; `target` is never
@@ -139,22 +117,15 @@ pub(crate) fn fit(step: &Step, target: &str, train: &RecordBatch) -> Result<Fitt
 }
 
 fn fit_select(step: &SelectStep, target: &str, train: &RecordBatch) -> Result<FittedStep, Error> {
-    if step.columns.is_empty() {
-        return Err(Error::Config("select.columns must not be empty".into()));
-    }
     let schema = train.schema();
-    let mut seen = HashSet::with_capacity(step.columns.len());
     let mut columns = Vec::with_capacity(step.columns.len() + 1);
     for name in &step.columns {
         if schema.index_of(name).is_err() {
             return Err(Error::Runtime(format!("select: unknown column '{name}'")));
         }
-        if !seen.insert(name.as_str()) {
-            return Err(Error::Runtime(format!("select: duplicate column '{name}'")));
-        }
         columns.push(name.clone());
     }
-    if !seen.contains(target) && schema.index_of(target).is_ok() {
+    if !columns.iter().any(|c| c == target) && schema.index_of(target).is_ok() {
         columns.push(target.to_owned());
     }
     Ok(FittedStep::Select { columns })
@@ -162,6 +133,10 @@ fn fit_select(step: &SelectStep, target: &str, train: &RecordBatch) -> Result<Fi
 
 fn is_numeric(dt: &DataType) -> bool {
     matches!(dt, DataType::Int64 | DataType::Float64)
+}
+
+fn is_utf8(dt: &DataType) -> bool {
+    matches!(dt, DataType::Utf8)
 }
 
 fn resolve_columns(
@@ -198,44 +173,32 @@ fn resolve_columns(
     }
 }
 
-fn numeric_values(step_name: &str, name: &str, array: &ArrayRef) -> Result<Vec<f64>, Error> {
-    let mut vals = Vec::with_capacity(array.len());
+fn to_float64(step_name: &str, name: &str, array: &ArrayRef) -> Result<ArrayRef, Error> {
     match array.data_type() {
-        DataType::Int64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| Error::Runtime(format!("{step_name}: column '{name}' not int64")))?;
-            for i in 0..arr.len() {
-                if arr.is_valid(i) {
-                    vals.push(arr.value(i) as f64);
-                }
-            }
-        }
-        DataType::Float64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| {
-                    Error::Runtime(format!("{step_name}: column '{name}' not float64"))
-                })?;
-            for i in 0..arr.len() {
-                if arr.is_valid(i) {
-                    let v = arr.value(i);
-                    if !v.is_finite() {
-                        return Err(Error::Runtime(format!(
-                            "{step_name}: column '{name}' contains non-finite value"
-                        )));
-                    }
-                    vals.push(v);
-                }
-            }
-        }
-        dt => {
-            return Err(Error::Runtime(format!(
-                "{step_name}: column '{name}' has unsupported type {dt:?}"
-            )));
-        }
+        DataType::Float64 => Ok(Arc::clone(array)),
+        DataType::Int64 => cast(array.as_ref(), &DataType::Float64)
+            .map_err(|e| Error::Runtime(format!("{step_name}: column '{name}': {e}"))),
+        dt => Err(Error::Runtime(format!(
+            "{step_name}: column '{name}' has unsupported type {dt:?}"
+        ))),
+    }
+}
+
+fn check_finite(step_name: &str, name: &str, v: f64) -> Result<f64, Error> {
+    if !v.is_finite() {
+        return Err(Error::Runtime(format!(
+            "{step_name}: column '{name}' contains non-finite value"
+        )));
+    }
+    Ok(v)
+}
+
+fn numeric_values(step_name: &str, name: &str, array: &ArrayRef) -> Result<Vec<f64>, Error> {
+    let fcol = to_float64(step_name, name, array)?;
+    let arr = fcol.as_primitive::<Float64Type>();
+    let mut vals = Vec::with_capacity(arr.len() - arr.null_count());
+    for v in arr.iter().flatten() {
+        vals.push(check_finite(step_name, name, v)?);
     }
     Ok(vals)
 }
@@ -254,33 +217,12 @@ fn json_number(step_name: &str, name: &str, v: f64) -> Result<serde_json::Value,
 }
 
 fn fit_impute(step: &ImputeStep, target: &str, train: &RecordBatch) -> Result<FittedStep, Error> {
-    let cols = resolve_columns("impute", step.columns.as_deref(), target, train, is_numeric)?;
     let mut values = BTreeMap::new();
 
     match step.strategy {
-        ImputeStrategy::Mean => {
-            if step.value.is_some() {
-                return Err(Error::Config(
-                    "impute.value is only allowed with strategy constant".into(),
-                ));
-            }
-            for (name, idx) in cols {
-                let vals = numeric_values("impute", &name, train.column(idx))?;
-                if vals.is_empty() {
-                    return Err(Error::Runtime(format!(
-                        "impute: column '{name}' has no non-null values"
-                    )));
-                }
-                let mean = vals.iter().sum::<f64>() / (vals.len() as f64);
-                values.insert(name.clone(), json_number("impute", &name, mean)?);
-            }
-        }
-        ImputeStrategy::Median => {
-            if step.value.is_some() {
-                return Err(Error::Config(
-                    "impute.value is only allowed with strategy constant".into(),
-                ));
-            }
+        ImputeStrategy::Mean | ImputeStrategy::Median => {
+            let cols =
+                resolve_columns("impute", step.columns.as_deref(), target, train, is_numeric)?;
             for (name, idx) in cols {
                 let mut vals = numeric_values("impute", &name, train.column(idx))?;
                 if vals.is_empty() {
@@ -288,36 +230,46 @@ fn fit_impute(step: &ImputeStep, target: &str, train: &RecordBatch) -> Result<Fi
                         "impute: column '{name}' has no non-null values"
                     )));
                 }
-                vals.sort_by(f64::total_cmp);
-                let mid = vals.len() / 2;
-                let median = if vals.len() % 2 == 1 {
-                    vals[mid]
+                let stat = if matches!(step.strategy, ImputeStrategy::Mean) {
+                    vals.iter().sum::<f64>() / (vals.len() as f64)
                 } else {
-                    vals[mid - 1] + (vals[mid] - vals[mid - 1]) / 2.0
+                    vals.sort_by(f64::total_cmp);
+                    let mid = vals.len() / 2;
+                    if vals.len() % 2 == 1 {
+                        vals[mid]
+                    } else {
+                        vals[mid - 1] + (vals[mid] - vals[mid - 1]) / 2.0
+                    }
                 };
-                values.insert(name.clone(), json_number("impute", &name, median)?);
+                values.insert(name.clone(), json_number("impute", &name, stat)?);
             }
         }
         ImputeStrategy::Constant => {
             let val = step.value.as_ref().ok_or_else(|| {
                 Error::Config("impute.value is required with strategy constant".into())
             })?;
+            let default_pred = if val.is_string() { is_utf8 } else { is_numeric };
+            let cols = resolve_columns(
+                "impute",
+                step.columns.as_deref(),
+                target,
+                train,
+                default_pred,
+            )?;
             for (name, idx) in cols {
                 let dt = train.column(idx).data_type();
                 match dt {
+                    DataType::Int64 | DataType::Float64 if val.is_number() => {}
+                    DataType::Utf8 if val.is_string() => {}
                     DataType::Int64 | DataType::Float64 => {
-                        if !val.is_number() {
-                            return Err(Error::Runtime(format!(
-                                "impute: column '{name}' is numeric, incompatible constant {val}"
-                            )));
-                        }
+                        return Err(Error::Runtime(format!(
+                            "impute: column '{name}' is numeric, incompatible constant {val}"
+                        )));
                     }
                     DataType::Utf8 => {
-                        if !val.is_string() {
-                            return Err(Error::Runtime(format!(
-                                "impute: column '{name}' is string, incompatible constant {val}"
-                            )));
-                        }
+                        return Err(Error::Runtime(format!(
+                            "impute: column '{name}' is string, incompatible constant {val}"
+                        )));
                     }
                     _ => {
                         return Err(Error::Runtime(format!(
@@ -349,23 +301,16 @@ fn fit_scale(step: &ScaleStep, target: &str, train: &RecordBatch) -> Result<Fitt
                 let n = vals.len() as f64;
                 let mean = vals.iter().sum::<f64>() / n;
                 let var = vals.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / n;
-                let std = var.sqrt();
                 Affine {
                     offset: normalize_zero(mean),
-                    scale: normalize_zero(std),
+                    scale: normalize_zero(var.sqrt()),
                 }
             }
             ScaleMethod::Minmax => {
-                let mut min = vals[0];
-                let mut max = vals[0];
-                for &v in &vals[1..] {
-                    if v < min {
-                        min = v;
-                    }
-                    if v > max {
-                        max = v;
-                    }
-                }
+                let (min, max) = vals
+                    .iter()
+                    .copied()
+                    .fold((vals[0], vals[0]), |(lo, hi), v| (lo.min(v), hi.max(v)));
                 let range = max - min;
                 if !range.is_finite() {
                     return Err(Error::Runtime(format!(
@@ -390,9 +335,7 @@ fn fit_scale(step: &ScaleStep, target: &str, train: &RecordBatch) -> Result<Fitt
 }
 
 fn fit_encode(step: &EncodeStep, target: &str, train: &RecordBatch) -> Result<FittedStep, Error> {
-    let cols = resolve_columns("encode", step.columns.as_deref(), target, train, |dt| {
-        matches!(dt, DataType::Utf8)
-    })?;
+    let cols = resolve_columns("encode", step.columns.as_deref(), target, train, is_utf8)?;
     let mut categories = BTreeMap::new();
 
     for (name, idx) in cols {
@@ -403,16 +346,12 @@ fn fit_encode(step: &EncodeStep, target: &str, train: &RecordBatch) -> Result<Fi
                 array.data_type()
             )));
         }
-        let arr = array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| Error::Runtime(format!("encode: column '{name}' not utf8")))?;
-        let mut seen = BTreeSet::new();
-        for i in 0..arr.len() {
-            if arr.is_valid(i) {
-                seen.insert(arr.value(i).to_owned());
-            }
-        }
+        let seen: BTreeSet<String> = array
+            .as_string::<i32>()
+            .iter()
+            .flatten()
+            .map(str::to_owned)
+            .collect();
         categories.insert(name, seen.into_iter().collect());
     }
 
@@ -422,7 +361,8 @@ fn fit_encode(step: &EncodeStep, target: &str, train: &RecordBatch) -> Result<Fi
     })
 }
 
-fn json_as_exact_i64(v: &serde_json::Value) -> Option<i64> {
+/// Extracts an exact `i64` from a JSON number, accepting whole-number floats in `i64` range.
+pub(super) fn json_as_exact_i64(v: &serde_json::Value) -> Option<i64> {
     if let Some(i) = v.as_i64() {
         return Some(i);
     }
@@ -444,6 +384,47 @@ fn build_batch(
     let options = RecordBatchOptions::new().with_row_count(Some(num_rows));
     RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &options)
         .map_err(|e| Error::Runtime(format!("preprocess: {e}")))
+}
+
+fn map_columns<P, F>(
+    step_name: &str,
+    params: &BTreeMap<String, P>,
+    batch: &RecordBatch,
+    mut transform: F,
+) -> Result<RecordBatch, Error>
+where
+    F: FnMut(&Field, &ArrayRef, &P, &mut Vec<Field>, &mut Vec<ArrayRef>) -> Result<(), Error>,
+{
+    let schema = batch.schema();
+    for name in params.keys() {
+        if schema.index_of(name).is_err() {
+            return Err(Error::Runtime(format!(
+                "{step_name}: missing column '{name}'"
+            )));
+        }
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut arrays = Vec::with_capacity(schema.fields().len());
+    for (idx, field) in schema.fields().iter().enumerate() {
+        let array = batch.column(idx);
+        match params.get(field.name()) {
+            Some(param) => transform(field, array, param, &mut fields, &mut arrays)?,
+            None => {
+                fields.push(field.as_ref().clone());
+                arrays.push(Arc::clone(array));
+            }
+        }
+    }
+
+    build_batch(fields, arrays, batch.num_rows())
+}
+
+fn category_lookup(cats: &[String]) -> HashMap<&str, usize> {
+    cats.iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect()
 }
 
 impl FittedStep {
@@ -492,222 +473,150 @@ fn apply_select(
     build_batch(fields, arrays, batch.num_rows())
 }
 
+fn fill_float64(name: &str, array: &ArrayRef, fill: f64) -> Result<Float64Array, Error> {
+    let arr = array.as_primitive::<Float64Type>();
+    let mut vals = Vec::with_capacity(arr.len());
+    for opt in arr.iter() {
+        vals.push(match opt {
+            Some(v) => check_finite("impute", name, v)?,
+            None => fill,
+        });
+    }
+    Ok(Float64Array::from(vals))
+}
+
 fn apply_impute(
     values: &BTreeMap<String, serde_json::Value>,
     batch: &RecordBatch,
 ) -> Result<RecordBatch, Error> {
-    let schema = batch.schema();
-    for name in values.keys() {
-        if schema.index_of(name).is_err() {
-            return Err(Error::Runtime(format!("impute: missing column '{name}'")));
-        }
-    }
-
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    let mut arrays = Vec::with_capacity(schema.fields().len());
-
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let array = batch.column(idx);
-        let Some(val) = values.get(field.name()) else {
-            fields.push(field.as_ref().clone());
-            arrays.push(Arc::clone(array));
-            continue;
-        };
-
-        let name = field.name();
-        match array.data_type() {
-            DataType::Int64 => {
-                if !val.is_number() {
-                    return Err(Error::Runtime(format!(
-                        "impute: column '{name}' is int64, incompatible value {val}"
-                    )));
+    map_columns(
+        "impute",
+        values,
+        batch,
+        |field, array, val, fields, arrays| {
+            let name = field.name();
+            match array.data_type() {
+                DataType::Int64 => {
+                    if !val.is_number() {
+                        return Err(Error::Runtime(format!(
+                            "impute: column '{name}' is int64, incompatible value {val}"
+                        )));
+                    }
+                    if let Some(fill) = val.as_i64() {
+                        let arr = array.as_primitive::<Int64Type>();
+                        let out: Int64Array = arr.iter().map(|opt| opt.unwrap_or(fill)).collect();
+                        fields.push(Field::new(name, DataType::Int64, false));
+                        arrays.push(Arc::new(out));
+                    } else {
+                        let fill = val.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
+                            Error::Runtime(format!(
+                                "impute: column '{name}' has non-finite value {val}"
+                            ))
+                        })?;
+                        let casted = to_float64("impute", name, array)?;
+                        fields.push(Field::new(name, DataType::Float64, false));
+                        arrays.push(Arc::new(fill_float64(name, &casted, fill)?));
+                    }
                 }
-                if let Some(fill) = json_as_exact_i64(val) {
-                    let arr = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                        Error::Runtime(format!("impute: column '{name}' not int64"))
-                    })?;
-                    let out: Int64Array = (0..arr.len())
-                        .map(|i| if arr.is_valid(i) { arr.value(i) } else { fill })
-                        .collect();
-                    fields.push(Field::new(name, DataType::Int64, false));
-                    arrays.push(Arc::new(out));
-                } else {
+                DataType::Float64 => {
                     let fill = val.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
                         Error::Runtime(format!(
-                            "impute: column '{name}' has non-finite value {val}"
+                            "impute: column '{name}' is float64, incompatible value {val}"
                         ))
                     })?;
-                    let casted = cast(array.as_ref(), &DataType::Float64)
-                        .map_err(|e| Error::Runtime(format!("impute: column '{name}': {e}")))?;
-                    let arr = casted
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or_else(|| {
-                            Error::Runtime(format!("impute: column '{name}' cast failed"))
-                        })?;
-                    let out: Float64Array = (0..arr.len())
-                        .map(|i| if arr.is_valid(i) { arr.value(i) } else { fill })
-                        .collect();
                     fields.push(Field::new(name, DataType::Float64, false));
+                    arrays.push(Arc::new(fill_float64(name, array, fill)?));
+                }
+                DataType::Utf8 => {
+                    let fill = val.as_str().ok_or_else(|| {
+                        Error::Runtime(format!(
+                            "impute: column '{name}' is string, incompatible value {val}"
+                        ))
+                    })?;
+                    let out: StringArray = array
+                        .as_string::<i32>()
+                        .iter()
+                        .map(|opt| Some(opt.unwrap_or(fill)))
+                        .collect();
+                    fields.push(Field::new(name, DataType::Utf8, false));
                     arrays.push(Arc::new(out));
                 }
+                dt => {
+                    return Err(Error::Runtime(format!(
+                        "impute: column '{name}' has unsupported type {dt:?}"
+                    )));
+                }
             }
-            DataType::Float64 => {
-                let fill = val.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
-                    Error::Runtime(format!(
-                        "impute: column '{name}' is float64, incompatible value {val}"
-                    ))
-                })?;
-                let arr = array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| {
-                        Error::Runtime(format!("impute: column '{name}' not float64"))
-                    })?;
-                let out: Float64Array = (0..arr.len())
-                    .map(|i| if arr.is_valid(i) { arr.value(i) } else { fill })
-                    .collect();
-                fields.push(Field::new(name, DataType::Float64, false));
-                arrays.push(Arc::new(out));
-            }
-            DataType::Utf8 => {
-                let fill = val.as_str().ok_or_else(|| {
-                    Error::Runtime(format!(
-                        "impute: column '{name}' is string, incompatible value {val}"
-                    ))
-                })?;
-                let arr = array
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| Error::Runtime(format!("impute: column '{name}' not utf8")))?;
-                let out: StringArray = (0..arr.len())
-                    .map(|i| Some(if arr.is_valid(i) { arr.value(i) } else { fill }))
-                    .collect();
-                fields.push(Field::new(name, DataType::Utf8, false));
-                arrays.push(Arc::new(out));
-            }
-            dt => {
-                return Err(Error::Runtime(format!(
-                    "impute: column '{name}' has unsupported type {dt:?}"
-                )));
-            }
-        }
-    }
-
-    build_batch(fields, arrays, batch.num_rows())
+            Ok(())
+        },
+    )
 }
 
 fn apply_scale(
     params: &BTreeMap<String, Affine>,
     batch: &RecordBatch,
 ) -> Result<RecordBatch, Error> {
-    let schema = batch.schema();
-    for name in params.keys() {
-        if schema.index_of(name).is_err() {
-            return Err(Error::Runtime(format!("scale: missing column '{name}'")));
-        }
-    }
-
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    let mut arrays = Vec::with_capacity(schema.fields().len());
-
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let array = batch.column(idx);
-        let Some(affine) = params.get(field.name()) else {
-            fields.push(field.as_ref().clone());
-            arrays.push(Arc::clone(array));
-            continue;
-        };
-
-        let name = field.name();
-        let fcol: ArrayRef = match array.data_type() {
-            DataType::Float64 => Arc::clone(array),
-            DataType::Int64 => cast(array.as_ref(), &DataType::Float64)
-                .map_err(|e| Error::Runtime(format!("scale: column '{name}': {e}")))?,
-            dt => {
-                return Err(Error::Runtime(format!(
-                    "scale: column '{name}' has unsupported type {dt:?}"
-                )));
-            }
-        };
-        let arr = fcol
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| Error::Runtime(format!("scale: column '{name}' not float64")))?;
-        let out: Float64Array = (0..arr.len())
-            .map(|i| {
-                if arr.is_valid(i) {
-                    let x = arr.value(i);
-                    let scaled = if affine.scale == 0.0 {
-                        0.0
-                    } else {
-                        (x - affine.offset) / affine.scale
-                    };
-                    Some(scaled)
-                } else {
-                    None
+    map_columns(
+        "scale",
+        params,
+        batch,
+        |field, array, affine, fields, arrays| {
+            let name = field.name();
+            let fcol = to_float64("scale", name, array)?;
+            let arr = fcol.as_primitive::<Float64Type>();
+            let mut vals = Vec::with_capacity(arr.len());
+            for opt in arr.iter() {
+                match opt {
+                    Some(x) => {
+                        check_finite("scale", name, x)?;
+                        let scaled = if affine.scale == 0.0 {
+                            0.0
+                        } else {
+                            (x - affine.offset) / affine.scale
+                        };
+                        check_finite("scale", name, scaled)?;
+                        vals.push(Some(scaled));
+                    }
+                    None => vals.push(None),
                 }
-            })
-            .collect();
-        fields.push(Field::new(name, DataType::Float64, field.is_nullable()));
-        arrays.push(Arc::new(out));
-    }
-
-    build_batch(fields, arrays, batch.num_rows())
+            }
+            fields.push(Field::new(name, DataType::Float64, field.is_nullable()));
+            arrays.push(Arc::new(Float64Array::from(vals)));
+            Ok(())
+        },
+    )
 }
 
 fn apply_ordinal(
     categories: &BTreeMap<String, Vec<String>>,
     batch: &RecordBatch,
 ) -> Result<RecordBatch, Error> {
-    let schema = batch.schema();
-    for name in categories.keys() {
-        if schema.index_of(name).is_err() {
-            return Err(Error::Runtime(format!("encode: missing column '{name}'")));
-        }
-    }
-
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    let mut arrays = Vec::with_capacity(schema.fields().len());
-
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let array = batch.column(idx);
-        let Some(cats) = categories.get(field.name()) else {
-            fields.push(field.as_ref().clone());
-            arrays.push(Arc::clone(array));
-            continue;
-        };
-
-        let name = field.name();
-        if array.data_type() != &DataType::Utf8 {
-            return Err(Error::Runtime(format!(
-                "encode: column '{name}' has unsupported type {:?}",
-                array.data_type()
-            )));
-        }
-        let arr = array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| Error::Runtime(format!("encode: column '{name}' not utf8")))?;
-        let lookup: HashMap<&str, i64> = cats
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.as_str(), i as i64))
-            .collect();
-        let out: Int64Array = (0..arr.len())
-            .map(|i| {
-                if arr.is_valid(i) {
-                    lookup.get(arr.value(i)).copied().unwrap_or(-1)
-                } else {
-                    -1
-                }
-            })
-            .collect();
-        fields.push(Field::new(name, DataType::Int64, false));
-        arrays.push(Arc::new(out));
-    }
-
-    build_batch(fields, arrays, batch.num_rows())
+    map_columns(
+        "encode",
+        categories,
+        batch,
+        |field, array, cats, fields, arrays| {
+            let name = field.name();
+            if array.data_type() != &DataType::Utf8 {
+                return Err(Error::Runtime(format!(
+                    "encode: column '{name}' has unsupported type {:?}",
+                    array.data_type()
+                )));
+            }
+            let lookup = category_lookup(cats);
+            let out: Int64Array = array
+                .as_string::<i32>()
+                .iter()
+                .map(|opt| {
+                    opt.and_then(|v| lookup.get(v).map(|&i| i as i64))
+                        .unwrap_or(-1)
+                })
+                .collect();
+            fields.push(Field::new(name, DataType::Int64, false));
+            arrays.push(Arc::new(out));
+            Ok(())
+        },
+    )
 }
 
 fn apply_one_hot(
@@ -715,59 +624,49 @@ fn apply_one_hot(
     batch: &RecordBatch,
 ) -> Result<RecordBatch, Error> {
     let schema = batch.schema();
-    for name in categories.keys() {
-        if schema.index_of(name).is_err() {
-            return Err(Error::Runtime(format!("encode: missing column '{name}'")));
-        }
-    }
-
+    let other_names: HashSet<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .filter(|name| !categories.contains_key(*name))
+        .collect();
+    let mut produced = HashSet::new();
     let n_rows = batch.num_rows();
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    let mut arrays = Vec::with_capacity(schema.fields().len());
 
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let array = batch.column(idx);
-        let Some(cats) = categories.get(field.name()) else {
-            fields.push(field.as_ref().clone());
-            arrays.push(Arc::clone(array));
-            continue;
-        };
-
-        let name = field.name();
-        if array.data_type() != &DataType::Utf8 {
-            return Err(Error::Runtime(format!(
-                "encode: column '{name}' has unsupported type {:?}",
-                array.data_type()
-            )));
-        }
-        let arr = array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| Error::Runtime(format!("encode: column '{name}' not utf8")))?;
-        let lookup: HashMap<&str, usize> = cats
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.as_str(), i))
-            .collect();
-        let mut buffers = vec![vec![0.0_f64; n_rows]; cats.len()];
-        for (row, opt) in arr.iter().enumerate() {
-            if let Some(val) = opt {
-                if let Some(&cat_idx) = lookup.get(val) {
-                    buffers[cat_idx][row] = 1.0;
+    map_columns(
+        "encode",
+        categories,
+        batch,
+        |field, array, cats, fields, arrays| {
+            let name = field.name();
+            if array.data_type() != &DataType::Utf8 {
+                return Err(Error::Runtime(format!(
+                    "encode: column '{name}' has unsupported type {:?}",
+                    array.data_type()
+                )));
+            }
+            let lookup = category_lookup(cats);
+            let mut buffers = vec![vec![0.0_f64; n_rows]; cats.len()];
+            for (row, opt) in array.as_string::<i32>().iter().enumerate() {
+                if let Some(val) = opt {
+                    if let Some(&cat_idx) = lookup.get(val) {
+                        buffers[cat_idx][row] = 1.0;
+                    }
                 }
             }
-        }
-        for (cat, buf) in cats.iter().zip(buffers) {
-            fields.push(Field::new(
-                format!("{name}={cat}"),
-                DataType::Float64,
-                false,
-            ));
-            arrays.push(Arc::new(Float64Array::from(buf)));
-        }
-    }
-
-    build_batch(fields, arrays, n_rows)
+            for (cat, buf) in cats.iter().zip(buffers) {
+                let col_name = format!("{name}={cat}");
+                if other_names.contains(col_name.as_str()) || !produced.insert(col_name.clone()) {
+                    return Err(Error::Runtime(format!(
+                        "encode: generated column '{col_name}' collides with an existing column"
+                    )));
+                }
+                fields.push(Field::new(col_name, DataType::Float64, false));
+                arrays.push(Arc::new(Float64Array::from(buf)));
+            }
+            Ok(())
+        },
+    )
 }
 
 #[cfg(test)]
@@ -789,37 +688,29 @@ mod tests {
 
     fn i64_col(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
         let idx = batch.schema().index_of(name).unwrap();
-        let arr = batch
+        batch
             .column(idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        (0..arr.len())
-            .map(|i| arr.is_valid(i).then(|| arr.value(i)))
+            .as_primitive::<Int64Type>()
+            .iter()
             .collect()
     }
 
     fn f64_col(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
         let idx = batch.schema().index_of(name).unwrap();
-        let arr = batch
+        batch
             .column(idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        (0..arr.len())
-            .map(|i| arr.is_valid(i).then(|| arr.value(i)))
+            .as_primitive::<Float64Type>()
+            .iter()
             .collect()
     }
 
     fn str_col(batch: &RecordBatch, name: &str) -> Vec<Option<String>> {
         let idx = batch.schema().index_of(name).unwrap();
-        let arr = batch
+        batch
             .column(idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        (0..arr.len())
-            .map(|i| arr.is_valid(i).then(|| arr.value(i).to_owned()))
+            .as_string::<i32>()
+            .iter()
+            .map(|opt| opt.map(str::to_owned))
             .collect()
     }
 
@@ -1074,12 +965,7 @@ mod tests {
         assert!(matches!(err, Error::Runtime(_)));
         assert!(err.to_string().contains("nope"));
 
-        // Duplicate column fails; target already listed is not duplicated.
-        let dup = Step::Select(SelectStep {
-            columns: vec!["a".into(), "a".into()],
-        });
-        assert!(matches!(fit(&dup, "y", &train), Err(Error::Runtime(_))));
-
+        // Target already listed is not duplicated.
         let with_target = Step::Select(SelectStep {
             columns: vec!["a".into(), "y".into()],
         });
@@ -1121,7 +1007,7 @@ mod tests {
             ),
         ]);
 
-        // Mean: default columns are numeric non-target (i_exact, i_frac, f). Target y untouched.
+        // Mean: default columns are numeric non-target; int64 ALWAYS becomes float64 (data-independent schema).
         let mean_step = Step::Impute(ImputeStep {
             strategy: ImputeStrategy::Mean,
             value: None,
@@ -1130,17 +1016,14 @@ mod tests {
         let fitted_mean = fit(&mean_step, "y", &train).unwrap();
         let out = fitted_mean.apply(&train).unwrap();
         assert_eq!(col_names(&out), col_names(&train));
-        // i_exact mean = 3.0 -> stays Int64
-        assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
+        assert_eq!(out.schema().field(0).data_type(), &DataType::Float64);
         assert_eq!(
-            i64_col(&out, "i_exact"),
-            vec![Some(2), Some(4), Some(3), Some(3)]
+            f64_col(&out, "i_exact"),
+            vec![Some(2.0), Some(4.0), Some(3.0), Some(3.0)]
         );
-        // i_frac mean = 4/3 -> cast to Float64
         assert_eq!(out.schema().field(1).data_type(), &DataType::Float64);
         let frac_vals = f64_col(&out, "i_frac");
         assert!((frac_vals[2].unwrap() - 4.0 / 3.0).abs() < 1e-12);
-        // f mean = 13/3
         let f_vals = f64_col(&out, "f");
         assert!((f_vals[3].unwrap() - 13.0 / 3.0).abs() < 1e-12);
         // s and y untouched
@@ -1150,7 +1033,7 @@ mod tests {
         );
         assert_eq!(i64_col(&out, "y"), vec![Some(1), None, Some(0), Some(1)]);
 
-        // Median: f has [1.0, 2.0, 10.0] -> median 2.0; i_frac has [1, 1, 2] -> median 1 (Int64).
+        // Median: int64 also becomes float64 even when median is whole (1.0).
         let med_step = Step::Impute(ImputeStep {
             strategy: ImputeStrategy::Median,
             value: None,
@@ -1158,24 +1041,26 @@ mod tests {
         });
         let fitted_med = fit(&med_step, "y", &train).unwrap();
         let out_med = fitted_med.apply(&train).unwrap();
-        assert_eq!(out_med.schema().field(1).data_type(), &DataType::Int64);
+        assert_eq!(out_med.schema().field(1).data_type(), &DataType::Float64);
         assert_eq!(
-            i64_col(&out_med, "i_frac"),
-            vec![Some(1), Some(2), Some(1), Some(1)]
+            f64_col(&out_med, "i_frac"),
+            vec![Some(1.0), Some(2.0), Some(1.0), Some(1.0)]
         );
         assert_eq!(
             f64_col(&out_med, "f"),
             vec![Some(1.0), Some(10.0), Some(2.0), Some(2.0)]
         );
 
-        // Constant on utf8.
-        let const_str = Step::Impute(ImputeStep {
+        // Constant string without explicit columns defaults to utf8 non-target columns.
+        let const_str_default = Step::Impute(ImputeStep {
             strategy: ImputeStrategy::Constant,
             value: Some(json!("missing")),
-            columns: Some(vec!["s".into()]),
+            columns: None,
         });
-        let fitted_str = fit(&const_str, "y", &train).unwrap();
-        let out_str = fitted_str.apply(&train).unwrap();
+        let out_str = fit(&const_str_default, "y", &train)
+            .unwrap()
+            .apply(&train)
+            .unwrap();
         assert_eq!(
             str_col(&out_str, "s"),
             vec![
@@ -1185,8 +1070,25 @@ mod tests {
                 Some("missing".into()),
             ]
         );
+        // Numeric columns left untouched by string constant default.
+        assert_eq!(
+            i64_col(&out_str, "i_exact"),
+            vec![Some(2), Some(4), None, Some(3)]
+        );
 
-        // Constant float on int64 casts to float64; constant int keeps int64.
+        // Constant integer on int64 stays int64; constant float casts to float64.
+        let const_int = Step::Impute(ImputeStep {
+            strategy: ImputeStrategy::Constant,
+            value: Some(json!(99)),
+            columns: Some(vec!["i_exact".into()]),
+        });
+        let out_ci = fit(&const_int, "y", &train).unwrap().apply(&train).unwrap();
+        assert_eq!(out_ci.schema().field(0).data_type(), &DataType::Int64);
+        assert_eq!(
+            i64_col(&out_ci, "i_exact"),
+            vec![Some(2), Some(4), Some(99), Some(3)]
+        );
+
         let const_float = Step::Impute(ImputeStep {
             strategy: ImputeStrategy::Constant,
             value: Some(json!(0.5)),
@@ -1261,6 +1163,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(err_type.to_string().contains('s'));
+
+        // Non-finite values error at apply time too.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let bad_batch = batch(&[("f", Arc::new(Float64Array::from(vec![Some(bad), None])))]);
+            let fitted = FittedStep::Impute {
+                values: BTreeMap::from([("f".into(), json!(0.0))]),
+            };
+            let err = fitted.apply(&bad_batch).unwrap_err();
+            assert!(matches!(err, Error::Runtime(_)));
+            assert!(
+                err.to_string().contains("'f'") && err.to_string().contains("non-finite"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -1282,7 +1198,6 @@ mod tests {
             ("y", Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))),
         ]);
 
-        // Standard: x mean = 20, pop std = sqrt(200/3); const_col scale = 0 -> 0.0; null stays null; y untouched.
         let std_step = Step::Scale(ScaleStep {
             method: ScaleMethod::Standard,
             columns: None,
@@ -1305,7 +1220,6 @@ mod tests {
             vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)]
         );
 
-        // Minmax: x offset=10, scale=20 -> [0.0, 0.5, 1.0, None]; const_col -> [0.0, 0.0, 0.0, None].
         let mm_step = Step::Scale(ScaleStep {
             method: ScaleMethod::Minmax,
             columns: None,
@@ -1321,7 +1235,7 @@ mod tests {
             vec![Some(0.0), Some(0.0), Some(0.0), None]
         );
 
-        // All-null, missing column, target column, or non-numeric column errors with column name.
+        // All-null, missing column, target column error with column name.
         let all_null = batch(&[("z", Arc::new(Float64Array::from(vec![None, None])))]);
         assert!(
             fit(&std_step, "y", &all_null)
@@ -1342,6 +1256,26 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, Error::Runtime(_)));
             assert!(err.to_string().contains(needle), "{err}");
+        }
+
+        // Non-finite values error at apply time too.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let bad_batch = batch(&[("x", Arc::new(Float64Array::from(vec![Some(bad)])))]);
+            let fitted = FittedStep::Scale {
+                params: BTreeMap::from([(
+                    "x".into(),
+                    Affine {
+                        offset: 0.0,
+                        scale: 1.0,
+                    },
+                )]),
+            };
+            let err = fitted.apply(&bad_batch).unwrap_err();
+            assert!(matches!(err, Error::Runtime(_)));
+            assert!(
+                err.to_string().contains("'x'") && err.to_string().contains("non-finite"),
+                "{err}"
+            );
         }
     }
 
@@ -1380,7 +1314,6 @@ mod tests {
             ),
         ]);
 
-        // Ordinal: categories sorted = ["blue", "red"], target "y" untouched.
         let ord_step = Step::Encode(EncodeStep {
             method: EncodeMethod::Ordinal,
             columns: None,
@@ -1408,7 +1341,6 @@ mod tests {
             ]
         );
 
-        // OneHot: replaces "color" in-place with color=blue, color=red; unseen/null -> all 0.
         let oh_step = Step::Encode(EncodeStep {
             method: EncodeMethod::OneHot,
             columns: None,
@@ -1427,6 +1359,29 @@ mod tests {
             f64_col(&out_oh, "color=red"),
             vec![Some(0.0), Some(0.0), Some(0.0), Some(1.0)]
         );
+
+        // OneHot rejects collision with an existing column or duplicate generated name.
+        let colliding = batch(&[
+            ("color", Arc::new(StringArray::from(vec!["red"]))),
+            ("color=red", Arc::new(Float64Array::from(vec![1.0]))),
+        ]);
+        let err = fitted_oh.apply(&colliding).unwrap_err();
+        assert!(matches!(err, Error::Runtime(_)));
+        assert!(err.to_string().contains("color=red"), "{err}");
+
+        let dup_oh = FittedStep::OneHot {
+            categories: BTreeMap::from([
+                ("a".into(), vec!["b=c".into()]),
+                ("a=b".into(), vec!["c".into()]),
+            ]),
+        };
+        let dup_batch = batch(&[
+            ("a", Arc::new(StringArray::from(vec!["b=c"]))),
+            ("a=b", Arc::new(StringArray::from(vec!["c"]))),
+        ]);
+        let err = dup_oh.apply(&dup_batch).unwrap_err();
+        assert!(matches!(err, Error::Runtime(_)));
+        assert!(err.to_string().contains("a=b=c"), "{err}");
 
         // Encode errors on non-string, missing, or target column.
         for (cols, needle) in [
@@ -1475,7 +1430,7 @@ mod tests {
             Step::Impute(ImputeStep {
                 strategy: ImputeStrategy::Constant,
                 value: Some(json!("a")),
-                columns: Some(vec!["cat".into()]),
+                columns: None,
             }),
             Step::Scale(ScaleStep {
                 method: ScaleMethod::Minmax,
@@ -1488,17 +1443,13 @@ mod tests {
         ];
 
         let mut cur = train.clone();
-        let mut fitted = Vec::new();
         for s in &steps {
             let f = fit(s, "y", &cur).unwrap();
             cur = f.apply(&cur).unwrap();
-            fitted.push(f);
         }
 
         assert_eq!(col_names(&cur), vec!["num", "cat=a", "cat=b", "y"]);
-        // num: [10, 20, 15] -> minmax [0.0, 1.0, 0.5]
         assert_eq!(f64_col(&cur, "num"), vec![Some(0.0), Some(1.0), Some(0.5)]);
-        // cat: ["b", "a", "a"] -> cat=a: [0, 1, 1], cat=b: [1, 0, 0]
         assert_eq!(
             f64_col(&cur, "cat=a"),
             vec![Some(0.0), Some(1.0), Some(1.0)]

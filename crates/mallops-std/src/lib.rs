@@ -4,7 +4,19 @@
 //! feature is enabled are compiled and registered.
 
 #[cfg(feature = "_ingest")]
+// Without an ingest block only the shared Arrow/Parquet helpers are used (by preprocess).
+#[cfg_attr(
+    not(any(feature = "ingest-csv", feature = "ingest-parquet")),
+    allow(dead_code)
+)]
 mod ingest;
+// ponytail: skeleton of #12 (12.0); drop this allow once 12.1/12.2 wire every item (12.3).
+#[cfg(feature = "preprocess-tabular")]
+#[allow(dead_code)]
+mod preprocess;
+
+#[cfg(feature = "preprocess-tabular")]
+pub use preprocess::transform::{FittedTransform, TRANSFORM_FILE};
 
 use mallops_core::{BlockRegistry, Error};
 
@@ -19,6 +31,8 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
     registry.register(std::sync::Arc::new(ingest::csv::IngestCsv::new()))?;
     #[cfg(feature = "ingest-parquet")]
     registry.register(std::sync::Arc::new(ingest::parquet::IngestParquet::new()))?;
+    #[cfg(feature = "preprocess-tabular")]
+    registry.register(std::sync::Arc::new(preprocess::PreprocessTabular::new()))?;
     Ok(())
 }
 
@@ -35,11 +49,16 @@ mod tests {
 
         let csv: BlockRef = "std/ingest.csv".parse().unwrap();
         let parquet: BlockRef = "std/ingest.parquet".parse().unwrap();
+        let preprocess: BlockRef = "std/preprocess.tabular".parse().unwrap();
 
         assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
         assert_eq!(
             registry.contains(&parquet),
             cfg!(feature = "ingest-parquet")
+        );
+        assert_eq!(
+            registry.contains(&preprocess),
+            cfg!(feature = "preprocess-tabular")
         );
     }
 
@@ -48,7 +67,11 @@ mod tests {
         let mut registry = BlockRegistry::new();
         register_std(&mut registry).unwrap();
         let second = register_std(&mut registry);
-        if cfg!(any(feature = "ingest-csv", feature = "ingest-parquet")) {
+        if cfg!(any(
+            feature = "ingest-csv",
+            feature = "ingest-parquet",
+            feature = "preprocess-tabular"
+        )) {
             assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");
         } else {
             assert!(second.is_ok(), "{second:?}");

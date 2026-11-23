@@ -15,11 +15,12 @@ categories.workspace = true
 workspace = true
 
 [features]
-default = ["ingest"]
+default = ["ingest", "preprocess-tabular"]
 ingest = ["ingest-csv", "ingest-parquet"]
 ingest-csv = ["dep:arrow-csv", "_ingest"]
 ingest-parquet = ["_ingest"]
-# Shared ingest plumbing (Parquet writer, Arrow schema/arrays); not a public feature.
+preprocess-tabular = ["_ingest", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-select"]
+# Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.
 _ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 
 [dependencies]
@@ -31,8 +32,11 @@ tokio.workspace = true
 # 59.x: 60.x requires Rust 1.88 (MSRV is 1.85). Codecs are for reading external files;
 # the output is always uncompressed.
 arrow-array = { version = "59", optional = true }
+arrow-cast = { version = "59", optional = true }
 arrow-csv = { version = "59", optional = true }
+arrow-ord = { version = "59", optional = true }
 arrow-schema = { version = "59", optional = true }
+arrow-select = { version = "59", optional = true }
 parquet = { version = "59", default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"], optional = true }
 
 [dev-dependencies]

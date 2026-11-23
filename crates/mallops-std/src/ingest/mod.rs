@@ -20,7 +20,7 @@ use mallops_core::{
     ArtifactKind, BlockOutcome, CachePolicy, CancelToken, Digest, DraftPayload, Error, Manifest,
     OutputDraft, OutputDrafts, Port,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Name of the output port of every ingest block.
 pub(crate) const OUTPUT: &str = "dataset";
@@ -33,7 +33,7 @@ pub(crate) const DATA_FILE: &str = "data.parquet";
 pub(crate) const CREATED_BY: &str = "mallops-std";
 
 /// Column type accepted in an expected `schema:` (v0.1 subset).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ColumnType {
     Bool,
@@ -53,10 +53,23 @@ impl ColumnType {
             Self::Date32 => DataType::Date32,
         }
     }
+
+    /// Inverse of [`Self::data_type`]; `None` for types outside the v0.1 subset.
+    #[cfg(feature = "preprocess-tabular")]
+    pub(crate) fn from_data_type(dt: &DataType) -> Option<Self> {
+        Some(match dt {
+            DataType::Boolean => Self::Bool,
+            DataType::Int64 => Self::Int64,
+            DataType::Float64 => Self::Float64,
+            DataType::Utf8 => Self::String,
+            DataType::Date32 => Self::Date32,
+            _ => return None,
+        })
+    }
 }
 
 /// One expected column: `{name: <column>, type: <ColumnType>}`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Column {
     pub(crate) name: String,

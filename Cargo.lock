@@ -786,8 +786,11 @@ name = "mallops-std"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-cast",
  "arrow-csv",
+ "arrow-ord",
  "arrow-schema",
+ "arrow-select",
  "blake3",
  "mallops-core",
  "parquet",

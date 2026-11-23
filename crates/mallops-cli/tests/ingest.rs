@@ -311,3 +311,148 @@ blocks:
         "failed run must not write runs/latest.json"
     );
 }
+
+#[test]
+fn preprocess_e2e_csv_to_preprocess_validation_and_cache() {
+    let proj = WorkDir::new();
+    proj.write(
+        "customers.csv",
+        concat!(
+            "age,score,city,churned\n",
+            "20,1.5,rome,0\n",
+            ",2.5,paris,1\n",
+            "30,,berlin,0\n",
+            "40,4.0,,1\n",
+            "25,5.5,rome,0\n",
+            "50,3.0,paris,1\n",
+            "35,7.5,rome,0\n",
+            ",2.0,berlin,1\n",
+            "45,6.0,paris,0\n",
+            "28,8.5,rome,1\n",
+        ),
+    );
+    proj.write(
+        "mallops.yaml",
+        r#"version: 1
+name: preprocess-e2e
+store:
+  kind: local
+  path: ./.mallops
+blocks:
+  raw:
+    use: std/ingest.csv
+    with:
+      path: customers.csv
+  features:
+    use: std/preprocess.tabular
+    in:
+      data: raw.dataset
+    with:
+      target: churned
+      steps:
+        - split: { test: 0.2, validation: 0.2, seed: 42 }
+        - impute: { strategy: median }
+        - scale: { method: standard }
+        - encode: { method: one_hot }
+"#,
+    );
+
+    let val = run_cli(proj.path(), &["validate"]);
+    assert_eq!(val.status.code(), Some(0), "stderr: {}", stderr(&val));
+
+    // 1. First run executes both blocks and records train, validation, test, and transform.
+    let first = run_cli(proj.path(), &["run"]);
+    assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
+    assert!(
+        stdout(&first).contains("2 executed, 0 cached"),
+        "stdout:\n{}",
+        stdout(&first)
+    );
+
+    let latest_path = proj.path().join(".mallops/meta/runs/latest.json");
+    let latest1 = read_json(&latest_path);
+    assert_eq!(latest1["pipeline"], "preprocess-e2e");
+
+    let feat_out = &latest1["outputs"]["features"];
+    for port in ["train", "validation", "test"] {
+        let id = feat_out[port]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing {port} artifact id in latest.json"));
+        let art_dir = proj.path().join(".mallops/artifacts").join(id);
+        let manifest = read_json(&art_dir.join("manifest.json"));
+        assert_eq!(manifest["kind"], "features");
+        assert_eq!(manifest["format"], "parquet");
+        assert_eq!(manifest["metadata"]["target"], "churned");
+        assert!(art_dir.join("payload/data.parquet").is_file());
+        let verify = run_cli(proj.path(), &["store", "verify", id]);
+        assert_eq!(verify.status.code(), Some(0), "stderr: {}", stderr(&verify));
+    }
+
+    let transform_id = feat_out["transform"]
+        .as_str()
+        .expect("missing transform artifact id in latest.json");
+    let transform_dir = proj.path().join(".mallops/artifacts").join(transform_id);
+    let transform_manifest = read_json(&transform_dir.join("manifest.json"));
+    assert_eq!(transform_manifest["kind"], "transform");
+    assert_eq!(transform_manifest["format"], "json");
+    let transform_json = read_json(&transform_dir.join("payload/transform.json"));
+    assert_eq!(transform_json["v"], 1);
+    assert_eq!(transform_json["target"], "churned");
+    let verify_t = run_cli(proj.path(), &["store", "verify", transform_id]);
+    assert_eq!(
+        verify_t.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&verify_t)
+    );
+
+    // 2. Second run is fully served from cache with identical artifact ids.
+    let second = run_cli(proj.path(), &["run"]);
+    assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));
+    assert!(
+        stdout(&second).contains("0 executed, 2 cached"),
+        "stdout:\n{}",
+        stdout(&second)
+    );
+    let latest2 = read_json(&latest_path);
+    assert_eq!(
+        latest2["outputs"]["features"],
+        latest1["outputs"]["features"]
+    );
+}
+
+#[test]
+fn preprocess_e2e_validate_rejects_unconfigured_validation_port() {
+    let proj = WorkDir::new();
+    proj.write(
+        "mallops.yaml",
+        r#"version: 1
+name: preprocess-no-val
+blocks:
+  raw:
+    use: std/ingest.csv
+    with:
+      path: data.csv
+  features:
+    use: std/preprocess.tabular
+    in:
+      data: raw.dataset
+    with:
+      target: y
+      steps:
+        - split: { test: 0.2, seed: 42 }
+  consumer:
+    use: core/noop
+    in:
+      in: features.validation
+"#,
+    );
+
+    let out = run_cli(proj.path(), &["validate"]);
+    assert_eq!(out.status.code(), Some(1), "stdout:\n{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("blocks.consumer.in.in:") && err.contains("validation"),
+        "expected blocks.consumer.in.in error for missing validation port, got:\n{err}"
+    );
+}

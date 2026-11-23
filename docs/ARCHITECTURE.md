@@ -152,7 +152,8 @@ pub enum Error {
 }
 
 /// Runtime settings: `new(store)` defaults to available parallelism, `EnvSecretProvider`,
-/// `std::env::temp_dir()` and a cancel token that never fires.
+/// `std::env::temp_dir()`, a cancel token that never fires, one `JsonSink` on `store`,
+/// `SystemTime::now`, `HostInfo::current()`, and `git_commit: None`.
 #[non_exhaustive]
 pub struct RuntimeConfig {
     pub max_jobs: usize,                     // `--jobs`; 0 counts as 1
@@ -161,6 +162,10 @@ pub struct RuntimeConfig {
     pub workdir_root: PathBuf,               // per-run temporary workdirs are created here
     pub cancel: CancelToken,                 // external cancellation, seen by blocks via ctx.cancel()
     pub no_cache: bool,                      // `--no-cache`: every node runs, no cache entry read or written
+    pub lineage: Vec<Arc<dyn LineageSink>>,  // empty = `lineage: off`; YAML mapping lives in `mallops-cli`
+    pub clock: fn() -> SystemTime,           // injectable for deterministic tests
+    pub host: HostInfo,                      // recorded in `RunStarted`
+    pub git_commit: Option<String>,          // `None` in the core library; populated by `mallops-cli`
 }
 
 pub struct Runtime { /* config */ }
@@ -203,7 +208,9 @@ sequenceDiagram
     participant B as Block
     CLI->>Core: run(mallops.yaml)
     Core->>Core: parse, validate config & resolved ports, topo-sort (PipelineConfig::validate)
+    Core->>Core: emit RunStarted → sinks
     loop each ready node (parallel when independent)
+        Core->>Core: emit BlockStarted → sinks (after job slot & cancel check)
         Core->>B: cache_policy(ctx)
         Core->>Core: cache key = hash(block id, version, config_hash, seed, input ids, extra_hash) [skipped if Uncacheable, cache: false or no_cache]
         Core->>Store: lookup(cache/<key>)
@@ -216,12 +223,13 @@ sequenceDiagram
             Store-->>Core: ArtifactId
             Core->>Store: record(cache/<key>) [Succeeded only]
         end
-        Core->>Core: emit lineage event → sinks
+        Core->>Core: emit ArtifactProduced (per output, incl. cache hit) + BlockFinished → sinks
     end
+    Core->>Core: emit RunFinished → sinks
     Core-->>CLI: run summary
 ```
 
-- Scheduler: nodes in topological order start as soon as all their upstream nodes have finished, as `tokio` tasks in a `JoinSet`, bounded by a `Semaphore` of `max_jobs` permits (`--jobs`); `spawn_blocking` for heavy CPU/hashing/filesystem work (+ `kill_on_drop` for external child processes). Each node runs through one function (`run_node`: job slot → `Context` → `cache_policy` → cache lookup → on a miss load inputs with `store.get` → `block.run` → commit → cache record), the single place where caching (#8) and lineage (#9) hook in. Once the node holds a job slot and the run is not cancelled, its execution is wrapped with `.instrument(info_span!("node", id, block))`; the span never lives in `Context`. A block that panics makes its node `Failed` (`Error::Runtime`) instead of crashing the run.
+- Scheduler: nodes in topological order start as soon as all their upstream nodes have finished, as `tokio` tasks in a `JoinSet`, bounded by a `Semaphore` of `max_jobs` permits (`--jobs`); `spawn_blocking` for heavy CPU/hashing/filesystem work (+ `kill_on_drop` for external child processes). Each node runs through one function (`run_node`: job slot → cancel check → `BlockStarted` → instrumented `execute` (`Context` → `cache_policy` → cache lookup → on a miss load inputs with `store.get` → `block.run` → commit → cache record) → `ArtifactProduced` per output (including cache hits) → `BlockFinished`), the single place where caching (#8) and lineage (#9) hook in. Once the node holds a job slot and the run is not cancelled, `execute` is wrapped with `.instrument(info_span!("node", id, block))`; the span never lives in `Context`. Nodes that never start (stopped by `gate` as `Skipped` or `Cancelled`, or cancelled before starting) emit only `BlockFinished` with `duration: Duration::ZERO`. A block that panics makes its node `Failed` (`Error::Runtime`, duration 0) and emits `BlockFinished` instead of crashing the run. `RunStarted` is emitted before scheduling any node, and `RunFinished` after all nodes settle and the workdir is cleaned up.
 - Cache (`runtime/cache.rs`): The cache is bypassed (no lookup, no record) when the node has `cache: false` or `RuntimeConfig::no_cache` is set; `cache_policy` is then not called. Otherwise `cache_policy` is asked (an error fails the node) and an `Uncacheable` policy bypasses it too. `extra_hash` must not depend on secret values (NFR-4). A hit makes the node `Succeeded` with `NodeSummary::cached = true` and outputs from the entry; the block does not run and inputs are not loaded (the node span still exists). On a miss the node runs as usual and, only if `Succeeded`, `record` stores the entry; `Skipped`, `Failed` and `Cancelled` are never cached. A `record` error, or a store error during `lookup`, is a `tracing::warn!` (the lookup error counts as a miss and the entry is rewritten), never a node failure. An unreadable or other-version entry, or one referencing an artifact missing from the store (`exists`), is a miss and gets overwritten.
 - Failure: a node whose block or commit fails is `Status::Failed` (with its `error`); all its descendants are `Cancelled` without running, with a reason naming the failed node. Independent branches still finish. Re-running resumes from cache.
 - Skipping: `BlockOutcome::Skipped` (e.g. a failed quality gate) marks the node `Skipped`; outputs it still returns are committed. A consumer with any **required** input from a `Skipped` node, or whose required upstream output was not committed, is `Skipped` without running, even when its other inputs succeeded (fan-in). Optional inputs without a committed artifact are absent from `Inputs`. A failed or cancelled parent wins over a skipped one (`Cancelled`).
@@ -293,8 +301,21 @@ pub trait ArtifactStore: Send + Sync {
 ### 6.2 Lineage
 
 ```rust
+/// Wall-clock instant; serializes as RFC 3339 UTC with millisecond precision.
+pub struct Timestamp(SystemTime);
+
 #[non_exhaustive]
+pub struct HostInfo {
+    pub os: String,              // std::env::consts::OS
+    pub arch: String,            // std::env::consts::ARCH
+    pub hostname: String,        // HOSTNAME / COMPUTERNAME env var, or "unknown"
+    pub mallops_version: String, // CARGO_PKG_VERSION
+}
+
+#[non_exhaustive]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum LineageEvent {
+    #[non_exhaustive]
     RunStarted {
         run: RunId,
         timestamp: Timestamp,
@@ -302,37 +323,48 @@ pub enum LineageEvent {
         git_commit: Option<String>,
         host: HostInfo,
     },
+    #[non_exhaustive]
     BlockStarted {
         run: RunId,
         timestamp: Timestamp,
         node: String,
-        block: BlockRef,
+        block: BlockRef,         // serialized via Display as a string (e.g. "std/train.external")
         block_version: String,
         config_hash: Digest,
         seed: Option<u64>,
         inputs: Vec<ArtifactId>,
     },
+    #[non_exhaustive]
     ArtifactProduced { run: RunId, timestamp: Timestamp, node: String, artifact: ArtifactId },
+    #[non_exhaustive]
     BlockFinished {
         run: RunId,
         timestamp: Timestamp,
         node: String,
-        status: Status, // Succeeded | Failed | Skipped | Cancelled
-        duration: Duration,
+        status: Status,          // snake_case: succeeded | failed | skipped | cancelled
+        duration: Duration,      // serialized as `duration_ms: u64`
         cached: bool,
     },
+    #[non_exhaustive]
     RunFinished { run: RunId, timestamp: Timestamp, status: Status },
 }
 
 pub trait LineageSink: Send + Sync {
-    fn record(&self, event: &LineageEvent) -> BoxFuture<'_, Result<(), Error>>;
+    fn record<'a>(&'a self, event: &'a LineageEvent) -> BoxFuture<'a, Result<(), Error>>;
 }
 ```
 
 - The runtime is the only producer: it alone sees the whole graph. Blocks stay unaware of lineage.
-- Core sink: `JsonSink`, writing `runs/<run-id>/lineage.json` through `ArtifactStore::put_meta`.
-- Optional sinks: SQLite (queryable), OpenLineage (Marquez, DataHub…), MLflow — `mallops-std` features or plugins.
-- Zero or more sinks; `lineage: off` disables it. A failing sink logs a warning and never fails the run.
+- Document format (`JsonSink`): writes `runs/<run-id>/lineage.json` through `ArtifactStore::put_meta` (on `LocalStore`: `meta/runs/<run-id>/lineage.json`) as `{"v":1,"run":"<run-id>","events":[...]}`. Events use an internally tagged `snake_case` `"event"` field (`run_started`, `block_started`, `artifact_produced`, `block_finished`, `run_finished`); `timestamp` is RFC 3339 UTC with millisecond precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`, computed from `UNIX_EPOCH` without an external date crate); `BlockStarted.block` serializes as a string; `BlockFinished.duration` serializes as `duration_ms` (`u64`); `Status` serializes in `snake_case`. `JsonSink` buffers events per run and rewrites the file on every event so it remains valid JSON after a crash, freeing the run's buffer on `RunFinished`.
+- Configuration (`RuntimeConfig`): `lineage` defaults to `[JsonSink::new(store)]` (empty `Vec` disables lineage, corresponding to `lineage: off`; mapping YAML `lineage:` to sinks lives in `mallops-cli`), `clock` defaults to `SystemTime::now` (injectable for deterministic tests), `host` defaults to `HostInfo::current()` (reads `HOSTNAME`, falling back to `COMPUTERNAME` or `"unknown"` — env-only, no unsafe/libc), and `git_commit` defaults to `None` in the core library (populated by `mallops-cli`).
+- `pipeline_hash`: `blake3::derive_key("mallops pipeline v1", ...)` over the canonical JSON array of validated nodes in topological order (`id`, `use`, `BlockSpec.version`, `config_hash`, `in`, `seed`).
+- Event order and statuses:
+  - Started node: `BlockStarted` → one `ArtifactProduced` per output in `NodeSummary.outputs` → `BlockFinished`. Cache hits still emit `BlockStarted`, `ArtifactProduced` for every cached output, and `BlockFinished` with `cached: true`.
+  - Node that never starts (stopped by `gate`, cancelled before starting, or unscheduled): only `BlockFinished` with `duration_ms: 0` and `cached: false`.
+  - Panicking node task: `BlockStarted` (already emitted) followed by `BlockFinished` (`status: "failed"`, `duration_ms: 0`, `cached: false`).
+  - `RunFinished.status`: `Cancelled` if `RuntimeConfig::cancel` fired, else `Succeeded` if `RunSummary::is_success()`, else `Failed`.
+- Dispatch and fault isolation: every event is sent to each sink in `RuntimeConfig::lineage` in order; if a sink returns `Err`, the runtime logs `tracing::warn!` and continues to the remaining sinks — a failing sink never fails the run.
+- Conformance suite: `mallops_core::lineage::conformance::check_sink` verifies a full event sequence covering all four `Status` variants and interleaved concurrent runs (supporting both read-back and write-only sinks), reusable by future sink backends (SQLite, OpenLineage, MLflow — `mallops-std` features or plugins in v0.2+).
 - Caching does **not** depend on lineage: it uses artifact hashes and `cache/<key>.json` in the store.
 
 ## 7. Serving

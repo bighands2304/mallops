@@ -382,6 +382,8 @@ fn run_store_verify_ok_and_detects_tampering() {
     );
 }
 
+/// Unix only: on Windows `Command::new("git")` resolves only `git.exe`, not a script shim.
+#[cfg(unix)]
 #[test]
 fn run_spawns_git() {
     let wd = WorkDir::new();
@@ -390,7 +392,6 @@ fn run_spawns_git() {
     let marker = wd.path().join("git-ran.marker");
     let fake_commit = "0123456789abcdef0123456789abcdef01234567";
 
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let script = fake_bin.join("git");
@@ -404,19 +405,6 @@ fn run_spawns_git() {
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    #[cfg(windows)]
-    {
-        let script = fake_bin.join("git.cmd");
-        fs::write(
-            &script,
-            format!(
-                "@echo off\r\necho ran>\"{}\"\r\necho {fake_commit}\r\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
-    }
-
     // Place mallops.yaml in a nested directory to also verify relative store.path resolution.
     let yaml = wd.write("proj/mallops.yaml", TWO_NODE_PIPELINE);
     let out = Command::new(BIN)

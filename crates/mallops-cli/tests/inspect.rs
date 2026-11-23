@@ -185,13 +185,6 @@ blocks:
         fs::set_permissions(&git_path, perms).unwrap();
     }
 
-    #[cfg(windows)]
-    {
-        let git_path = fake_bin.path().join("git.cmd");
-        let script = format!("@echo touched > \"{}\"\r\n@exit /b 0\r\n", marker.display());
-        fs::write(&git_path, script).unwrap();
-    }
-
     for tmp_dir in [empty_tmp.path(), missing_tmp.as_path()] {
         for args in [
             &["validate"][..],
@@ -246,6 +239,9 @@ blocks:
         "expected Block::run to execute in positive control: {}",
         String::from_utf8_lossy(&run.stdout)
     );
+    // ponytail: unix only. On Windows `Command::new("git")` resolves only `git.exe`, so a
+    // script shim is never found; the TMPDIR, store and `Block::run` checks still apply there.
+    #[cfg(unix)]
     assert!(marker.exists(), "positive control: run must spawn git");
     assert!(
         dir.path().join(".mallops").exists(),

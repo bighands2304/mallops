@@ -4,6 +4,8 @@
 //! commits block output drafts to the store, propagates failure, skip and cancellation,
 //! and reports per-node results in a [`RunSummary`].
 
+#[allow(dead_code)] // ponytail: removed by 8.2 once run_node uses the cache
+mod cache;
 mod commit;
 
 use std::collections::{BTreeMap, HashMap};
@@ -34,6 +36,8 @@ pub struct RuntimeConfig {
     pub workdir_root: PathBuf,
     /// External cancellation; blocks observe it through `ctx.cancel()`.
     pub cancel: CancelToken,
+    /// Run-level cache bypass (`--no-cache`): every node executes and no cache entry is read.
+    pub no_cache: bool,
 }
 
 impl RuntimeConfig {
@@ -48,6 +52,7 @@ impl RuntimeConfig {
             workdir_root: std::env::temp_dir(),
             // A dropped source never fires (see `CancelToken::cancelled`).
             cancel: CancelSource::new().token(),
+            no_cache: false,
         }
     }
 }
@@ -60,6 +65,7 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("secret_provider", &"<SecretProvider>")
             .field("workdir_root", &self.workdir_root)
             .field("cancel", &self.cancel)
+            .field("no_cache", &self.no_cache)
             .finish()
     }
 }
@@ -92,6 +98,8 @@ pub struct NodeSummary {
     pub reason: Option<String>,
     /// The error of a [`Status::Failed`] node (or `Error::Cancelled` from a cancelled block).
     pub error: Option<Error>,
+    /// `true` when the outputs were served from the cache and the block did not run.
+    pub cached: bool,
 }
 
 /// Result of a pipeline run.
@@ -260,6 +268,7 @@ fn finished(
         outputs,
         reason,
         error: None,
+        cached: false,
     }
 }
 

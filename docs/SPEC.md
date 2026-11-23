@@ -70,9 +70,22 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-STO-5: garbage collection of artifacts unreachable from retained runs — v0.2.
 
 ### 3.3 Preprocessing (data → features)
-- FR-PRE-1: tabular transforms (select, filter, impute, scale, encode, split) on Arrow data — v0.1.
+- FR-PRE-1: tabular transforms on Arrow data — in v0.1, `mallops-std` provides `std/preprocess.tabular` (feature `preprocess-tabular`, enabled by default, `Stage::Preprocess`, version `0.1.0`):
+  - Ports: input `data` (`kind: dataset`, `format: parquet`); outputs `train` and `test` (`kind: features`, `format: parquet`), `transform` (`kind: transform`, `format: json`), plus optional `validation` (`kind: features`, `format: parquet`), resolved via `Block::resolve_ports` if and only if `split.validation` is configured (wiring `features.validation` without `split.validation` fails `mallops validate` at `blocks.<id>.in.<port>`).
+  - Execution & caching: runs in `tokio::task::spawn_blocking` with `ctx.cancel()` checks, uses `CachePolicy::Deterministic { extra_hash: None }`, writes uncompressed `data.parquet` partitions (`created_by: "mallops-std"`) with `metadata["target"]` and `io_schema = { "features": [{ "name", "type" }], "target": { "name", "type" } }`, and writes the fitted transform to `transform.json`.
+  - `with:` config (`deny_unknown_fields`): `target` (non-empty column name; must exist in the input dataset, is never transformed, is always preserved by `select`, and is recorded in `metadata["target"]`) and `steps` (ordered list of `- <step>: { … }`).
+  - Step ordering (leakage prevention): `split` must appear **exactly once**. Stateless steps (`select`, `filter`) may appear before or after `split`; stateful/fitted steps (`impute`, `scale`, `encode`) are only allowed **after** `split` so parameters are fitted on the `train` partition alone and then applied to `train`, `validation` (if configured), and `test`.
+  - Supported column types: at `split` (and in the final output), every remaining column must be in the v0.1 subset `bool | int64 | float64 | string | date32`; unsupported Arrow types fail with `Error::Runtime` suggesting a `select` step before `split` to exclude them.
+  - Step semantics:
+    - `select: { columns: [...] }` (non-empty, unique): keeps the listed columns in order plus `target` appended if not already listed (target is optional when replaying at serving time).
+    - `filter: { column, op, value? }`: keeps rows matching `op` (`eq | ne | lt | le | gt | ge` with `value`: number on `int64`/`float64`, string on `utf8`, bool on `boolean`; `is_null | not_null` with `value` forbidden). Null values never satisfy a comparison; incompatible types fail with `Error::Runtime`. `filter` only shapes batch partitions and is **not** replayed at serving time.
+    - `split: { test, validation?, seed }`: `test` and optional `validation` in `(0, 1)` with `test + validation < 1`. Deterministic internal SplitMix64 PRNG + Fisher-Yates shuffle (no external RNG crate): the first `floor(n * test)` indices go to `test`, the next `floor(n * validation)` (if configured) to `validation`, and the remainder to `train`; placing `test` first keeps `test` identical when `validation` is toggled with the same `seed`. Each partition preserves original relative row order (sorted indices). An empty dataset or any empty requested partition fails with `Error::Runtime`.
+    - `impute: { strategy: mean | median | constant, value?, columns? }`: default columns are numeric (`int64`, `float64`) non-target; `value` (number or string) is required for `constant` and forbidden for `mean`/`median`. `mean` and `median` compute over non-null values (all-null column fails). `int64` stays `int64` when the fill value is an exact integer, otherwise it is cast to `float64`; `utf8` columns are supported with a string `constant`.
+    - `scale: { method: standard | minmax, columns? }`: default columns are numeric (`int64`, `float64`) non-target; `standard` fits `offset = mean` and `scale = population stddev`, `minmax` fits `offset = min` and `scale = max - min` (all-null column fails). Outputs `float64` via `(x - offset) / scale`; `scale == 0` maps valid values to `0.0`; nulls remain null.
+    - `encode: { method: ordinal | one_hot, columns? }`: default columns are `utf8` non-target; collects sorted unique non-null categories (`BTreeSet`) from `train`. `ordinal` outputs `int64` category indices (`-1` for unseen or null); `one_hot` replaces `<col>` in place with `float64` columns `<col>=<cat>` in category order (all `0.0` for unseen or null).
+    - Explicit `columns` referencing `target`, a missing column, or an unsupported type fail with `Error::Runtime` naming the column.
 - FR-PRE-2: user-defined transforms (Rust closure, WASM, external process).
-- FR-PRE-3: fitted transforms are themselves artifacts, so serving reuses the exact same preprocessing.
+- FR-PRE-3: fitted transforms are themselves artifacts (`kind: transform`, `format: json`, `payload/transform.json` = `{"v":1,"target":…,"input":[…],"steps":[…]}` serialized deterministically, `io_schema = { "input": […], "output": […] }`), capturing fitted steps (`select`, `impute`, `scale`, `ordinal`, `one_hot`; never `filter` or `split`). `mallops_std::FittedTransform` reloads the artifact (`from_dir`, rejecting versions other than `1`) and replays it on Arrow batches (`apply_batch`) or JSON row arrays (`apply_json`: columns from `input`, target optional, unknown keys ignored, type mismatch reported with row index and column name), so serving applies the exact same preprocessing.
 
 ### 3.4 Training
 - FR-TRN-1: native Rust training (linfa for classic ML) — v0.1.
@@ -182,13 +195,13 @@ blocks:
     with:
       target: churned
       steps:
+        - split: { test: 0.2, seed: 42 }     # optional `validation: 0.1` adds `features.validation`
         - impute: { strategy: median }
         - scale: { method: standard }
-        - split: { test: 0.2, seed: 42 }
 
   model:
     use: std/train.external            # any language, any library
-    in: { train: features.train }
+    in: { train: features.train }      # wire `val: features.validation` when `split.validation` is set
     with:
       command: ["python", "train.py"]
       flavor: sklearn-pickle
@@ -228,7 +241,7 @@ Rules:
 - Store and lineage backend mapping in the v0.1 CLI (`check_backends`, enforced by `validate`, `run`, and `store verify`):
   - `store.kind` accepts `local` (`LocalStore` at `<yaml-dir>/<store.path>`, where `<yaml-dir>` is the parent directory of the `mallops.yaml` path, defaulting to `.` when empty) and `memory` (`MemoryStore`). Any other `store.kind` fails with an error.
   - `lineage: off` disables lineage (`RuntimeConfig::lineage = vec![]`); otherwise every configured sink must have `sink: json` (`JsonSink` on the configured store). Any other sink name fails with an error.
-- Built-in blocks in `mallops-cli`: `core/noop` (version `1.0.0`, `Stage::Custom`, optional input `in: blob`, output `out: blob` with `format: noop` and empty payload; test affordances `fail: "<message>"` and `skip: "<reason>"` in `with:`) plus all feature-enabled standard blocks registered via `mallops_std::register_std(&mut registry)` (in v0.1 so far: `std/ingest.csv`, `std/ingest.parquet`).
+- Built-in blocks in `mallops-cli`: `core/noop` (version `1.0.0`, `Stage::Custom`, optional input `in: blob`, output `out: blob` with `format: noop` and empty payload; test affordances `fail: "<message>"` and `skip: "<reason>"` in `with:`) plus all feature-enabled standard blocks registered via `mallops_std::register_std(&mut registry)` (in v0.1 so far: `std/ingest.csv`, `std/ingest.parquet`, `std/preprocess.tabular`).
 - Latest run pointer (`runs/latest.json`): after `mallops run`, if and only if every node is `Succeeded`, the CLI writes `runs/latest.json` via `ArtifactStore::put_meta` (`meta/runs/latest.json` on `LocalStore`) as `{"v":1,"pipeline":"<name>","run":"<run-id>","outputs":{"<node>":{"<port>":"<artifact-id>"}}}` (deterministic key order via `BTreeMap`), so `mallops serve` can resolve `serve.package` without an explicit id. If any node is `Skipped` (with no failed/cancelled nodes), `mallops run` leaves any previous `runs/latest.json` unchanged, prints `latest.json not updated: <S> skipped`, and exits `0`. A failed run leaves any previous `runs/latest.json` unchanged and exits `1` (`error: run failed`).
 - A JSON Schema for `mallops.yaml` can be generated via the optional `schema` feature (`schemars`) for editor completion.
 
@@ -278,8 +291,8 @@ Per-run provenance (`run`, `node`) is **not** part of `manifest.json`; it is rec
 | `kind` | Typical `format` values | Notes |
 |---|---|---|
 | `dataset` | `parquet`, `arrow-ipc`, `csv`, `json`, `images`, `tfrecord`, any | Arrow/Parquet is the interchange default for std blocks only ([ADR-0002](adr/0002-arrow-default-interchange.md)): `std/ingest.*` emit `format: parquet` with a single uncompressed `payload/data.parquet` file (`created_by: "mallops-std"`, deterministic per `mallops-std` version, source schema metadata stripped) |
-| `features` | as dataset | preprocessed feature splits |
-| `transform` | `json`, `bin`, `pickle`, any | fitted preprocessor (scaler, imputer, encoder…) reused by `package` and `serve` |
+| `features` | as dataset | preprocessed feature splits: `std/preprocess.tabular` emits `format: parquet` (`payload/data.parquet`, uncompressed) with `metadata["target"]` and `io_schema: {"features": [{"name", "type"}], "target": {"name", "type"}}` |
+| `transform` | `json`, `bin`, `pickle`, any | fitted preprocessor (scaler, imputer, encoder…) reused by `package` and `serve`: `std/preprocess.tabular` emits `format: json` (`payload/transform.json` = `{"v":1,"target":…,"input":[…],"steps":[…]}`) with `io_schema: {"input": [{"name", "type"}], "output": [{"name", "type"}]}` |
 | `model` | `onnx`, `safetensors`, `torchscript`, `pickle`, `joblib`, `gguf`, `xgboost-json`, `savedmodel`, any | `flavor` selects the predictor |
 | `metrics` | `json` | key → number map + optional plots |
 | `package` | `dir`, `oci` | model + transforms + manifest |

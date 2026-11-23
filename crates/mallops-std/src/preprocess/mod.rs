@@ -9,6 +9,7 @@ mod split;
 pub(crate) mod steps;
 pub mod transform;
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -228,8 +229,19 @@ impl PreprocessConfig {
                         ),
                     );
                 }
-                Step::Select(s) if s.columns.is_empty() => {
-                    return err(i, "select.columns must not be empty".into());
+                Step::Select(s) => {
+                    if s.columns.is_empty() {
+                        return err(i, "select.columns must not be empty".into());
+                    }
+                    let mut seen = HashSet::with_capacity(s.columns.len());
+                    for col in &s.columns {
+                        if !seen.insert(col.as_str()) {
+                            return err(
+                                i,
+                                format!("select.columns contains duplicate column `{col}`"),
+                            );
+                        }
+                    }
                 }
                 Step::Filter(f) => {
                     let unary = matches!(f.op, FilterOp::IsNull | FilterOp::NotNull);
@@ -293,17 +305,25 @@ impl PreprocessTabular {
 }
 
 /// Maps every Arrow field of `schema` into the v0.1 [`Column`] subset.
-fn columns_from_schema(schema: &Schema) -> Result<Vec<Column>, Error> {
+fn columns_from_schema(schema: &Schema, target: &str) -> Result<Vec<Column>, Error> {
     schema
         .fields()
         .iter()
         .map(|f| {
             let ty = ColumnType::from_data_type(f.data_type()).ok_or_else(|| {
-                Error::Runtime(format!(
-                    "column `{}` has unsupported type `{}`; supported types are bool, int64, float64, string, date32 — use a `select` step before `split` to exclude it",
-                    f.name(),
-                    f.data_type()
-                ))
+                if f.name() == target {
+                    Error::Runtime(format!(
+                        "target column `{}` has unsupported type `{}`; supported types are bool, int64, float64, string, date32",
+                        f.name(),
+                        f.data_type()
+                    ))
+                } else {
+                    Error::Runtime(format!(
+                        "column `{}` has unsupported type `{}`; supported types are bool, int64, float64, string, date32 — use a `select` step before `split` to exclude it",
+                        f.name(),
+                        f.data_type()
+                    ))
+                }
             })?;
             Ok(Column {
                 name: f.name().clone(),
@@ -369,70 +389,63 @@ fn execute_blocking(
         )));
     }
 
-    let mut fitted_steps = Vec::new();
-    let mut splits: Option<split::SplitBatches> = None;
-    let mut transform_input: Option<Vec<Column>> = None;
+    let Some((split_pos, split_step)) = cfg.steps.iter().enumerate().find_map(|(i, s)| match s {
+        Step::Split(sp) => Some((i, *sp)),
+        _ => None,
+    }) else {
+        return Err(Error::Config("steps: a `split` step is required".into()));
+    };
+    let (before_split, after_split) = (&cfg.steps[..split_pos], &cfg.steps[split_pos + 1..]);
 
-    for step in &cfg.steps {
+    let mut fitted_steps = Vec::new();
+
+    for step in before_split {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        match (&mut splits, step) {
-            (None, Step::Select(_)) => {
+        match step {
+            Step::Select(_) => {
                 let fitted = steps::fit(step, &cfg.target, &batch)?;
                 batch = fitted.apply(&batch)?;
                 fitted_steps.push(fitted);
             }
-            (None, Step::Filter(f)) => {
+            Step::Filter(f) => {
                 batch = steps::filter(f, &batch)?;
             }
-            (None, Step::Split(s)) => {
-                transform_input = Some(columns_from_schema(batch.schema().as_ref())?);
-                splits = Some(split::split_batch(&batch, *s)?);
+            _ => {}
+        }
+    }
+
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let transform_input = columns_from_schema(batch.schema().as_ref(), &cfg.target)?;
+    let mut splits = split::split_batch(&batch, split_step)?;
+
+    for step in after_split {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        match step {
+            Step::Filter(f) => {
+                splits.map(|b| steps::filter(f, b))?;
+                splits.check_non_empty()?;
             }
-            (Some(part), Step::Filter(f)) => {
-                part.train = steps::filter(f, &part.train)?;
-                part.test = steps::filter(f, &part.test)?;
-                if let Some(val) = part.validation.take() {
-                    part.validation = Some(steps::filter(f, &val)?);
-                }
-            }
-            (Some(part), Step::Select(_) | Step::Impute(_) | Step::Scale(_) | Step::Encode(_)) => {
-                let fitted = steps::fit(step, &cfg.target, &part.train)?;
-                part.train = fitted.apply(&part.train)?;
-                part.test = fitted.apply(&part.test)?;
-                if let Some(val) = part.validation.take() {
-                    part.validation = Some(fitted.apply(&val)?);
-                }
+            Step::Select(_) | Step::Impute(_) | Step::Scale(_) | Step::Encode(_) => {
+                let fitted = steps::fit(step, &cfg.target, &splits.train)?;
+                splits.map(|b| fitted.apply(b))?;
                 fitted_steps.push(fitted);
             }
-            (None, s) => {
-                return Err(Error::Config(format!(
-                    "`{}` must come after `split`",
-                    s.name()
-                )));
-            }
-            (Some(_), Step::Split(_)) => {
-                return Err(Error::Config("`split` must appear exactly once".into()));
-            }
+            Step::Split(_) => {}
         }
     }
 
-    let splits = splits.ok_or_else(|| Error::Config("steps: a `split` step is required".into()))?;
-    let transform_input =
-        transform_input.ok_or_else(|| Error::Config("steps: a `split` step is required".into()))?;
-
-    let output_cols = columns_from_schema(splits.train.schema().as_ref())?;
-    let mut features = Vec::with_capacity(output_cols.len().saturating_sub(1));
-    let mut target_col = None;
-    for col in &output_cols {
-        if col.name == cfg.target {
-            target_col = Some(col.clone());
-        } else {
-            features.push(col.clone());
-        }
-    }
-    let target_col = target_col.ok_or_else(|| {
+    let output_cols = columns_from_schema(splits.train.schema().as_ref(), &cfg.target)?;
+    let (targets, features): (Vec<_>, Vec<_>) = output_cols
+        .iter()
+        .cloned()
+        .partition(|c| c.name == cfg.target);
+    let target_col = targets.into_iter().next().ok_or_else(|| {
         Error::Runtime(format!(
             "target column `{}` missing after preprocessing",
             cfg.target
@@ -444,17 +457,25 @@ fn execute_blocking(
         "target": target_col,
     });
 
-    if cancel.is_cancelled() {
-        return Err(Error::Cancelled);
+    let mut drafts = OutputDrafts::new();
+    for (port, part) in [
+        (TRAIN, Some(splits.train)),
+        (TEST, Some(splits.test)),
+        (VALIDATION, splits.validation),
+    ] {
+        let Some(part) = part else { continue };
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let path = write_partition(&workdir, port, part, &in_file, &cancel)?;
+        drafts = drafts.with(
+            port,
+            OutputDraft::new(
+                features_manifest(&cfg.target, &features_io),
+                DraftPayload::File(path),
+            ),
+        );
     }
-    let train_path = write_partition(&workdir, TRAIN, splits.train, &in_file, &cancel)?;
-    let test_path = write_partition(&workdir, TEST, splits.test, &in_file, &cancel)?;
-    let val_path = match splits.validation {
-        Some(val) => Some(write_partition(
-            &workdir, VALIDATION, val, &in_file, &cancel,
-        )?),
-        None => None,
-    };
 
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -473,37 +494,10 @@ fn execute_blocking(
         "output": output_cols,
     }));
 
-    let mut drafts = OutputDrafts::new()
-        .with(
-            TRAIN,
-            OutputDraft::new(
-                features_manifest(&cfg.target, &features_io),
-                DraftPayload::File(train_path),
-            ),
-        )
-        .with(
-            TEST,
-            OutputDraft::new(
-                features_manifest(&cfg.target, &features_io),
-                DraftPayload::File(test_path),
-            ),
-        )
-        .with(
-            TRANSFORM,
-            OutputDraft::new(transform_manifest, DraftPayload::File(transform_path)),
-        );
-
-    if let Some(path) = val_path {
-        drafts = drafts.with(
-            VALIDATION,
-            OutputDraft::new(
-                features_manifest(&cfg.target, &features_io),
-                DraftPayload::File(path),
-            ),
-        );
-    }
-
-    Ok(drafts)
+    Ok(drafts.with(
+        TRANSFORM,
+        OutputDraft::new(transform_manifest, DraftPayload::File(transform_path)),
+    ))
 }
 
 impl Block for PreprocessTabular {
@@ -722,6 +716,10 @@ mod tests {
             (
                 json!([{ "select": { "columns": [] } }, split]),
                 "must not be empty",
+            ),
+            (
+                json!([{ "select": { "columns": ["a", "a"] } }, split]),
+                "duplicate column",
             ),
             (
                 json!([split, { "scale": { "method": "robust" } }]),
@@ -1026,10 +1024,52 @@ mod tests {
         .unwrap();
         let bad_inputs = store_dataset(&store, &bad_batch).await;
         let workdir3 = tempfile::tempdir().unwrap();
-        let (ctx3, _c3) = make_ctx(workdir3.path().to_path_buf(), Arc::clone(&store), cfg);
+        let (ctx3, _c3) = make_ctx(
+            workdir3.path().to_path_buf(),
+            Arc::clone(&store),
+            cfg.clone(),
+        );
         let err = block.run(&ctx3, bad_inputs).await.unwrap_err();
         assert!(
             matches!(&err, Error::Runtime(m) if m.contains("select") && m.contains("i32col")),
+            "got {err:?}"
+        );
+
+        // Unsupported target type gets a dedicated message (does not suggest `select`).
+        let bad_target = RecordBatch::try_from_iter([
+            (
+                "x",
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])) as ArrayRef,
+            ),
+            ("y", Arc::new(Int32Array::from(vec![0, 1, 0, 1, 0])) as _),
+        ])
+        .unwrap();
+        let bad_target_inputs = store_dataset(&store, &bad_target).await;
+        let workdir4 = tempfile::tempdir().unwrap();
+        let (ctx4, _c4) = make_ctx(workdir4.path().to_path_buf(), Arc::clone(&store), cfg);
+        let err = block.run(&ctx4, bad_target_inputs).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("target column `y`") && !m.contains("select")),
+            "got {err:?}"
+        );
+
+        // Post-split filter that empties a partition errors with the shared message.
+        let inputs2 = store_dataset(&store, &sample_batch(10)).await;
+        let workdir5 = tempfile::tempdir().unwrap();
+        let (ctx5, _c5) = make_ctx(
+            workdir5.path().to_path_buf(),
+            Arc::clone(&store),
+            json!({
+                "target": "y",
+                "steps": [
+                    { "split": { "test": 0.2, "seed": 1 } },
+                    { "filter": { "column": "id", "op": "gt", "value": 999 } }
+                ]
+            }),
+        );
+        let err = block.run(&ctx5, inputs2).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("empty `train` partition")),
             "got {err:?}"
         );
     }
@@ -1314,5 +1354,96 @@ mod tests {
             "serving JSON output must not contain target column"
         );
         assert_feature_batches_close(&block_test, &from_json, "y");
+    }
+
+    #[tokio::test]
+    async fn preprocess_steps_sequence_full_block_pipeline() {
+        let store = Arc::new(MemoryStore::new());
+        let dataset = RecordBatch::try_from_iter([
+            (
+                "drop_me",
+                Arc::new(Int32Array::from(vec![1; 12])) as ArrayRef,
+            ),
+            (
+                "num",
+                Arc::new(Int64Array::from(vec![
+                    Some(-5), // filtered out before split
+                    Some(10),
+                    Some(20),
+                    None,
+                    Some(30),
+                    Some(40),
+                    Some(50),
+                    None,
+                    Some(60),
+                    Some(70),
+                    Some(80),
+                    Some(90),
+                ])) as _,
+            ),
+            (
+                "cat",
+                Arc::new(StringArray::from(vec![
+                    Some("drop"),
+                    Some("b"),
+                    Some("a"),
+                    None,
+                    Some("a"),
+                    Some("b"),
+                    Some("a"),
+                    Some("b"),
+                    None,
+                    Some("a"),
+                    Some("b"),
+                    Some("a"),
+                ])) as _,
+            ),
+            (
+                "y",
+                Arc::new(Int64Array::from(vec![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1])) as _,
+            ),
+        ])
+        .unwrap();
+
+        let inputs = store_dataset(&store, &dataset).await;
+        // Full sequence: select (drops unsupported i32) -> filter -> split -> impute -> scale -> encode.
+        let config = json!({
+            "target": "y",
+            "steps": [
+                { "select": { "columns": ["num", "cat"] } },
+                { "filter": { "column": "num", "op": "ne", "value": -5 } },
+                { "split": { "test": 0.2, "seed": 7 } },
+                { "impute": { "strategy": "mean" } },
+                { "impute": { "strategy": "constant", "value": "a" } },
+                { "scale": { "method": "minmax" } },
+                { "encode": { "method": "one_hot" } }
+            ]
+        });
+
+        let (_workdir, drafts) = run_block(&store, &inputs, config).await;
+        let cancel = CancelSource::new().token();
+        let DraftPayload::File(train_file) = &drafts.get(TRAIN).unwrap().payload else {
+            panic!("expected file");
+        };
+        let DraftPayload::File(test_file) = &drafts.get(TEST).unwrap().payload else {
+            panic!("expected file");
+        };
+        let train = read_parquet_batch(train_file, &cancel).unwrap();
+        let test = read_parquet_batch(test_file, &cancel).unwrap();
+
+        // Filter dropped row 0 (num == -5) and the two null-num rows (null never satisfies `ne`),
+        // leaving 9 rows: floor(9 * 0.2) = 1 test, 8 train.
+        assert_eq!(test.num_rows(), 1);
+        assert_eq!(train.num_rows(), 8);
+
+        let cols: Vec<String> = train
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(cols, vec!["num", "cat=a", "cat=b", "y"]);
+        assert_eq!(train.column(0).null_count(), 0);
+        assert_eq!(test.column(0).null_count(), 0);
     }
 }

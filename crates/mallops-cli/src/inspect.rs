@@ -64,6 +64,7 @@ pub(crate) fn validate(file: &Path) -> anyhow::Result<()> {
             return Err(e);
         }
     };
+    crate::run::check_backends(pipeline.config())?;
     println!(
         "ok: {} ({} blocks)",
         pipeline.config().name,

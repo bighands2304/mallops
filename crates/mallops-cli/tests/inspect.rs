@@ -196,3 +196,19 @@ fn inspect_no_execution_on_validate_and_graph() {
         "validate/graph must never create the artifact store"
     );
 }
+
+#[test]
+fn inspect_validate_rejects_unknown_store_and_sink() {
+    let dir = tempfile::tempdir().unwrap();
+    for (section, needle) in [
+        ("store: { kind: s3 }", "store kind `s3`"),
+        ("lineage: [{ sink: openlineage }]", "openlineage"),
+    ] {
+        let yaml = format!("version: 1\nname: p\n{section}\nblocks:\n  a: {{ use: core/noop }}\n");
+        fs::write(dir.path().join("mallops.yaml"), yaml).unwrap();
+        let out = run_cli(dir.path(), &["validate"]);
+        assert_eq!(out.status.code(), Some(1), "{section}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{section}: {stderr}");
+    }
+}

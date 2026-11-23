@@ -1,0 +1,7 @@
+---
+source: crates/mallops-cli/tests/inspect.rs
+expression: stderr
+---
+error: blocks.unknown_block.use: unknown block `std/missing`
+error: blocks.bad_input.in.extra: input port `extra` is not declared by the block
+error: blocks.bad_input.in.in: unknown upstream node `nonexistent`

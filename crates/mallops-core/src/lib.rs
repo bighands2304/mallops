@@ -7,6 +7,7 @@ mod block;
 pub mod config;
 mod context;
 mod error;
+pub mod lineage;
 mod pipeline;
 mod registry;
 mod runtime;
@@ -22,6 +23,7 @@ pub use context::{
     SecretProvider,
 };
 pub use error::{Error, ValidationError};
+pub use lineage::{HostInfo, JsonSink, LineageEvent, LineageSink, Timestamp};
 pub use pipeline::{NodeBuilder, PipelineBuilder, ValidatedNode, ValidatedPipeline};
 pub use registry::{BlockRef, BlockRegistry};
 pub use runtime::{NodeSummary, RunSummary, Runtime, RuntimeConfig, Status};

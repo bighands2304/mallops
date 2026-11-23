@@ -10,12 +10,13 @@ mod commit;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
+use crate::lineage::{HostInfo, JsonSink, LineageSink};
 use crate::{
     ArtifactId, ArtifactStore, BlockOutcome, CancelSource, CancelToken, Context, EnvSecretProvider,
     Error, Inputs, RunId, SecretProvider, ValidatedNode, ValidatedPipeline,
@@ -37,21 +38,34 @@ pub struct RuntimeConfig {
     pub cancel: CancelToken,
     /// Run-level cache bypass (`--no-cache`): every node executes; no cache entry is read or written.
     pub no_cache: bool,
+    /// Lineage sinks; empty = `lineage: off`. Default: one [`JsonSink`] on `store`.
+    pub lineage: Vec<Arc<dyn LineageSink>>,
+    /// Clock for lineage timestamps (injectable for deterministic tests).
+    pub clock: fn() -> SystemTime,
+    /// Host recorded in `RunStarted`.
+    pub host: HostInfo,
+    /// Git commit recorded in `RunStarted` (set by the CLI; `None` in the library).
+    pub git_commit: Option<String>,
 }
 
 impl RuntimeConfig {
     /// Defaults: `max_jobs` = available parallelism, [`EnvSecretProvider`],
-    /// `workdir_root` = [`std::env::temp_dir`], a cancel token that never fires.
+    /// `workdir_root` = [`std::env::temp_dir`], a cancel token that never fires,
+    /// lineage to a [`JsonSink`] on `store`, [`SystemTime::now`], [`HostInfo::current`].
     #[must_use]
     pub fn new(store: Arc<dyn ArtifactStore>) -> Self {
         Self {
             max_jobs: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            lineage: vec![Arc::new(JsonSink::new(Arc::clone(&store)))],
             store,
             secret_provider: Arc::new(EnvSecretProvider),
             workdir_root: std::env::temp_dir(),
             // A dropped source never fires (see `CancelToken::cancelled`).
             cancel: CancelSource::new().token(),
             no_cache: false,
+            clock: SystemTime::now,
+            host: HostInfo::current(),
+            git_commit: None,
         }
     }
 }
@@ -65,12 +79,16 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("workdir_root", &self.workdir_root)
             .field("cancel", &self.cancel)
             .field("no_cache", &self.no_cache)
+            .field("lineage_sinks", &self.lineage.len())
+            .field("host", &self.host)
+            .field("git_commit", &self.git_commit)
             .finish()
     }
 }
 
 /// Final state of a node in a run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Status {
     /// The block ran and its outputs were committed.

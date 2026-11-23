@@ -61,9 +61,11 @@ Crates are created only when implemented. Splitting `mallops-std` into per-stage
 | Crate | Depends on | Dependencies |
 |---|---|---|
 | `mallops-core` | — | Core allowlist: `tokio`, `serde`, `serde_json`, `blake3`, `tracing`, `thiserror`, `ulid`, `tempfile`; optional features: `yaml` (`yaml_serde`, default), `schema` (`schemars`) ([ADR-0007](adr/0007-core-contracts-revision.md)) |
-| `mallops-std` | core | per feature: `arrow`, `polars`, `linfa`, `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
-| `mallops-cli` | core (`mallops-std` from #11) | `clap` (`derive`), `anyhow`, `serde_json`, `tracing-subscriber` (`fmt`), `tokio` (`rt-multi-thread`); dev: `insta`, `tempfile` |
+| `mallops-std` | core | optional behind per-block Cargo features (`--no-default-features` pulls in only `mallops-core`): `ingest-csv` (`arrow-csv` `59`), `ingest-parquet`, meta-feature `ingest = ["ingest-csv", "ingest-parquet"]` (default), sharing internal `_ingest` (`arrow-array` `59`, `arrow-schema` `59`, `parquet` `59` with `default-features = false, features = ["arrow"]` — pinned to `59` because `60` requires Rust 1.88 > MSRV 1.85 — plus workspace `blake3`, `serde`, `serde_json`, `tokio`); future features: `linfa`, `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
+| `mallops-cli` | core, std | `clap` (`derive`), `anyhow`, `serde_json`, `tracing-subscriber` (`fmt`), `tokio` (`rt-multi-thread`); dev: `insta`, `tempfile` |
 | `mallops-edge` | core, std (`profile-edge`, ADR-0008) | `tonic`, `rumqttc` (via `serve-mqtt`) |
+
+`mallops-std` exposes `pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error>`, registering only the blocks whose Cargo features are enabled and returning `Error::Validation` if a block id is already registered. `std/ingest.csv` and `std/ingest.parquet` share the internal `ingest` module: expected `schema` columns (`bool | int64 | float64 | string | date32`), deterministic uncompressed `data.parquet` output (`kind: dataset`, `format: parquet`), streamed BLAKE3 `extra_hash` in `CachePolicy::Deterministic`, and `tokio::task::spawn_blocking` for all file I/O and conversion (relative paths resolve against the process cwd, which `mallops run` sets to the directory of `mallops.yaml`).
 
 ## 3. Core abstractions
 
@@ -255,7 +257,7 @@ flowchart TB
 | WASM | portable, untrusted, light compute | strong (sandboxed, post-v0.1) | low |
 | External | other languages, GPUs, heavy frameworks | process/container (trusted, not a sandbox) | process spawn + IPC |
 
-- **Explicit registry in v0.1**: `BlockRegistry` is an explicit, instance-local map populated via `registry.register(...)`. `mallops-cli` registers the built-in `core/noop` block (with `mallops_std::register_std(&mut registry)` joining in #11). This supersedes compile-time `inventory` registration from [ADR-0003](adr/0003-plugins-wasm-and-grpc.md) for v0.1 to avoid linker stripping and global test state ([ADR-0007](adr/0007-core-contracts-revision.md)). Blocks are keyed by their `spec().id`, parsed as a `BlockRef` (grammar in SPEC §5); registering an id twice returns `Error::Validation` and keeps the original, and `list()` returns specs sorted by id.
+- **Explicit registry in v0.1**: `BlockRegistry` is an explicit, instance-local map populated via `registry.register(...)`. `mallops-cli` registers the built-in `core/noop` block and calls `mallops_std::register_std(&mut registry)` (returning `Result<(), Error>` so duplicate block ids fail with `Error::Validation`). This supersedes compile-time `inventory` registration from [ADR-0003](adr/0003-plugins-wasm-and-grpc.md) for v0.1 to avoid linker stripping and global test state ([ADR-0007](adr/0007-core-contracts-revision.md)). Blocks are keyed by their `spec().id`, parsed as a `BlockRef` (grammar in SPEC §5); registering an id twice returns `Error::Validation` and keeps the original, and `list()` returns specs sorted by id.
 - **External CLI contract**: mallops materializes read-only inputs into the workdir, writes `inputs.json` (materialized paths + manifests) and `config.json` (never containing secrets; secrets pass only via explicit env allowlist), runs `command` via `argv` (never `sh -c`), and collects output files declared in `outputs.json` after validating every path with `RelPath` and rejecting symlinks. The gRPC variant adds long-lived workers and streaming. See [ADR-0003](adr/0003-plugins-wasm-and-grpc.md).
 
 ## 6. Artifact store and lineage

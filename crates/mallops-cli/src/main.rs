@@ -123,7 +123,9 @@ fn main() -> ExitCode {
     match res {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            if !e.is::<inspect::Reported>() {
+                eprintln!("error: {e:#}");
+            }
             ExitCode::FAILURE
         }
     }

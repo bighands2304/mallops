@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arrow_csv::ReaderBuilder;
 use arrow_csv::reader::Format;
-use arrow_schema::{Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use mallops_core::{
     Block, BlockOutcome, BlockSpec, BoxFuture, CachePolicy, CancelToken, Context, Error, Inputs,
     Stage,
@@ -73,6 +73,24 @@ fn check_header_names(expected: &[Column], header: &Schema) -> Result<(), Error>
     )))
 }
 
+/// Promotes inferred `Timestamp(Second)` columns to `Timestamp(Millisecond)`: Parquet has no
+/// seconds unit, so seconds would be stored as a bare `INT64` that pandas/pyarrow read as integers.
+fn parquet_native_timestamps(schema: &Schema) -> Schema {
+    Schema::new(
+        schema
+            .fields()
+            .iter()
+            .map(|f| match f.data_type() {
+                DataType::Timestamp(TimeUnit::Second, tz) => f
+                    .as_ref()
+                    .clone()
+                    .with_data_type(DataType::Timestamp(TimeUnit::Millisecond, tz.clone())),
+                _ => f.as_ref().clone(),
+            })
+            .collect::<Vec<Field>>(),
+    )
+}
+
 fn read_and_write_csv(cfg: &CsvConfig, out: &Path, cancel: &CancelToken) -> Result<(), Error> {
     let read_err = |e: &dyn std::fmt::Display| {
         Error::Runtime(format!("cannot read {}: {e}", cfg.path.display()))
@@ -116,7 +134,7 @@ fn read_and_write_csv(cfg: &CsvConfig, out: &Path, cancel: &CancelToken) -> Resu
                 )));
             }
             file.rewind().map_err(|e| read_err(&e))?;
-            inferred
+            parquet_native_timestamps(&inferred)
         }
     };
 
@@ -395,6 +413,29 @@ mod tests {
 
         let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total_rows, 151);
+    }
+
+    #[tokio::test]
+    async fn ingest_csv_inferred_seconds_timestamps_are_parquet_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_csv(dir.path(), "ts.csv", "ts\n2016-01-01 00:00:00\n");
+        let workdir = tempfile::tempdir().unwrap();
+        let (ctx, _cancel) = make_ctx(workdir.path(), json!({ "path": csv }));
+        IngestCsv::new().run(&ctx, Inputs::new()).await.unwrap();
+
+        // Read like a non-Arrow reader (pandas/pyarrow): Parquet types only, no `ARROW:schema` hint.
+        let file = File::open(workdir.path().join(DATA_FILE)).unwrap();
+        let opts = ::parquet::arrow::arrow_reader::ArrowReaderOptions::new()
+            .with_skip_arrow_metadata(true);
+        let builder =
+            ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new_with_options(
+                file, opts,
+            )
+            .unwrap();
+        assert_eq!(
+            builder.schema().field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
     }
 
     #[tokio::test]

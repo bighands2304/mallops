@@ -1035,7 +1035,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs 12.1"]
     async fn preprocess_scale_fits_on_train_only() {
         let store = Arc::new(MemoryStore::new());
         // Skewed values so train-only mean differs from full-dataset mean.

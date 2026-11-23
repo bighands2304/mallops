@@ -10,9 +10,7 @@
     allow(dead_code)
 )]
 mod ingest;
-// ponytail: skeleton of #12 (12.0); drop this allow once 12.1/12.2 wire every item (12.3).
 #[cfg(feature = "preprocess-tabular")]
-#[allow(dead_code)]
 mod preprocess;
 
 #[cfg(feature = "preprocess-tabular")]

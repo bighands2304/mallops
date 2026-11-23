@@ -56,7 +56,6 @@ impl ColumnType {
 
     /// Inverse of [`Self::data_type`]; `None` for types outside the v0.1 subset.
     #[cfg(feature = "preprocess-tabular")]
-    #[allow(dead_code)] // ponytail: used by preprocess run (12.2), drop the allow in 12.3
     pub(crate) fn from_data_type(dt: &DataType) -> Option<Self> {
         Some(match dt {
             DataType::Boolean => Self::Bool,

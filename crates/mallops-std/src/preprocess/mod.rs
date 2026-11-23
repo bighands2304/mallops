@@ -554,7 +554,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
+    use arrow_array::{Array, ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
     use mallops_core::{
         Artifact, ArtifactId, ArtifactStore, CachePolicy, CancelSource, MemorySecretProvider,
         MemoryStore, PayloadFile, PayloadSource, RelPath, RunId,
@@ -1096,5 +1096,223 @@ mod tests {
         let scale = params["scale"].as_f64().unwrap();
         assert!((offset - mean).abs() < 1e-9, "offset={offset}, mean={mean}");
         assert!((scale - std).abs() < 1e-9, "scale={scale}, std={std}");
+    }
+
+    fn assert_feature_batches_close(expected: &RecordBatch, actual: &RecordBatch, target: &str) {
+        assert_eq!(actual.num_rows(), expected.num_rows());
+        let exp_cols: Vec<usize> = expected
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name() != target)
+            .map(|(i, _)| i)
+            .collect();
+        let act_cols: Vec<usize> = actual
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name() != target)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(act_cols.len(), exp_cols.len());
+
+        for (&ei, &ai) in exp_cols.iter().zip(&act_cols) {
+            let ef = expected.schema().field(ei).clone();
+            let af = actual.schema().field(ai).clone();
+            assert_eq!(af.name(), ef.name());
+            assert_eq!(af.data_type(), ef.data_type());
+            let ea = expected.column(ei);
+            let aa = actual.column(ai);
+            match ef.data_type() {
+                arrow_schema::DataType::Float64 => {
+                    let e = ea.as_any().downcast_ref::<Float64Array>().unwrap();
+                    let a = aa.as_any().downcast_ref::<Float64Array>().unwrap();
+                    for row in 0..expected.num_rows() {
+                        assert_eq!(
+                            a.is_null(row),
+                            e.is_null(row),
+                            "col {} row {row}",
+                            ef.name()
+                        );
+                        if e.is_valid(row) {
+                            assert!(
+                                (a.value(row) - e.value(row)).abs() <= 1e-12,
+                                "col {} row {row}: actual={} expected={}",
+                                ef.name(),
+                                a.value(row),
+                                e.value(row)
+                            );
+                        }
+                    }
+                }
+                arrow_schema::DataType::Int64 => {
+                    let e = ea.as_any().downcast_ref::<Int64Array>().unwrap();
+                    let a = aa.as_any().downcast_ref::<Int64Array>().unwrap();
+                    for row in 0..expected.num_rows() {
+                        assert_eq!(
+                            a.is_null(row),
+                            e.is_null(row),
+                            "col {} row {row}",
+                            ef.name()
+                        );
+                        if e.is_valid(row) {
+                            assert_eq!(a.value(row), e.value(row), "col {} row {row}", ef.name());
+                        }
+                    }
+                }
+                dt => panic!("unexpected feature column type {dt:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transform_roundtrip_matches_block_test_split() {
+        let store = Arc::new(MemoryStore::new());
+        let ages = Int64Array::from(vec![
+            Some(20),
+            None,
+            Some(30),
+            Some(40),
+            None,
+            Some(50),
+            Some(25),
+            Some(35),
+            None,
+            Some(45),
+            Some(22),
+            Some(38),
+            None,
+            Some(28),
+            Some(33),
+        ]);
+        let scores = Float64Array::from(vec![
+            Some(1.5),
+            Some(2.5),
+            None,
+            Some(4.0),
+            Some(5.5),
+            None,
+            Some(3.0),
+            Some(7.5),
+            Some(2.0),
+            None,
+            Some(6.0),
+            Some(8.5),
+            Some(4.5),
+            None,
+            Some(9.0),
+        ]);
+        let cities = StringArray::from(vec![
+            Some("rome"),
+            Some("paris"),
+            Some("berlin"),
+            None,
+            Some("rome"),
+            Some("paris"),
+            Some("rome"),
+            None,
+            Some("berlin"),
+            Some("paris"),
+            Some("rome"),
+            Some("berlin"),
+            Some("paris"),
+            None,
+            Some("rome"),
+        ]);
+        let targets = Int64Array::from(vec![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]);
+        let dataset = RecordBatch::try_from_iter([
+            ("age", Arc::new(ages) as ArrayRef),
+            ("score", Arc::new(scores) as _),
+            ("city", Arc::new(cities) as _),
+            ("y", Arc::new(targets) as _),
+        ])
+        .unwrap();
+
+        let inputs = store_dataset(&store, &dataset).await;
+        let split_step = SplitStep {
+            test: 0.2,
+            validation: None,
+            seed: 42,
+        };
+        let config = json!({
+            "target": "y",
+            "steps": [
+                { "split": { "test": split_step.test, "seed": split_step.seed } },
+                { "impute": { "strategy": "median" } },
+                { "scale": { "method": "standard" } },
+                { "encode": { "method": "one_hot" } }
+            ]
+        });
+
+        let (_workdir, drafts) = run_block(&store, &inputs, config).await;
+
+        // Commit the transform draft into MemoryStore and materialize it into a fresh directory.
+        let transform_draft = drafts.get(TRANSFORM).unwrap();
+        let DraftPayload::File(transform_file) = &transform_draft.payload else {
+            panic!("expected DraftPayload::File for transform");
+        };
+        let transform_id = store
+            .put(
+                transform_draft.manifest.clone(),
+                PayloadSource::File(transform_file),
+            )
+            .await
+            .unwrap();
+        let fetch_dir = tempfile::tempdir().unwrap();
+        store.fetch(&transform_id, fetch_dir.path()).await.unwrap();
+        let loaded = FittedTransform::from_dir(fetch_dir.path()).unwrap();
+
+        // Read the preprocessed test split produced by the block.
+        let DraftPayload::File(test_file) = &drafts.get(TEST).unwrap().payload else {
+            panic!("expected DraftPayload::File for test");
+        };
+        let block_test = read_parquet_batch(test_file, &CancelSource::new().token()).unwrap();
+
+        // Reconstruct the exact raw test rows using the same split parameters.
+        let raw_test = split::split_batch(&dataset, split_step).unwrap().test;
+        assert!(
+            (0..3).any(|c| raw_test.column(c).null_count() > 0),
+            "raw test split should contain at least one null"
+        );
+
+        // 1. Replay via apply_batch on the raw test batch.
+        let from_batch = loaded.apply_batch(&raw_test).unwrap();
+        assert_feature_batches_close(&block_test, &from_batch, "y");
+
+        // 2. Replay via apply_json on the same raw test rows without the target column.
+        let raw_age = raw_test
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let raw_score = raw_test
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let raw_city = raw_test
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let json_rows: Vec<serde_json::Value> = (0..raw_test.num_rows())
+            .map(|r| {
+                json!({
+                    "age": raw_age.is_valid(r).then(|| raw_age.value(r)),
+                    "score": raw_score.is_valid(r).then(|| raw_score.value(r)),
+                    "city": raw_city.is_valid(r).then(|| raw_city.value(r)),
+                })
+            })
+            .collect();
+        let from_json = loaded
+            .apply_json(&serde_json::Value::Array(json_rows))
+            .unwrap();
+        assert!(
+            from_json.schema().index_of("y").is_err(),
+            "serving JSON output must not contain target column"
+        );
+        assert_feature_batches_close(&block_test, &from_json, "y");
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! The runtime schedules ready nodes concurrently (bounded by [`RuntimeConfig::max_jobs`]),
 //! commits block output drafts to the store, propagates failure, skip and cancellation,
+//! emits lineage events to the configured sinks (ARCHITECTURE §6.2),
 //! and reports per-node results in a [`RunSummary`].
 
 mod cache;
@@ -16,11 +17,15 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
-use crate::lineage::{HostInfo, JsonSink, LineageSink};
+use crate::artifact::canonical_json;
+use crate::lineage::{HostInfo, JsonSink, LineageEvent, LineageSink, Timestamp};
 use crate::{
-    ArtifactId, ArtifactStore, BlockOutcome, CancelSource, CancelToken, Context, EnvSecretProvider,
-    Error, Inputs, RunId, SecretProvider, ValidatedNode, ValidatedPipeline,
+    ArtifactId, ArtifactStore, BlockOutcome, CancelSource, CancelToken, Context, Digest,
+    EnvSecretProvider, Error, Inputs, RunId, SecretProvider, ValidatedNode, ValidatedPipeline,
 };
+
+/// Domain-separation context for [`pipeline_hash`].
+const PIPELINE_HASH_V1_CONTEXT: &str = "mallops pipeline v1";
 
 /// Runtime settings.
 #[derive(Clone)]
@@ -155,6 +160,8 @@ impl Runtime {
     /// Runs every node of `pipeline` and returns the per-node results.
     ///
     /// Node failures, skips and cancellation are reported in the [`RunSummary`].
+    /// Lineage events go to every sink of [`RuntimeConfig::lineage`]; a failing sink is
+    /// logged with `tracing::warn!` and never fails the run.
     ///
     /// # Errors
     ///
@@ -186,9 +193,19 @@ impl Runtime {
             cancel: self.config.cancel.clone(),
             jobs: Arc::new(Semaphore::new(self.config.max_jobs.max(1))),
             no_cache: self.config.no_cache,
+            sinks: self.config.lineage.as_slice().into(),
+            clock: self.config.clock,
         };
 
         let nodes = pipeline.nodes();
+        let started_event = LineageEvent::RunStarted {
+            run: run_id,
+            timestamp: env.now(),
+            pipeline_hash: pipeline_hash(nodes),
+            git_commit: self.config.git_commit.clone(),
+            host: self.config.host.clone(),
+        };
+        emit(&env.sinks, &started_event).await;
         let index: HashMap<&str, usize> = nodes
             .iter()
             .enumerate()
@@ -219,7 +236,11 @@ impl Runtime {
                 }
                 started[i] = true;
                 match gate(node, &index, &results, &env.cancel) {
-                    Err((status, reason)) => results[i] = Some(not_run(status, reason)),
+                    Err((status, reason)) => {
+                        let summary = not_run(status, reason);
+                        env.emit_finished(&node.id, &summary).await;
+                        results[i] = Some(summary);
+                    }
                     Ok(inputs) => {
                         let workdir = run_path.join(format!("{i:04}"));
                         let task = run_node(node.clone(), inputs, workdir, env.clone());
@@ -231,15 +252,20 @@ impl Runtime {
             let Some(joined) = tasks.join_next_with_id().await else {
                 break;
             };
-            let (task, summary) = match joined {
-                Ok(done) => done,
+            let (task, summary, panicked) = match joined {
+                Ok((task, summary)) => (task, summary, false),
                 Err(e) => (
                     e.id(),
                     finished(Status::Failed, Duration::ZERO, BTreeMap::new(), None)
                         .with_error(Error::Runtime(format!("node task failed: {e}"))),
+                    true,
                 ),
             };
             if let Some(i) = task_node.remove(&task) {
+                // A finished task already emitted its own `BlockFinished`.
+                if panicked {
+                    env.emit_finished(&nodes[i].id, &summary).await;
+                }
                 results[i] = Some(summary);
             }
         }
@@ -247,15 +273,36 @@ impl Runtime {
         // Off the async thread: removing the run tree can take a while.
         let _ = tokio::task::spawn_blocking(move || drop(run_dir)).await;
 
-        let nodes = nodes
-            .iter()
-            .zip(results)
-            .map(|(n, r)| {
-                let r = r.unwrap_or_else(|| not_run(Status::Cancelled, "not scheduled".into()));
-                (n.id.clone(), r)
-            })
-            .collect();
-        Ok(RunSummary { run_id, nodes })
+        let mut summaries = BTreeMap::new();
+        for (n, r) in nodes.iter().zip(results) {
+            let r = match r {
+                Some(r) => r,
+                None => {
+                    let r = not_run(Status::Cancelled, "not scheduled".into());
+                    env.emit_finished(&n.id, &r).await;
+                    r
+                }
+            };
+            summaries.insert(n.id.clone(), r);
+        }
+        let summary = RunSummary {
+            run_id,
+            nodes: summaries,
+        };
+        let status = if env.cancel.is_cancelled() {
+            Status::Cancelled
+        } else if summary.is_success() {
+            Status::Succeeded
+        } else {
+            Status::Failed
+        };
+        let finished_event = LineageEvent::RunFinished {
+            run: run_id,
+            timestamp: env.now(),
+            status,
+        };
+        emit(&env.sinks, &finished_event).await;
+        Ok(summary)
     }
 }
 
@@ -268,6 +315,56 @@ struct NodeEnv {
     cancel: CancelToken,
     jobs: Arc<Semaphore>,
     no_cache: bool,
+    sinks: Arc<[Arc<dyn LineageSink>]>,
+    clock: fn() -> SystemTime,
+}
+
+impl NodeEnv {
+    fn now(&self) -> Timestamp {
+        Timestamp::new((self.clock)())
+    }
+
+    /// Emits the `BlockFinished` event of `node` from its summary.
+    async fn emit_finished(&self, node: &str, summary: &NodeSummary) {
+        let event = LineageEvent::BlockFinished {
+            run: self.run_id,
+            timestamp: self.now(),
+            node: node.to_owned(),
+            status: summary.status,
+            duration: summary.duration,
+            cached: summary.cached,
+        };
+        emit(&self.sinks, &event).await;
+    }
+}
+
+/// Sends `event` to every sink in order; a sink error is logged and never stops the run.
+async fn emit(sinks: &[Arc<dyn LineageSink>], event: &LineageEvent) {
+    for sink in sinks {
+        if let Err(e) = sink.record(event).await {
+            tracing::warn!(error = %e, "lineage sink error");
+        }
+    }
+}
+
+/// Domain-separated hash of the canonical JSON of the nodes in topological order
+/// (`id`, `use`, `BlockSpec.version`, `config_hash`, `in`, `seed`).
+fn pipeline_hash(nodes: &[ValidatedNode]) -> Digest {
+    let nodes = nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "use": n.config.r#use.to_string(),
+                "version": n.block.spec().version,
+                "config_hash": cache::config_hash(&n.config.with).to_hex(),
+                "in": n.config.r#in,
+                "seed": n.config.seed,
+            })
+        })
+        .collect();
+    let bytes = canonical_json(&serde_json::Value::Array(nodes));
+    Digest::from_bytes(blake3::derive_key(PIPELINE_HASH_V1_CONTEXT, &bytes))
 }
 
 /// `<node>` of a validated `<node>.<port>` reference.
@@ -369,7 +466,9 @@ fn gate(
 
 /// Runs one node: waits for a job slot, loads inputs, runs the block, commits its outputs.
 ///
-/// The single per-node entry point where caching (#8) and lineage (#9) hook in.
+/// The single per-node entry point where caching (#8) and lineage (#9) hook in: a node that
+/// starts emits `BlockStarted`, one `ArtifactProduced` per committed (or cached) output and
+/// `BlockFinished`; a node stopped before starting emits only `BlockFinished`.
 async fn run_node(
     node: ValidatedNode,
     inputs: Vec<(String, ArtifactId)>,
@@ -377,16 +476,31 @@ async fn run_node(
     env: NodeEnv,
 ) -> NodeSummary {
     let Ok(_permit) = env.jobs.acquire().await else {
-        return not_run(Status::Cancelled, "job pool closed".into());
+        let summary = not_run(Status::Cancelled, "job pool closed".into());
+        env.emit_finished(&node.id, &summary).await;
+        return summary;
     };
     if env.cancel.is_cancelled() {
-        return not_run(Status::Cancelled, "run cancelled".into());
+        let summary = not_run(Status::Cancelled, "run cancelled".into());
+        env.emit_finished(&node.id, &summary).await;
+        return summary;
     }
+    let started = LineageEvent::BlockStarted {
+        run: env.run_id,
+        timestamp: env.now(),
+        node: node.id.clone(),
+        block: node.config.r#use.clone(),
+        block_version: node.block.spec().version.to_string(),
+        config_hash: cache::config_hash(&node.config.with),
+        seed: node.config.seed,
+        inputs: inputs.iter().map(|(_, id)| *id).collect(),
+    };
+    emit(&env.sinks, &started).await;
     let span = tracing::info_span!("node", id = %node.id, block = %node.block.spec().id);
     let start = Instant::now();
     let result = execute(&node, inputs, workdir, &env).instrument(span).await;
     let duration = start.elapsed();
-    match result {
+    let summary = match result {
         Ok((outputs, None, cached)) => {
             let mut summary = finished(Status::Succeeded, duration, outputs, None);
             summary.cached = cached;
@@ -410,7 +524,18 @@ async fn run_node(
             .with_error(Error::Cancelled)
         }
         Err(e) => finished(Status::Failed, duration, BTreeMap::new(), None).with_error(e),
+    };
+    for artifact in summary.outputs.values() {
+        let produced = LineageEvent::ArtifactProduced {
+            run: env.run_id,
+            timestamp: env.now(),
+            node: node.id.clone(),
+            artifact: *artifact,
+        };
+        emit(&env.sinks, &produced).await;
     }
+    env.emit_finished(&node.id, &summary).await;
+    summary
 }
 
 /// Committed outputs, the reason for a skipped block, and whether they came from the cache.

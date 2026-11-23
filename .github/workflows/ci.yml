@@ -271,6 +271,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: All jobs passed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        # always(): without it a cancelled run (cancel-in-progress) skips this step and ci-ok passes.
+        if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
       - run: echo ok

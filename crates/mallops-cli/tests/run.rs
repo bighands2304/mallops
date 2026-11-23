@@ -109,6 +109,38 @@ blocks:
 "#;
 
 #[test]
+fn run_init_validate_run_and_cached_rerun() {
+    let wd = WorkDir::new();
+
+    let init = run_cli(wd.path(), &["init"]);
+    assert_eq!(init.status.code(), Some(0), "stderr: {}", stderr(&init));
+
+    let validate = run_cli(wd.path(), &["validate"]);
+    assert_eq!(
+        validate.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&validate)
+    );
+
+    let first = run_cli(wd.path(), &["run"]);
+    assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
+    assert!(
+        stdout(&first).contains(": 2 executed, 0 cached, 0 failed, 0 skipped, 0 cancelled"),
+        "stdout:\n{}",
+        stdout(&first)
+    );
+
+    let second = run_cli(wd.path(), &["run"]);
+    assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));
+    assert!(
+        stdout(&second).contains(": 0 executed, 2 cached, 0 failed, 0 skipped, 0 cancelled"),
+        "stdout:\n{}",
+        stdout(&second)
+    );
+}
+
+#[test]
 fn run_executes_and_second_run_uses_cache() {
     let wd = WorkDir::new();
     wd.write("mallops.yaml", TWO_NODE_PIPELINE);
@@ -128,7 +160,8 @@ fn run_executes_and_second_run_uses_cache() {
     assert!(lines1[1].starts_with("a succeeded "), "stdout:\n{out1}");
     assert!(!lines1[1].contains("(cached)"), "stdout:\n{out1}");
     assert!(
-        lines1[2].starts_with("run ") && lines1[2].ends_with(": 2 executed, 0 cached, 0 failed"),
+        lines1[2].starts_with("run ")
+            && lines1[2].ends_with(": 2 executed, 0 cached, 0 failed, 0 skipped, 0 cancelled"),
         "stdout:\n{out1}"
     );
 
@@ -150,7 +183,8 @@ fn run_executes_and_second_run_uses_cache() {
         "stdout:\n{out2}"
     );
     assert!(
-        lines2[2].starts_with("run ") && lines2[2].ends_with(": 0 executed, 2 cached, 0 failed"),
+        lines2[2].starts_with("run ")
+            && lines2[2].ends_with(": 0 executed, 2 cached, 0 failed, 0 skipped, 0 cancelled"),
         "stdout:\n{out2}"
     );
 }
@@ -168,7 +202,7 @@ fn run_no_cache_and_jobs_one() {
     let out = stdout(&second);
     assert!(!out.contains("(cached)"), "stdout:\n{out}");
     assert!(
-        out.contains(": 2 executed, 0 cached, 0 failed"),
+        out.contains(": 2 executed, 0 cached, 0 failed, 0 skipped, 0 cancelled"),
         "stdout:\n{out}"
     );
 }
@@ -185,6 +219,7 @@ fn run_records_latest() {
     let before_bytes = fs::read(&latest_path).expect("runs/latest.json must exist");
     let latest: Value = serde_json::from_slice(&before_bytes).unwrap();
     assert_eq!(latest["v"], 1);
+    assert_eq!(latest["pipeline"], "two-node");
     let run_id = latest["run"].as_str().expect("run id string");
     assert!(!run_id.is_empty());
     assert!(
@@ -208,7 +243,49 @@ fn run_records_latest() {
         assert_eq!(stdout(&verify).trim(), format!("ok: {id}"));
     }
 
-    // Now run a pipeline with a failing node and a downstream cancelled node.
+    // A run with a skipped node exits 0 but must leave runs/latest.json unchanged.
+    wd.write(
+        "mallops.yaml",
+        r#"version: 1
+name: two-node
+blocks:
+  z:
+    use: core/noop
+    with:
+      skip: "gate closed"
+  a:
+    use: core/noop
+    in:
+      in: z.out
+"#,
+    );
+    let skipped = run_cli(wd.path(), &["run"]);
+    assert_eq!(
+        skipped.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&skipped)
+    );
+    let skip_out = stdout(&skipped);
+    assert!(
+        skip_out.contains("z skipped ") && skip_out.contains("gate closed"),
+        "stdout:\n{skip_out}"
+    );
+    assert!(
+        skip_out.contains(": 0 executed, 1 cached, 0 failed, 1 skipped, 0 cancelled"),
+        "stdout:\n{skip_out}"
+    );
+    assert!(
+        skip_out.contains("latest.json not updated: 1 skipped"),
+        "stdout:\n{skip_out}"
+    );
+    assert_eq!(
+        before_bytes,
+        fs::read(&latest_path).unwrap(),
+        "skipped run must leave runs/latest.json unchanged"
+    );
+
+    // A run with a failing node and a downstream cancelled node exits 1 and leaves latest.json unchanged.
     wd.write(
         "mallops.yaml",
         r#"version: 1
@@ -231,7 +308,7 @@ blocks:
     assert!(fail_out.contains("boom"), "stdout:\n{fail_out}");
     assert!(fail_out.contains("a cancelled "), "stdout:\n{fail_out}");
     assert!(
-        fail_out.contains(": 0 executed, 0 cached, 1 failed"),
+        fail_out.contains(": 0 executed, 0 cached, 1 failed, 0 skipped, 1 cancelled"),
         "stdout:\n{fail_out}"
     );
     assert!(
@@ -252,6 +329,20 @@ fn run_store_verify_ok_and_detects_tampering() {
     let wd = WorkDir::new();
     wd.write("mallops.yaml", TWO_NODE_PIPELINE);
 
+    // Before any run, `store verify` on a missing local store fails without creating `.mallops`.
+    let missing_id = "0".repeat(64);
+    let no_store = run_cli(wd.path(), &["store", "verify", &missing_id]);
+    assert_eq!(no_store.status.code(), Some(1));
+    assert!(
+        stderr(&no_store).contains("store not found:"),
+        "stderr: {}",
+        stderr(&no_store)
+    );
+    assert!(
+        !wd.path().join(".mallops").exists(),
+        "store verify must not create a missing local store directory"
+    );
+
     let out = run_cli(wd.path(), &["run"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
 
@@ -270,8 +361,7 @@ fn run_store_verify_ok_and_detects_tampering() {
     let invalid = run_cli(wd.path(), &["store", "verify", "not-a-valid-id"]);
     assert_eq!(invalid.status.code(), Some(1));
 
-    // Missing ArtifactId exits 1.
-    let missing_id = "0".repeat(64);
+    // Missing ArtifactId in an existing store exits 1.
     let missing = run_cli(wd.path(), &["store", "verify", &missing_id]);
     assert_eq!(missing.status.code(), Some(1));
 
@@ -401,7 +491,7 @@ blocks:
     let out = run_cli(wd.path(), &["run"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(
-        stdout(&out).contains(": 1 executed, 0 cached, 0 failed"),
+        stdout(&out).contains(": 1 executed, 0 cached, 0 failed, 0 skipped, 0 cancelled"),
         "stdout: {}",
         stdout(&out)
     );

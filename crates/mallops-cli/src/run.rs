@@ -18,14 +18,22 @@ const LATEST_PATH: &str = "runs/latest.json";
 /// Schema version of `runs/latest.json`.
 const LATEST_DOC_VERSION: u32 = 1;
 
-/// Verifies that the store kind and lineage sinks configured in `cfg` are supported by the CLI.
-pub(crate) fn check_backends(cfg: &PipelineConfig) -> anyhow::Result<()> {
-    match cfg.store.kind.as_str() {
-        "local" | "memory" => {}
+enum StoreKind {
+    Local,
+    Memory,
+}
+
+fn parse_store_kind(kind: &str) -> anyhow::Result<StoreKind> {
+    match kind {
+        "local" => Ok(StoreKind::Local),
+        "memory" => Ok(StoreKind::Memory),
         other => anyhow::bail!("unsupported store kind `{other}` (supported: `local`, `memory`)"),
     }
-    match &cfg.lineage {
-        LineageConfig::Off => {}
+}
+
+fn parse_lineage_sinks(lineage: &LineageConfig) -> anyhow::Result<usize> {
+    match lineage {
+        LineageConfig::Off => Ok(0),
         LineageConfig::Sinks(sinks) => {
             for sink in sinks {
                 if sink.sink != "json" {
@@ -35,9 +43,16 @@ pub(crate) fn check_backends(cfg: &PipelineConfig) -> anyhow::Result<()> {
                     );
                 }
             }
+            Ok(sinks.len())
         }
         _ => anyhow::bail!("unsupported lineage configuration"),
     }
+}
+
+/// Verifies that the store kind and lineage sinks configured in `cfg` are supported by the CLI.
+pub(crate) fn check_backends(cfg: &PipelineConfig) -> anyhow::Result<()> {
+    parse_store_kind(&cfg.store.kind)?;
+    parse_lineage_sinks(&cfg.lineage)?;
     Ok(())
 }
 
@@ -50,10 +65,9 @@ fn base_dir(file: &Path) -> &Path {
 }
 
 fn open_store(base: &Path, cfg: &PipelineConfig) -> anyhow::Result<Arc<dyn ArtifactStore>> {
-    match cfg.store.kind.as_str() {
-        "local" => Ok(Arc::new(LocalStore::new(base.join(&cfg.store.path))?)),
-        "memory" => Ok(Arc::new(MemoryStore::new())),
-        other => anyhow::bail!("unsupported store kind `{other}` (supported: `local`, `memory`)"),
+    match parse_store_kind(&cfg.store.kind)? {
+        StoreKind::Local => Ok(Arc::new(LocalStore::new(base.join(&cfg.store.path))?)),
+        StoreKind::Memory => Ok(Arc::new(MemoryStore::new())),
     }
 }
 
@@ -61,22 +75,10 @@ fn build_lineage(
     cfg: &PipelineConfig,
     store: &Arc<dyn ArtifactStore>,
 ) -> anyhow::Result<Vec<Arc<dyn LineageSink>>> {
-    match &cfg.lineage {
-        LineageConfig::Off => Ok(Vec::new()),
-        LineageConfig::Sinks(sinks) => {
-            let mut out: Vec<Arc<dyn LineageSink>> = Vec::with_capacity(sinks.len());
-            for sink in sinks {
-                match sink.sink.as_str() {
-                    "json" => out.push(Arc::new(JsonSink::new(Arc::clone(store)))),
-                    other => {
-                        anyhow::bail!("unsupported lineage sink `{other}` (supported: `json`)")
-                    }
-                }
-            }
-            Ok(out)
-        }
-        _ => anyhow::bail!("unsupported lineage configuration"),
-    }
+    let count = parse_lineage_sinks(&cfg.lineage)?;
+    Ok((0..count)
+        .map(|_| Arc::new(JsonSink::new(Arc::clone(store))) as Arc<dyn LineageSink>)
+        .collect())
 }
 
 /// Best-effort `git rev-parse HEAD` in `base`; only called by `run`.
@@ -110,6 +112,8 @@ fn print_summary(pipeline: &ValidatedPipeline, summary: &RunSummary) {
     let mut executed = 0usize;
     let mut cached = 0usize;
     let mut failed = 0usize;
+    let mut skipped = 0usize;
+    let mut cancelled = 0usize;
 
     for node in pipeline.nodes() {
         let Some(ns) = summary.nodes.get(&node.id) else {
@@ -119,34 +123,35 @@ fn print_summary(pipeline: &ValidatedPipeline, summary: &RunSummary) {
             Status::Succeeded if ns.cached => cached += 1,
             Status::Succeeded => executed += 1,
             Status::Failed => failed += 1,
+            Status::Skipped => skipped += 1,
+            Status::Cancelled => cancelled += 1,
             _ => {}
         }
         let status = status_label(ns.status);
         let cached_tag = if ns.cached { " (cached)" } else { "" };
         let ms = ns.duration.as_millis();
-        match (&ns.reason, &ns.error) {
-            (Some(reason), Some(err)) => {
-                println!("{} {status}{cached_tag} {ms}ms: {reason}: {err}", node.id);
-            }
-            (None, Some(err)) => {
-                println!("{} {status}{cached_tag} {ms}ms: {err}", node.id);
-            }
-            (Some(reason), None) => {
-                println!("{} {status}{cached_tag} {ms}ms: {reason}", node.id);
-            }
-            (None, None) => {
-                println!("{} {status}{cached_tag} {ms}ms", node.id);
-            }
-        }
+        let err_str = ns.error.as_ref().map(ToString::to_string);
+        let detail: Vec<&str> = ns
+            .reason
+            .as_deref()
+            .into_iter()
+            .chain(err_str.as_deref())
+            .collect();
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", detail.join(": "))
+        };
+        println!("{} {status}{cached_tag} {ms}ms{suffix}", node.id);
     }
 
     println!(
-        "run {}: {executed} executed, {cached} cached, {failed} failed",
+        "run {}: {executed} executed, {cached} cached, {failed} failed, {skipped} skipped, {cancelled} cancelled",
         summary.run_id
     );
 }
 
-fn latest_json(summary: &RunSummary) -> anyhow::Result<Vec<u8>> {
+fn latest_json(pipeline_name: &str, summary: &RunSummary) -> anyhow::Result<Vec<u8>> {
     let outputs: BTreeMap<&str, BTreeMap<&str, String>> = summary
         .nodes
         .iter()
@@ -161,13 +166,15 @@ fn latest_json(summary: &RunSummary) -> anyhow::Result<Vec<u8>> {
         .collect();
     let doc = serde_json::json!({
         "v": LATEST_DOC_VERSION,
+        "pipeline": pipeline_name,
         "run": summary.run_id.to_string(),
         "outputs": outputs,
     });
     serde_json::to_vec(&doc).context("cannot serialize runs/latest.json")
 }
 
-/// Executes the batch DAG of `file`, prints a summary and records `runs/latest.json` on success.
+/// Executes the batch DAG of `file`, prints a summary and records `runs/latest.json` when every
+/// node succeeds.
 pub(crate) fn run(file: &Path, jobs: Option<usize>, no_cache: bool) -> anyhow::Result<()> {
     let pipeline = crate::load(file)?;
     let cfg = pipeline.config();
@@ -194,9 +201,20 @@ pub(crate) fn run(file: &Path, jobs: Option<usize>, no_cache: bool) -> anyhow::R
         anyhow::bail!("run failed");
     }
 
+    let skipped = summary
+        .nodes
+        .values()
+        .filter(|n| n.status == Status::Skipped)
+        .count();
+    if skipped > 0 {
+        println!("latest.json not updated: {skipped} skipped");
+        return Ok(());
+    }
+
     let latest_key = RelPath::parse(LATEST_PATH)?;
-    let bytes = latest_json(&summary)?;
-    rt.block_on(store.put_meta(&latest_key, &bytes))?;
+    let bytes = latest_json(&cfg.name, &summary)?;
+    rt.block_on(store.put_meta(&latest_key, &bytes))
+        .context("all nodes succeeded but runs/latest.json could not be written")?;
     Ok(())
 }
 
@@ -206,9 +224,18 @@ pub(crate) fn verify(file: &Path, id: &str) -> anyhow::Result<()> {
         .parse()
         .with_context(|| format!("invalid artifact id `{id}`"))?;
     let cfg = PipelineConfig::from_yaml_file(file, &|n| std::env::var(n).ok())?;
-    check_backends(&cfg)?;
+    let kind = parse_store_kind(&cfg.store.kind)?;
+    parse_lineage_sinks(&cfg.lineage)?;
 
-    let store = open_store(base_dir(file), &cfg)?;
+    let base = base_dir(file);
+    if matches!(kind, StoreKind::Local) {
+        let path = base.join(&cfg.store.path);
+        if !path.exists() {
+            anyhow::bail!("store not found: {}", path.display());
+        }
+    }
+
+    let store = open_store(base, &cfg)?;
     let rt = tokio::runtime::Runtime::new().context("cannot start tokio runtime")?;
     rt.block_on(store.verify(&artifact_id))?;
     println!("ok: {artifact_id}");

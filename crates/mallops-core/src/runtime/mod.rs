@@ -2,6 +2,7 @@
 //!
 //! The runtime schedules ready nodes concurrently (bounded by [`RuntimeConfig::max_jobs`]),
 //! commits block output drafts to the store, propagates failure, skip and cancellation,
+//! emits lineage events to the configured sinks (ARCHITECTURE §6.2),
 //! and reports per-node results in a [`RunSummary`].
 
 mod cache;
@@ -10,16 +11,21 @@ mod commit;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
+use crate::artifact::canonical_json;
+use crate::lineage::{HostInfo, JsonSink, LineageEvent, LineageSink, Timestamp};
 use crate::{
-    ArtifactId, ArtifactStore, BlockOutcome, CancelSource, CancelToken, Context, EnvSecretProvider,
-    Error, Inputs, RunId, SecretProvider, ValidatedNode, ValidatedPipeline,
+    ArtifactId, ArtifactStore, BlockOutcome, CancelSource, CancelToken, Context, Digest,
+    EnvSecretProvider, Error, Inputs, RunId, SecretProvider, ValidatedNode, ValidatedPipeline,
 };
+
+/// Domain-separation context for [`pipeline_hash`].
+const PIPELINE_HASH_V1_CONTEXT: &str = "mallops pipeline v1";
 
 /// Runtime settings.
 #[derive(Clone)]
@@ -37,21 +43,34 @@ pub struct RuntimeConfig {
     pub cancel: CancelToken,
     /// Run-level cache bypass (`--no-cache`): every node executes; no cache entry is read or written.
     pub no_cache: bool,
+    /// Lineage sinks; empty = `lineage: off`. Default: one [`JsonSink`] on `store`.
+    pub lineage: Vec<Arc<dyn LineageSink>>,
+    /// Clock for lineage timestamps (injectable for deterministic tests).
+    pub clock: fn() -> SystemTime,
+    /// Host recorded in `RunStarted`.
+    pub host: HostInfo,
+    /// Git commit recorded in `RunStarted` (set by the CLI; `None` in the library).
+    pub git_commit: Option<String>,
 }
 
 impl RuntimeConfig {
     /// Defaults: `max_jobs` = available parallelism, [`EnvSecretProvider`],
-    /// `workdir_root` = [`std::env::temp_dir`], a cancel token that never fires.
+    /// `workdir_root` = [`std::env::temp_dir`], a cancel token that never fires,
+    /// lineage to a [`JsonSink`] on `store`, [`SystemTime::now`], [`HostInfo::current`].
     #[must_use]
     pub fn new(store: Arc<dyn ArtifactStore>) -> Self {
         Self {
             max_jobs: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            lineage: vec![Arc::new(JsonSink::new(Arc::clone(&store)))],
             store,
             secret_provider: Arc::new(EnvSecretProvider),
             workdir_root: std::env::temp_dir(),
             // A dropped source never fires (see `CancelToken::cancelled`).
             cancel: CancelSource::new().token(),
             no_cache: false,
+            clock: SystemTime::now,
+            host: HostInfo::current(),
+            git_commit: None,
         }
     }
 }
@@ -65,12 +84,16 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("workdir_root", &self.workdir_root)
             .field("cancel", &self.cancel)
             .field("no_cache", &self.no_cache)
+            .field("lineage_sinks", &self.lineage.len())
+            .field("host", &self.host)
+            .field("git_commit", &self.git_commit)
             .finish()
     }
 }
 
 /// Final state of a node in a run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Status {
     /// The block ran and its outputs were committed.
@@ -137,6 +160,8 @@ impl Runtime {
     /// Runs every node of `pipeline` and returns the per-node results.
     ///
     /// Node failures, skips and cancellation are reported in the [`RunSummary`].
+    /// Lineage events go to every sink of [`RuntimeConfig::lineage`]; a failing sink is
+    /// logged with `tracing::warn!` and never fails the run.
     ///
     /// # Errors
     ///
@@ -168,9 +193,19 @@ impl Runtime {
             cancel: self.config.cancel.clone(),
             jobs: Arc::new(Semaphore::new(self.config.max_jobs.max(1))),
             no_cache: self.config.no_cache,
+            sinks: self.config.lineage.as_slice().into(),
+            clock: self.config.clock,
         };
 
         let nodes = pipeline.nodes();
+        let started_event = LineageEvent::RunStarted {
+            run: run_id,
+            timestamp: env.now(),
+            pipeline_hash: pipeline_hash(nodes),
+            git_commit: self.config.git_commit.clone(),
+            host: self.config.host.clone(),
+        };
+        emit(&env.sinks, &started_event).await;
         let index: HashMap<&str, usize> = nodes
             .iter()
             .enumerate()
@@ -201,7 +236,9 @@ impl Runtime {
                 }
                 started[i] = true;
                 match gate(node, &index, &results, &env.cancel) {
-                    Err((status, reason)) => results[i] = Some(not_run(status, reason)),
+                    Err((status, reason)) => {
+                        results[i] = Some(env.finish_not_run(&node.id, status, reason).await);
+                    }
                     Ok(inputs) => {
                         let workdir = run_path.join(format!("{i:04}"));
                         let task = run_node(node.clone(), inputs, workdir, env.clone());
@@ -213,31 +250,57 @@ impl Runtime {
             let Some(joined) = tasks.join_next_with_id().await else {
                 break;
             };
-            let (task, summary) = match joined {
-                Ok(done) => done,
-                Err(e) => (
-                    e.id(),
-                    finished(Status::Failed, Duration::ZERO, BTreeMap::new(), None)
-                        .with_error(Error::Runtime(format!("node task failed: {e}"))),
-                ),
-            };
-            if let Some(i) = task_node.remove(&task) {
-                results[i] = Some(summary);
+            match joined {
+                Ok((task, summary)) => {
+                    // A finished task already emitted its own `BlockFinished`.
+                    if let Some(i) = task_node.remove(&task) {
+                        results[i] = Some(summary);
+                    }
+                }
+                Err(e) => {
+                    if let Some(i) = task_node.remove(&e.id()) {
+                        let summary =
+                            finished(Status::Failed, Duration::ZERO, BTreeMap::new(), None)
+                                .with_error(Error::Runtime(format!("node task failed: {e}")));
+                        env.emit_finished(&nodes[i].id, &summary).await;
+                        results[i] = Some(summary);
+                    }
+                }
             }
         }
 
         // Off the async thread: removing the run tree can take a while.
         let _ = tokio::task::spawn_blocking(move || drop(run_dir)).await;
 
-        let nodes = nodes
-            .iter()
-            .zip(results)
-            .map(|(n, r)| {
-                let r = r.unwrap_or_else(|| not_run(Status::Cancelled, "not scheduled".into()));
-                (n.id.clone(), r)
-            })
-            .collect();
-        Ok(RunSummary { run_id, nodes })
+        let mut summaries = BTreeMap::new();
+        for (n, r) in nodes.iter().zip(results) {
+            let r = match r {
+                Some(r) => r,
+                None => {
+                    env.finish_not_run(&n.id, Status::Cancelled, "not scheduled".into())
+                        .await
+                }
+            };
+            summaries.insert(n.id.clone(), r);
+        }
+        let summary = RunSummary {
+            run_id,
+            nodes: summaries,
+        };
+        let status = if env.cancel.is_cancelled() {
+            Status::Cancelled
+        } else if summary.is_success() {
+            Status::Succeeded
+        } else {
+            Status::Failed
+        };
+        let finished_event = LineageEvent::RunFinished {
+            run: run_id,
+            timestamp: env.now(),
+            status,
+        };
+        emit(&env.sinks, &finished_event).await;
+        Ok(summary)
     }
 }
 
@@ -250,6 +313,63 @@ struct NodeEnv {
     cancel: CancelToken,
     jobs: Arc<Semaphore>,
     no_cache: bool,
+    sinks: Arc<[Arc<dyn LineageSink>]>,
+    clock: fn() -> SystemTime,
+}
+
+impl NodeEnv {
+    fn now(&self) -> Timestamp {
+        Timestamp::new((self.clock)())
+    }
+
+    /// Emits the `BlockFinished` event of `node` from its summary.
+    async fn emit_finished(&self, node: &str, summary: &NodeSummary) {
+        let event = LineageEvent::BlockFinished {
+            run: self.run_id,
+            timestamp: self.now(),
+            node: node.to_owned(),
+            status: summary.status,
+            duration: summary.duration,
+            cached: summary.cached,
+        };
+        emit(&self.sinks, &event).await;
+    }
+
+    /// Builds a zero-duration summary for a node that never started and emits `BlockFinished`.
+    async fn finish_not_run(&self, node: &str, status: Status, reason: String) -> NodeSummary {
+        let summary = finished(status, Duration::ZERO, BTreeMap::new(), Some(reason));
+        self.emit_finished(node, &summary).await;
+        summary
+    }
+}
+
+/// Sends `event` to every sink in order; a sink error is logged and never stops the run.
+async fn emit(sinks: &[Arc<dyn LineageSink>], event: &LineageEvent) {
+    for sink in sinks {
+        if let Err(e) = sink.record(event).await {
+            tracing::warn!(error = %e, "lineage sink error");
+        }
+    }
+}
+
+/// Domain-separated hash of the canonical JSON of the nodes in topological order
+/// (`id`, `use`, `BlockSpec.version`, `config_hash`, `in`, `seed`).
+fn pipeline_hash(nodes: &[ValidatedNode]) -> Digest {
+    let nodes = nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "use": n.config.r#use.to_string(),
+                "version": n.block.spec().version,
+                "config_hash": cache::config_hash(&n.config.with).to_hex(),
+                "in": n.config.r#in,
+                "seed": n.config.seed,
+            })
+        })
+        .collect();
+    let bytes = canonical_json(&serde_json::Value::Array(nodes));
+    Digest::from_bytes(blake3::derive_key(PIPELINE_HASH_V1_CONTEXT, &bytes))
 }
 
 /// `<node>` of a validated `<node>.<port>` reference.
@@ -271,10 +391,6 @@ fn finished(
         error: None,
         cached: false,
     }
-}
-
-fn not_run(status: Status, reason: String) -> NodeSummary {
-    finished(status, Duration::ZERO, BTreeMap::new(), Some(reason))
 }
 
 impl NodeSummary {
@@ -351,7 +467,9 @@ fn gate(
 
 /// Runs one node: waits for a job slot, loads inputs, runs the block, commits its outputs.
 ///
-/// The single per-node entry point where caching (#8) and lineage (#9) hook in.
+/// The single per-node entry point where caching (#8) and lineage (#9) hook in: a node that
+/// starts emits `BlockStarted`, one `ArtifactProduced` per committed (or cached) output and
+/// `BlockFinished`; a node stopped before starting emits only `BlockFinished`.
 async fn run_node(
     node: ValidatedNode,
     inputs: Vec<(String, ArtifactId)>,
@@ -359,16 +477,31 @@ async fn run_node(
     env: NodeEnv,
 ) -> NodeSummary {
     let Ok(_permit) = env.jobs.acquire().await else {
-        return not_run(Status::Cancelled, "job pool closed".into());
+        return env
+            .finish_not_run(&node.id, Status::Cancelled, "job pool closed".into())
+            .await;
     };
     if env.cancel.is_cancelled() {
-        return not_run(Status::Cancelled, "run cancelled".into());
+        return env
+            .finish_not_run(&node.id, Status::Cancelled, "run cancelled".into())
+            .await;
     }
+    let started = LineageEvent::BlockStarted {
+        run: env.run_id,
+        timestamp: env.now(),
+        node: node.id.clone(),
+        block: node.config.r#use.clone(),
+        block_version: node.block.spec().version.to_string(),
+        config_hash: cache::config_hash(&node.config.with),
+        seed: node.config.seed,
+        inputs: inputs.iter().map(|(_, id)| *id).collect(),
+    };
+    emit(&env.sinks, &started).await;
     let span = tracing::info_span!("node", id = %node.id, block = %node.block.spec().id);
     let start = Instant::now();
     let result = execute(&node, inputs, workdir, &env).instrument(span).await;
     let duration = start.elapsed();
-    match result {
+    let summary = match result {
         Ok((outputs, None, cached)) => {
             let mut summary = finished(Status::Succeeded, duration, outputs, None);
             summary.cached = cached;
@@ -392,7 +525,18 @@ async fn run_node(
             .with_error(Error::Cancelled)
         }
         Err(e) => finished(Status::Failed, duration, BTreeMap::new(), None).with_error(e),
+    };
+    for artifact in summary.outputs.values() {
+        let produced = LineageEvent::ArtifactProduced {
+            run: env.run_id,
+            timestamp: env.now(),
+            node: node.id.clone(),
+            artifact: *artifact,
+        };
+        emit(&env.sinks, &produced).await;
     }
+    env.emit_finished(&node.id, &summary).await;
+    summary
 }
 
 /// Committed outputs, the reason for a skipped block, and whether they came from the cache.
@@ -1425,5 +1569,665 @@ mod tests {
         let (s, executed) = cache_run_plain(&store, &log, &setup).await;
         assert!(executed.is_empty());
         assert_eq!(cached_nodes(&s), ["a", "b", "c", "x"]);
+    }
+
+    // ---- lineage (#9) ----
+
+    use std::sync::atomic::AtomicU64;
+    use std::time::UNIX_EPOCH;
+
+    /// Injected clock: 2023-11-14T22:13:20.123Z.
+    fn fixed_clock() -> SystemTime {
+        UNIX_EPOCH + Duration::from_millis(1_700_000_000_123)
+    }
+
+    const FIXED_RFC3339: &str = "2023-11-14T22:13:20.123Z";
+
+    /// Keeps every event in memory.
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<LineageEvent>>);
+
+    impl RecordingSink {
+        fn take(&self) -> Vec<LineageEvent> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl LineageSink for RecordingSink {
+        fn record<'a>(&'a self, event: &'a LineageEvent) -> BoxFuture<'a, Result<(), Error>> {
+            self.0.lock().unwrap().push(event.clone());
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Rejects every event.
+    struct FailingSink;
+
+    impl LineageSink for FailingSink {
+        fn record<'a>(&'a self, _: &'a LineageEvent) -> BoxFuture<'a, Result<(), Error>> {
+            Box::pin(async { Err(Error::Runtime("sink unavailable".into())) })
+        }
+    }
+
+    /// Minimal `tracing` subscriber: one line per span or event with its level, name and fields.
+    struct Capture {
+        out: Arc<Mutex<String>>,
+        next_id: AtomicU64,
+    }
+
+    impl Capture {
+        /// Installs a thread-local capture; returns the guard and the captured text.
+        ///
+        /// Safe in the unit-test binary only while no other unit test executes the same
+        /// `tracing` callsite concurrently (otherwise tracing's global callsite interest cache
+        /// can race and drop events); if another unit test ever activates that callsite, move
+        /// the test into a dedicated integration test under `tests/` like `lineage_leak.rs`.
+        fn install() -> (tracing::subscriber::DefaultGuard, Arc<Mutex<String>>) {
+            let out = Arc::new(Mutex::new(String::new()));
+            let capture = Capture {
+                out: Arc::clone(&out),
+                next_id: AtomicU64::new(1),
+            };
+            (tracing::subscriber::set_default(capture), out)
+        }
+
+        fn line(&self, meta: &tracing::Metadata<'_>, record: impl FnOnce(&mut Fields<'_>)) {
+            let mut text = format!("{} {} ", meta.level(), meta.name());
+            record(&mut Fields(&mut text));
+            let mut out = self.out.lock().unwrap();
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+
+    struct Fields<'a>(&'a mut String);
+
+    impl tracing::field::Visit for Fields<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push_str(&format!("{}={value} ", field.name()));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?} ", field.name()));
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            self.line(span.metadata(), |f| span.record(f));
+            tracing::span::Id::from_u64(self.next_id.fetch_add(1, Ordering::SeqCst))
+        }
+
+        fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            let mut text = String::new();
+            values.record(&mut Fields(&mut text));
+            let mut out = self.out.lock().unwrap();
+            out.push_str(&text);
+            out.push('\n');
+        }
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.line(event.metadata(), |f| event.record(f));
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn lineage_config(
+        store: Arc<dyn ArtifactStore>,
+        sinks: Vec<Arc<dyn LineageSink>>,
+    ) -> RuntimeConfig {
+        let mut cfg = RuntimeConfig::new(store);
+        cfg.max_jobs = 2;
+        cfg.lineage = sinks;
+        cfg.clock = fixed_clock;
+        cfg.git_commit = Some("0123abc".into());
+        cfg
+    }
+
+    /// `ok` (seed 7) → `use_ok`, `skip` → `after_skip`, `bad` → `child`, and `boom` (panics).
+    fn lineage_pipeline(probe: &Arc<Probe>, with_panic: bool) -> ValidatedPipeline {
+        let mut b = PipelineBuilder::new("t");
+        b.block("ok", "t/src".parse().unwrap())
+            .with(serde_json::json!({ "mode": "ok" }))
+            .seed(7);
+        node(&mut b, "use_ok", "one", "ok", &[("a", "ok.out")]);
+        node(&mut b, "skip", "src", "skip", &[]);
+        node(&mut b, "after_skip", "one", "ok", &[("a", "skip.out")]);
+        node(&mut b, "bad", "src", "fail", &[]);
+        node(&mut b, "child", "one", "ok", &[("a", "bad.out")]);
+        if with_panic {
+            node(&mut b, "boom", "src", "panic", &[]);
+        }
+        b.build(&registry(probe)).unwrap()
+    }
+
+    /// `a` → `b`, both succeeding.
+    fn lineage_chain(probe: &Arc<Probe>) -> ValidatedPipeline {
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "a", "src", "ok", &[]);
+        node(&mut b, "b", "one", "ok", &[("a", "a.out")]);
+        b.build(&registry(probe)).unwrap()
+    }
+
+    fn lineage_key(run: RunId) -> RelPath {
+        RelPath::parse(&format!("runs/{run}/lineage.json")).unwrap()
+    }
+
+    fn run_and_time(e: &LineageEvent) -> (RunId, Timestamp) {
+        match e {
+            LineageEvent::RunStarted { run, timestamp, .. }
+            | LineageEvent::BlockStarted { run, timestamp, .. }
+            | LineageEvent::ArtifactProduced { run, timestamp, .. }
+            | LineageEvent::BlockFinished { run, timestamp, .. }
+            | LineageEvent::RunFinished { run, timestamp, .. } => (*run, *timestamp),
+        }
+    }
+
+    /// Kind and node of a node-level event.
+    fn node_event(e: &LineageEvent) -> Option<(&'static str, &str)> {
+        match e {
+            LineageEvent::BlockStarted { node, .. } => Some(("started", node)),
+            LineageEvent::ArtifactProduced { node, .. } => Some(("produced", node)),
+            LineageEvent::BlockFinished { node, .. } => Some(("finished", node)),
+            LineageEvent::RunStarted { .. } | LineageEvent::RunFinished { .. } => None,
+        }
+    }
+
+    fn kinds(events: &[LineageEvent], id: &str) -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(node_event)
+            .filter(|(_, node)| *node == id)
+            .map(|(kind, _)| kind)
+            .collect()
+    }
+
+    fn position(events: &[LineageEvent], id: &str, kind: &str) -> usize {
+        events
+            .iter()
+            .position(|e| node_event(e) == Some((kind, id)))
+            .unwrap_or_else(|| panic!("no {kind} event for {id}"))
+    }
+
+    fn block_finished(events: &[LineageEvent], id: &str) -> (Status, Duration, bool) {
+        match &events[position(events, id, "finished")] {
+            LineageEvent::BlockFinished {
+                status,
+                duration,
+                cached,
+                ..
+            } => (*status, *duration, *cached),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `(block, block_version, config_hash, seed, inputs)` of the `BlockStarted` of `id`.
+    fn block_started(
+        events: &[LineageEvent],
+        id: &str,
+    ) -> (String, String, Digest, Option<u64>, Vec<ArtifactId>) {
+        match &events[position(events, id, "started")] {
+            LineageEvent::BlockStarted {
+                block,
+                block_version,
+                config_hash,
+                seed,
+                inputs,
+                ..
+            } => (
+                block.to_string(),
+                block_version.clone(),
+                *config_hash,
+                *seed,
+                inputs.clone(),
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn produced(events: &[LineageEvent], id: &str) -> Vec<ArtifactId> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LineageEvent::ArtifactProduced { node, artifact, .. } if node == id => {
+                    Some(*artifact)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn lineage_events_cover_every_status_in_order() {
+        let probe = Arc::new(Probe::default());
+        let p = lineage_pipeline(&probe, true);
+        let sink = Arc::new(RecordingSink::default());
+        let store: Arc<dyn ArtifactStore> = Arc::new(MemoryStore::new());
+        let cfg = lineage_config(store, vec![sink.clone()]);
+        let host = cfg.host.clone();
+        let rt = Runtime::new(cfg);
+        let s = run(&rt, &p).await;
+        let ev = sink.take();
+        let ts = Timestamp::new(fixed_clock());
+
+        let Some(LineageEvent::RunStarted {
+            pipeline_hash: hash,
+            git_commit,
+            host: started_host,
+            ..
+        }) = ev.first()
+        else {
+            panic!("first event: {:?}", ev.first());
+        };
+        assert_eq!(*hash, pipeline_hash(p.nodes()));
+        assert_eq!(git_commit.as_deref(), Some("0123abc"));
+        assert_eq!(*started_host, host);
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Failed,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
+        for e in &ev {
+            assert_eq!(run_and_time(e), (s.run_id, ts), "{e:?}");
+        }
+        assert_eq!(ev.iter().filter_map(node_event).count(), ev.len() - 2);
+
+        for id in ["ok", "use_ok"] {
+            assert_eq!(kinds(&ev, id), ["started", "produced", "finished"], "{id}");
+            assert_eq!(produced(&ev, id), [s.nodes[id].outputs["out"]], "{id}");
+        }
+        for id in ["skip", "bad", "boom"] {
+            assert_eq!(kinds(&ev, id), ["started", "finished"], "{id}");
+        }
+        // Stopped by `gate`: never started.
+        for id in ["after_skip", "child"] {
+            assert_eq!(kinds(&ev, id), ["finished"], "{id}");
+        }
+        for (id, n) in &s.nodes {
+            assert_eq!(
+                block_finished(&ev, id),
+                (n.status, n.duration, n.cached),
+                "{id}"
+            );
+        }
+        let expected = [
+            ("ok", Status::Succeeded),
+            ("use_ok", Status::Succeeded),
+            ("skip", Status::Skipped),
+            ("after_skip", Status::Skipped),
+            ("bad", Status::Failed),
+            ("boom", Status::Failed),
+            ("child", Status::Cancelled),
+        ];
+        for (id, status) in expected {
+            assert_eq!(block_finished(&ev, id).0, status, "{id}");
+        }
+        for id in ["after_skip", "child", "boom"] {
+            assert_eq!(block_finished(&ev, id).1, Duration::ZERO, "{id}");
+        }
+
+        let ok_out = s.nodes["ok"].outputs["out"];
+        let ok_hash = cache::config_hash(&serde_json::json!({ "mode": "ok" }));
+        assert_eq!(
+            block_started(&ev, "ok"),
+            ("t/src".into(), "1".into(), ok_hash, Some(7), vec![])
+        );
+        assert_eq!(
+            block_started(&ev, "use_ok"),
+            ("t/one".into(), "1".into(), ok_hash, None, vec![ok_out])
+        );
+        assert!(position(&ev, "ok", "finished") < position(&ev, "use_ok", "started"));
+
+        // Rerun: hits are reported with their cached outputs.
+        let s2 = run(&rt, &p).await;
+        let ev2 = sink.take();
+        assert_ne!(s2.run_id, s.run_id);
+        assert!(matches!(
+            ev2.first(),
+            Some(LineageEvent::RunStarted { pipeline_hash: h, .. }) if *h == *hash
+        ));
+        for id in ["ok", "use_ok"] {
+            assert_eq!(kinds(&ev2, id), ["started", "produced", "finished"], "{id}");
+            assert_eq!(produced(&ev2, id), [s.nodes[id].outputs["out"]], "{id}");
+            assert_eq!(
+                block_finished(&ev2, id),
+                (Status::Succeeded, s2.nodes[id].duration, true),
+                "{id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lineage_cancelled_run_reports_cancelled_nodes_and_run() {
+        let probe = Arc::new(Probe::default());
+        let p = lineage_chain(&probe);
+        let sink = Arc::new(RecordingSink::default());
+        let source = CancelSource::new();
+        source.cancel();
+        let mut cfg = lineage_config(Arc::new(MemoryStore::new()), vec![sink.clone()]);
+        cfg.cancel = source.token();
+        run(&Runtime::new(cfg), &p).await;
+        let ev = sink.take();
+
+        assert_eq!(ev.len(), 4, "{ev:?}");
+        assert!(matches!(ev[0], LineageEvent::RunStarted { .. }));
+        for id in ["a", "b"] {
+            assert_eq!(kinds(&ev, id), ["finished"], "{id}");
+            assert_eq!(
+                block_finished(&ev, id),
+                (Status::Cancelled, Duration::ZERO, false)
+            );
+        }
+        assert!(matches!(
+            ev[3],
+            LineageEvent::RunFinished {
+                status: Status::Cancelled,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn lineage_pipeline_hash_covers_every_node_field() {
+        let probe = Arc::new(Probe::default());
+        let reg = registry(&probe);
+        let mut v2 = BlockRegistry::new();
+        let blob_port = |n: &'static str| Port::new(n, ArtifactKind::Blob);
+        for spec in [
+            BlockSpec::new("t/src", "1", Stage::Custom),
+            BlockSpec::new("t/one", "2", Stage::Custom).with_input(blob_port("a")),
+        ] {
+            let spec = spec.with_output(blob_port("out"));
+            let probe = Arc::clone(&probe);
+            v2.register(Arc::new(TestBlock { spec, probe })).unwrap();
+        }
+        let hash = |reg: &BlockRegistry, id: &str, block: &str, mode: &str, seed, src: &str| {
+            let mut b = PipelineBuilder::new("t");
+            node(&mut b, "a", "src", "ok", &[]);
+            node(&mut b, "a2", "src", "ok-too", &[]);
+            {
+                let mut n = b.block(id, format!("t/{block}").parse().unwrap());
+                n.with(serde_json::json!({ "mode": mode })).input("a", src);
+                if let Some(seed) = seed {
+                    n.seed(seed);
+                }
+            }
+            pipeline_hash(b.build(reg).unwrap().nodes())
+        };
+        let base = hash(&reg, "n", "one", "ok", None, "a.out");
+        assert_eq!(base, hash(&reg, "n", "one", "ok", None, "a.out"));
+        let changed = [
+            ("id", hash(&reg, "m", "one", "ok", None, "a.out")),
+            ("use", hash(&reg, "n", "opt", "ok", None, "a.out")),
+            ("version", hash(&v2, "n", "one", "ok", None, "a.out")),
+            (
+                "config_hash",
+                hash(&reg, "n", "one", "other", None, "a.out"),
+            ),
+            ("in", hash(&reg, "n", "one", "ok", None, "a2.out")),
+            ("seed", hash(&reg, "n", "one", "ok", Some(1), "a.out")),
+        ];
+        for (field, h) in changed {
+            assert_ne!(h, base, "{field}");
+        }
+    }
+
+    /// AC: `runs/<run-id>/lineage.json` is complete and readable through `get_meta`.
+    async fn lineage_json_scenario(store: Arc<dyn ArtifactStore>) {
+        let probe = Arc::new(Probe::default());
+        let p = lineage_pipeline(&probe, false);
+        let sink: Arc<dyn LineageSink> = Arc::new(JsonSink::new(Arc::clone(&store)));
+        let cfg = lineage_config(Arc::clone(&store), vec![sink]);
+        let expected_host = serde_json::to_value(&cfg.host).unwrap();
+        let s = run(&Runtime::new(cfg), &p).await;
+
+        let bytes = store
+            .get_meta(&lineage_key(s.run_id))
+            .await
+            .unwrap()
+            .expect("lineage.json not written");
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["v"], 1);
+        assert_eq!(doc["run"], s.run_id.to_string());
+        let events = doc["events"].as_array().expect("events array");
+        let kind = |e: &serde_json::Value| e["event"].as_str().unwrap_or_default().to_owned();
+        assert_eq!(kind(&events[0]), "run_started");
+        assert_eq!(
+            events[0]["pipeline_hash"],
+            pipeline_hash(p.nodes()).to_hex()
+        );
+        assert_eq!(events[0]["host"], expected_host);
+        assert_eq!(events[0]["git_commit"], "0123abc");
+        let last = events.last().unwrap();
+        assert_eq!(kind(last), "run_finished");
+        assert_eq!(last["status"], "failed");
+        for e in events {
+            assert_eq!(e["timestamp"], FIXED_RFC3339, "{e}");
+        }
+        let find = |k: &str, id: &str| {
+            events
+                .iter()
+                .find(|e| kind(e) == k && e["node"] == id)
+                .unwrap_or_else(|| panic!("no {k} for {id}"))
+                .clone()
+        };
+        let ok = find("block_started", "ok");
+        assert_eq!(ok["block_version"], "1");
+        assert_eq!(ok["seed"], 7);
+        let ok_hash = cache::config_hash(&serde_json::json!({ "mode": "ok" }));
+        assert_eq!(ok["config_hash"], ok_hash.to_hex());
+        assert_eq!(ok["inputs"], serde_json::json!([]));
+        let ok_out = s.nodes["ok"].outputs["out"];
+        let use_ok = find("block_started", "use_ok");
+        assert_eq!(use_ok["inputs"], serde_json::json!([ok_out.to_hex()]));
+        for id in ["ok", "use_ok"] {
+            let prod = find("artifact_produced", id);
+            assert_eq!(
+                prod["artifact"],
+                s.nodes[id].outputs["out"].to_hex(),
+                "{id}"
+            );
+        }
+        let mut statuses = Vec::new();
+        for (id, n) in &s.nodes {
+            let f = find("block_finished", id);
+            assert_eq!(f["status"], serde_json::to_value(n.status).unwrap(), "{id}");
+            assert_eq!(f["cached"], n.cached, "{id}");
+            assert!(f["duration_ms"].is_u64(), "{f}");
+            statuses.push(f["status"].as_str().unwrap().to_owned());
+        }
+        statuses.sort();
+        statuses.dedup();
+        assert_eq!(statuses, ["cancelled", "failed", "skipped", "succeeded"]);
+    }
+
+    #[tokio::test]
+    async fn lineage_json_is_complete_on_memory_store() {
+        lineage_json_scenario(Arc::new(MemoryStore::new())).await;
+    }
+
+    #[tokio::test]
+    async fn lineage_json_is_complete_on_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        lineage_json_scenario(Arc::new(LocalStore::new(dir.path()).unwrap())).await;
+    }
+
+    #[tokio::test]
+    async fn lineage_failing_sink_logs_warning_and_run_succeeds() {
+        let probe = Arc::new(Probe::default());
+        let p = lineage_chain(&probe);
+        let sink = Arc::new(RecordingSink::default());
+        let sinks: Vec<Arc<dyn LineageSink>> = vec![Arc::new(FailingSink), sink.clone()];
+        let cfg = lineage_config(Arc::new(MemoryStore::new()), sinks);
+
+        // Thread-local subscriber: safe while this is the only unit test triggering
+        // `emit()`'s `tracing::warn!` callsite; otherwise move to `tests/` like `lineage_leak.rs`.
+        let (guard, logs) = Capture::install();
+        let s = run(&Runtime::new(cfg), &p).await;
+        drop(guard);
+
+        assert!(s.is_success(), "{:?}", s.nodes);
+        // RunStarted, 2 x (started, produced, finished), RunFinished: the next sink got them all.
+        let ev = sink.take();
+        assert_eq!(ev.len(), 8, "{ev:?}");
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Succeeded,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
+        let logs = logs.lock().unwrap();
+        let warnings = logs
+            .lines()
+            .filter(|l| l.starts_with("WARN") && l.contains("lineage sink error"))
+            .filter(|l| l.contains("sink unavailable"))
+            .count();
+        assert_eq!(warnings, ev.len(), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn lineage_in_flight_cancel_emits_started_then_cancelled() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "wait", "src", "wait_cancel", &[]);
+        node(&mut b, "next", "one", "ok", &[("a", "wait.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let source = CancelSource::new();
+        let mut cfg = lineage_config(Arc::new(MemoryStore::new()), vec![sink.clone()]);
+        cfg.cancel = source.token();
+        let rt = Runtime::new(cfg);
+
+        let handle = tokio::spawn(async move { rt.run(&p).await });
+        tokio::time::timeout(LIMIT, probe.started.notified())
+            .await
+            .expect("block never started");
+        source.cancel();
+        let s = tokio::time::timeout(LIMIT, handle)
+            .await
+            .expect("run timed out")
+            .unwrap()
+            .unwrap();
+        assert!(!s.is_success());
+
+        let ev = sink.take();
+        assert_eq!(kinds(&ev, "wait"), ["started", "finished"]);
+        let (wait_status, _, wait_cached) = block_finished(&ev, "wait");
+        assert_eq!(wait_status, Status::Cancelled);
+        assert!(!wait_cached);
+        assert_eq!(kinds(&ev, "next"), ["finished"]);
+        assert_eq!(
+            block_finished(&ev, "next"),
+            (Status::Cancelled, Duration::ZERO, false)
+        );
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Cancelled,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_skipped_with_partial_outputs_emits_produced_and_run_succeeds() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "gate", "src", "skip_out", &[]);
+        node(&mut b, "opt", "opt", "ok", &[("a", "gate.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let cfg = lineage_config(Arc::new(MemoryStore::new()), vec![sink.clone()]);
+        let s = run(&Runtime::new(cfg), &p).await;
+        assert!(s.is_success(), "{:?}", s.nodes);
+
+        let ev = sink.take();
+        assert_eq!(kinds(&ev, "gate"), ["started", "produced", "finished"]);
+        assert_eq!(produced(&ev, "gate"), [s.nodes["gate"].outputs["out"]]);
+        assert_eq!(block_finished(&ev, "gate").0, Status::Skipped);
+        assert!(!block_finished(&ev, "gate").2);
+        assert_eq!(kinds(&ev, "opt"), ["started", "produced", "finished"]);
+        assert_eq!(block_finished(&ev, "opt").0, Status::Succeeded);
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Succeeded,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
+    }
+
+    /// AC: no sink = no `lineage.json`, and caching still serves a rerun.
+    async fn lineage_off_scenario(store: Arc<dyn ArtifactStore>, local_root: Option<&Path>) {
+        let probe = Arc::new(Probe::default());
+        let p = lineage_chain(&probe);
+        let cfg = || lineage_config(Arc::clone(&store), Vec::new());
+        let s = run(&Runtime::new(cfg()), &p).await;
+        assert!(s.is_success());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+
+        let s2 = run(&Runtime::new(cfg()), &p).await;
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            2,
+            "rerun executed blocks"
+        );
+        for (id, n) in &s2.nodes {
+            assert_eq!((n.status, n.cached), (Status::Succeeded, true), "{id}");
+        }
+        for run_id in [s.run_id, s2.run_id] {
+            assert!(
+                store
+                    .get_meta(&lineage_key(run_id))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        if let Some(root) = local_root {
+            assert!(!root.join("meta").join("runs").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn lineage_off_writes_nothing_and_rerun_is_cached_memory_store() {
+        lineage_off_scenario(Arc::new(MemoryStore::new()), None).await;
+    }
+
+    #[tokio::test]
+    async fn lineage_off_writes_nothing_and_rerun_is_cached_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()).unwrap());
+        lineage_off_scenario(store, Some(dir.path())).await;
     }
 }

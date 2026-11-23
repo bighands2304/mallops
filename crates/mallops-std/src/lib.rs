@@ -24,7 +24,7 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use mallops_core::{BlockRef, BlockRegistry};
+    use mallops_core::{BlockRef, BlockRegistry, Error};
 
     use super::register_std;
 
@@ -36,14 +36,22 @@ mod tests {
         let csv: BlockRef = "std/ingest.csv".parse().unwrap();
         let parquet: BlockRef = "std/ingest.parquet".parse().unwrap();
 
-        #[cfg(feature = "ingest-csv")]
-        assert!(registry.contains(&csv));
-        #[cfg(not(feature = "ingest-csv"))]
-        assert!(!registry.contains(&csv));
+        assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
+        assert_eq!(
+            registry.contains(&parquet),
+            cfg!(feature = "ingest-parquet")
+        );
+    }
 
-        #[cfg(feature = "ingest-parquet")]
-        assert!(registry.contains(&parquet));
-        #[cfg(not(feature = "ingest-parquet"))]
-        assert!(!registry.contains(&parquet));
+    #[test]
+    fn register_std_twice_fails() {
+        let mut registry = BlockRegistry::new();
+        register_std(&mut registry).unwrap();
+        let second = register_std(&mut registry);
+        if cfg!(any(feature = "ingest-csv", feature = "ingest-parquet")) {
+            assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");
+        } else {
+            assert!(second.is_ok(), "{second:?}");
+        }
     }
 }

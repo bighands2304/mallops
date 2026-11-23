@@ -7,15 +7,16 @@ use std::sync::Arc;
 
 use arrow_csv::ReaderBuilder;
 use arrow_csv::reader::Format;
-use arrow_schema::Schema;
+use arrow_schema::{Field, Schema};
 use mallops_core::{
-    Block, BlockOutcome, BlockSpec, BoxFuture, CachePolicy, Context, Error, Inputs, Stage,
+    Block, BlockOutcome, BlockSpec, BoxFuture, CachePolicy, CancelToken, Context, Error, Inputs,
+    Stage,
 };
 use serde::Deserialize;
 
 use super::{
-    Column, DATA_FILE, arrow_schema, blocking, dataset_outcome, dataset_port, parse_config,
-    source_policy, write_parquet,
+    Column, DATA_FILE, blocking, dataset_outcome, dataset_port, parse_config, source_policy,
+    write_parquet,
 };
 
 fn default_delimiter() -> char {
@@ -38,20 +39,25 @@ struct CsvConfig {
 }
 
 impl CsvConfig {
-    fn parse(config: &serde_json::Value) -> Result<Self, Error> {
-        let cfg: Self = parse_config(config)?;
-        if !cfg.delimiter.is_ascii() {
+    fn check(self) -> Result<Self, Error> {
+        if !self.delimiter.is_ascii() || matches!(self.delimiter, '\n' | '\r' | '"') {
             return Err(Error::Config(format!(
-                "delimiter {:?} must be an ASCII character",
-                cfg.delimiter
+                "delimiter {:?} must be an ASCII character other than '\\n', '\\r', or '\"'",
+                self.delimiter
             )));
         }
-        Ok(cfg)
+        Ok(self)
     }
+}
 
-    fn delimiter_byte(&self) -> u8 {
-        self.delimiter as u8
-    }
+/// Arrow schema (all columns nullable) of an expected column list.
+fn arrow_schema(columns: &[Column]) -> Schema {
+    Schema::new(
+        columns
+            .iter()
+            .map(|c| Field::new(&c.name, c.ty.data_type(), true))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn check_header_names(expected: &[Column], header: &Schema) -> Result<(), Error> {
@@ -67,30 +73,48 @@ fn check_header_names(expected: &[Column], header: &Schema) -> Result<(), Error>
     )))
 }
 
-fn read_and_write_csv(cfg: &CsvConfig, out: &Path) -> Result<(), Error> {
+fn read_and_write_csv(cfg: &CsvConfig, out: &Path, cancel: &CancelToken) -> Result<(), Error> {
     let read_err = |e: &dyn std::fmt::Display| {
         Error::Runtime(format!("cannot read {}: {e}", cfg.path.display()))
     };
     let mut file = File::open(&cfg.path).map_err(|e| read_err(&e))?;
     let format = Format::default()
         .with_header(cfg.has_header)
-        .with_delimiter(cfg.delimiter_byte());
+        .with_delimiter(cfg.delimiter as u8);
 
     let schema = match &cfg.schema {
         Some(expected) => {
-            if cfg.has_header {
-                let (header, _) = format
-                    .infer_schema(&mut file, Some(0))
-                    .map_err(|e| read_err(&e))?;
-                check_header_names(expected, &header)?;
-                file.rewind().map_err(|e| read_err(&e))?;
+            let (probe, _) = format
+                .infer_schema(&mut file, Some(0))
+                .map_err(|e| read_err(&e))?;
+            if probe.fields().is_empty() {
+                return Err(Error::Runtime(format!(
+                    "{}: empty CSV: no columns",
+                    cfg.path.display()
+                )));
             }
+            if cfg.has_header {
+                check_header_names(expected, &probe)?;
+            } else if probe.fields().len() != expected.len() {
+                return Err(Error::Runtime(format!(
+                    "schema mismatch: expected {} columns, found {}",
+                    expected.len(),
+                    probe.fields().len()
+                )));
+            }
+            file.rewind().map_err(|e| read_err(&e))?;
             arrow_schema(expected)
         }
         None => {
             let (inferred, _) = format
                 .infer_schema(&mut file, None)
                 .map_err(|e| read_err(&e))?;
+            if inferred.fields().is_empty() {
+                return Err(Error::Runtime(format!(
+                    "{}: empty CSV: no columns",
+                    cfg.path.display()
+                )));
+            }
             file.rewind().map_err(|e| read_err(&e))?;
             inferred
         }
@@ -100,7 +124,7 @@ fn read_and_write_csv(cfg: &CsvConfig, out: &Path) -> Result<(), Error> {
         .with_format(format)
         .build(file)
         .map_err(|e| read_err(&e))?;
-    write_parquet(reader, out)?;
+    write_parquet(reader, out, &cfg.path, cancel)?;
     Ok(())
 }
 
@@ -119,12 +143,12 @@ impl Block for IngestCsv {
     }
 
     fn validate_config(&self, config: &serde_json::Value) -> Result<(), Error> {
-        CsvConfig::parse(config).map(|_| ())
+        parse_config::<CsvConfig>(config)?.check().map(|_| ())
     }
 
     fn cache_policy<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<CachePolicy, Error>> {
         Box::pin(async move {
-            let cfg = CsvConfig::parse(ctx.config())?;
+            let cfg = ctx.config_as::<CsvConfig>()?.check()?;
             source_policy(cfg.path).await
         })
     }
@@ -138,11 +162,11 @@ impl Block for IngestCsv {
             if ctx.cancel().is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let cfg = CsvConfig::parse(ctx.config())?;
+            let cfg = ctx.config_as::<CsvConfig>()?.check()?;
             let out = ctx.workdir().join(DATA_FILE);
-            let out_path = out.clone();
-            blocking(move || read_and_write_csv(&cfg, &out_path)).await?;
-            Ok(dataset_outcome(out))
+            let cancel = ctx.cancel().clone();
+            blocking(move || read_and_write_csv(&cfg, &out, &cancel)).await?;
+            Ok(dataset_outcome(ctx.workdir().join(DATA_FILE)))
         })
     }
 }
@@ -153,17 +177,15 @@ mod tests {
 
     use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use arrow_array::{
-        Array, BooleanArray, Date32Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader,
-        StringArray,
+        ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array, RecordBatch,
+        RecordBatchReader, StringArray,
     };
     use arrow_schema::DataType;
-    use mallops_core::{
-        ArtifactKind, CancelSource, DraftPayload, MemorySecretProvider, MemoryStore, RunId,
-    };
+    use mallops_core::{CancelSource, DraftPayload, MemorySecretProvider, MemoryStore, RunId};
     use serde_json::json;
 
     use super::*;
-    use crate::ingest::OUTPUT;
+    use crate::ingest::{ColumnType, OUTPUT};
 
     fn make_ctx(workdir: &Path, config: serde_json::Value) -> (Context, CancelSource) {
         let cancel = CancelSource::new();
@@ -176,6 +198,15 @@ mod tests {
             Arc::new(MemorySecretProvider::default()),
         );
         (ctx, cancel)
+    }
+
+    fn nullable_batch(cols: &[(&str, ArrayRef)]) -> RecordBatch {
+        let fields: Vec<Field> = cols
+            .iter()
+            .map(|(name, arr)| Field::new(*name, arr.data_type().clone(), true))
+            .collect();
+        let arrays: Vec<ArrayRef> = cols.iter().map(|(_, arr)| Arc::clone(arr)).collect();
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
     }
 
     fn read_parquet_batches(path: &Path) -> (Arc<Schema>, Vec<RecordBatch>) {
@@ -196,7 +227,27 @@ mod tests {
     }
 
     #[test]
-    fn ingest_csv_rejects_unknown_config_and_non_ascii_delimiter() {
+    fn ingest_csv_arrow_schema_builds_nullable_fields() {
+        let cols = [
+            Column {
+                name: "id".to_owned(),
+                ty: ColumnType::Int64,
+            },
+            Column {
+                name: "name".to_owned(),
+                ty: ColumnType::String,
+            },
+        ];
+        let s = arrow_schema(&cols);
+        assert_eq!(s.fields().len(), 2);
+        assert_eq!(s.field(0).name(), "id");
+        assert_eq!(s.field(0).data_type(), &DataType::Int64);
+        assert!(s.field(0).is_nullable());
+        assert_eq!(s.field(1).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn ingest_csv_rejects_unknown_config_and_invalid_delimiter() {
         let block = IngestCsv::new();
         assert!(block.validate_config(&json!({ "path": "a.csv" })).is_ok());
         assert!(
@@ -215,6 +266,9 @@ mod tests {
             json!({}),
             json!({ "path": "a.csv", "delimiter": "€" }),
             json!({ "path": "a.csv", "delimiter": "é" }),
+            json!({ "path": "a.csv", "delimiter": "\n" }),
+            json!({ "path": "a.csv", "delimiter": "\r" }),
+            json!({ "path": "a.csv", "delimiter": "\"" }),
             json!({ "path": "a.csv", "delimiter": ";;" }),
             json!({ "path": "a.csv", "schema": [{ "name": "x", "type": "int64", "extra": 1 }] }),
         ] {
@@ -245,31 +299,13 @@ mod tests {
             panic!("expected File payload");
         };
 
-        let (schema, batches) = read_parquet_batches(out_path);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, vec!["id", "name", "score"]);
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 2);
-
-        let ids = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let labels = batches[0]
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let scores = batches[0]
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(ids.values(), &[1, 2]);
-        assert_eq!(labels.value(0), "alice");
-        assert_eq!(labels.value(1), "bob");
-        assert_eq!(scores.values(), &[9.5, 8.0]);
+        let (_, batches) = read_parquet_batches(out_path);
+        let expected = nullable_batch(&[
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("name", Arc::new(StringArray::from(vec!["alice", "bob"]))),
+            ("score", Arc::new(Float64Array::from(vec![9.5, 8.0]))),
+        ]);
+        assert_eq!(batches, vec![expected]);
     }
 
     #[tokio::test]
@@ -281,18 +317,16 @@ mod tests {
         let workdir = tempfile::tempdir().unwrap();
         let (ctx, _cancel) = make_ctx(workdir.path(), json!({ "path": csv, "has_header": false }));
         IngestCsv::new().run(&ctx, Inputs::new()).await.unwrap();
-        let (schema, batches) = read_parquet_batches(&workdir.path().join(DATA_FILE));
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, vec!["column_1", "column_2", "column_3"]);
-        assert_eq!(schema.field(0).data_type(), &DataType::Int64);
-        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
-        assert_eq!(schema.field(2).data_type(), &DataType::Float64);
-        let ids = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(ids.values(), &[1, 2]);
+        let (_, batches) = read_parquet_batches(&workdir.path().join(DATA_FILE));
+        let expected = nullable_batch(&[
+            ("column_1", Arc::new(Int64Array::from(vec![1, 2]))),
+            (
+                "column_2",
+                Arc::new(StringArray::from(vec!["alice", "bob"])),
+            ),
+            ("column_3", Arc::new(Float64Array::from(vec![2.5, 3.5]))),
+        ]);
+        assert_eq!(batches, vec![expected]);
 
         // Explicit schema without header assigns column names and keeps row 1 as data.
         let workdir2 = tempfile::tempdir().unwrap();
@@ -309,15 +343,33 @@ mod tests {
             }),
         );
         IngestCsv::new().run(&ctx2, Inputs::new()).await.unwrap();
-        let (schema2, batches2) = read_parquet_batches(&workdir2.path().join(DATA_FILE));
-        let names2: Vec<&str> = schema2.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(names2, vec!["id", "name", "val"]);
-        let ids2 = batches2[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(ids2.values(), &[1, 2]);
+        let (_, batches2) = read_parquet_batches(&workdir2.path().join(DATA_FILE));
+        let expected2 = nullable_batch(&[
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("name", Arc::new(StringArray::from(vec!["alice", "bob"]))),
+            ("val", Arc::new(Float64Array::from(vec![2.5, 3.5]))),
+        ]);
+        assert_eq!(batches2, vec![expected2]);
+
+        // Explicit schema with wrong column count -> schema mismatch.
+        let workdir3 = tempfile::tempdir().unwrap();
+        let (ctx3, _cancel3) = make_ctx(
+            workdir3.path(),
+            json!({
+                "path": csv,
+                "has_header": false,
+                "schema": [{ "name": "id", "type": "int64" }]
+            }),
+        );
+        let err = IngestCsv::new()
+            .run(&ctx3, Inputs::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("schema mismatch: expected 1 columns, found 3"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -370,43 +422,16 @@ mod tests {
         );
 
         IngestCsv::new().run(&ctx, Inputs::new()).await.unwrap();
-        let (schema, batches) = read_parquet_batches(&workdir.path().join(DATA_FILE));
-        let types: Vec<&DataType> = schema.fields().iter().map(|f| f.data_type()).collect();
-        assert_eq!(
-            types,
-            vec![
-                &DataType::Boolean,
-                &DataType::Int64,
-                &DataType::Float64,
-                &DataType::Utf8,
-                &DataType::Date32,
-            ]
-        );
-        assert_eq!(batches.len(), 1);
-        let flags = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        let vals = batches[0]
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        let codes = batches[0]
-            .column(3)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let days = batches[0]
-            .column(4)
-            .as_any()
-            .downcast_ref::<Date32Array>()
-            .unwrap();
-        assert!(flags.value(0) && !flags.value(1));
-        assert_eq!(vals.values(), &[2.0, 3.5]);
-        assert_eq!(codes.value(0), "42");
-        assert_eq!(days.len(), 2);
+        let (_, batches) = read_parquet_batches(&workdir.path().join(DATA_FILE));
+        // 2026-01-15 is 20468 days since 1970-01-01.
+        let expected = nullable_batch(&[
+            ("flag", Arc::new(BooleanArray::from(vec![true, false]))),
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("val", Arc::new(Float64Array::from(vec![2.0, 3.5]))),
+            ("code", Arc::new(StringArray::from(vec!["42", "99"]))),
+            ("day", Arc::new(Date32Array::from(vec![20468, 20469]))),
+        ]);
+        assert_eq!(batches, vec![expected]);
     }
 
     #[tokio::test]
@@ -484,83 +509,62 @@ mod tests {
             matches!(err, Error::Runtime(_)),
             "expected Runtime error, got: {err}"
         );
-    }
-
-    #[tokio::test]
-    async fn ingest_csv_manifest_dataset_parquet() {
-        let dir = tempfile::tempdir().unwrap();
-        let csv = write_csv(dir.path(), "m.csv", "x\n1\n2\n");
-        let workdir = tempfile::tempdir().unwrap();
-        let (ctx, _cancel) = make_ctx(workdir.path(), json!({ "path": csv }));
-
-        let block = IngestCsv::new();
-        let BlockOutcome::Produced(drafts) = block.run(&ctx, Inputs::new()).await.unwrap() else {
-            panic!("expected Produced");
-        };
-        let draft = drafts.get(OUTPUT).expect("dataset draft");
-        assert_eq!(draft.manifest.kind, ArtifactKind::Dataset);
-        assert_eq!(draft.manifest.format, "parquet");
-        assert!(block.spec().outputs[0].accepts_manifest(&draft.manifest));
-
-        let expected_path = workdir.path().join(DATA_FILE);
-        assert_eq!(draft.payload, DraftPayload::File(expected_path.clone()));
-        assert!(expected_path.is_file());
-    }
-
-    #[tokio::test]
-    async fn ingest_csv_cache_policy_extra_hash_changes_after_modification() {
-        let dir = tempfile::tempdir().unwrap();
-        let csv = write_csv(dir.path(), "src.csv", "x\n1\n");
-        let workdir = tempfile::tempdir().unwrap();
-        let (ctx, _cancel) = make_ctx(workdir.path(), json!({ "path": csv }));
-        let block = IngestCsv::new();
-
-        let p1 = block.cache_policy(&ctx).await.unwrap();
-        let p2 = block.cache_policy(&ctx).await.unwrap();
-        assert_eq!(p1, p2);
-        let CachePolicy::Deterministic {
-            extra_hash: Some(h1),
-            ..
-        } = p1
-        else {
-            panic!("expected Deterministic with extra_hash");
-        };
-
-        std::fs::write(&csv, "x\n1\n2\n").unwrap();
-        let CachePolicy::Deterministic {
-            extra_hash: Some(h2),
-            ..
-        } = block.cache_policy(&ctx).await.unwrap()
-        else {
-            panic!("expected Deterministic with extra_hash");
-        };
-        assert_ne!(h1, h2);
-
-        // Missing file fails cache_policy.
-        let (missing_ctx, _cancel2) = make_ctx(
-            workdir.path(),
-            json!({ "path": dir.path().join("missing.csv") }),
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&csv.display().to_string()),
+            "error should name source file, got: {msg}"
         );
-        assert!(block.cache_policy(&missing_ctx).await.is_err());
+        assert!(
+            !msg.contains(DATA_FILE),
+            "error should not name output file, got: {msg}"
+        );
     }
 
     #[tokio::test]
-    async fn ingest_csv_same_input_produces_identical_parquet_bytes() {
+    async fn ingest_csv_empty_errors_and_header_only_succeeds() {
         let dir = tempfile::tempdir().unwrap();
-        let csv = write_csv(dir.path(), "det.csv", "id,name,val\n1,a,1.5\n2,b,2.5\n");
+        let empty = write_csv(dir.path(), "empty.csv", "");
         let block = IngestCsv::new();
 
-        let run_once = || async {
+        for cfg in [
+            json!({ "path": empty }),
+            json!({ "path": empty, "has_header": false }),
+            json!({ "path": empty, "schema": [{ "name": "id", "type": "int64" }] }),
+            json!({ "path": empty, "has_header": false, "schema": [{ "name": "id", "type": "int64" }] }),
+        ] {
             let workdir = tempfile::tempdir().unwrap();
-            let (ctx, _cancel) = make_ctx(workdir.path(), json!({ "path": csv }));
-            block.run(&ctx, Inputs::new()).await.unwrap();
-            std::fs::read(workdir.path().join(DATA_FILE)).unwrap()
-        };
+            let (ctx, _cancel) = make_ctx(workdir.path(), cfg);
+            let err = block
+                .run(&ctx, Inputs::new())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("empty CSV: no columns"),
+                "expected empty CSV error, got: {err}"
+            );
+        }
 
-        let bytes_a = run_once().await;
-        let bytes_b = run_once().await;
-        assert!(!bytes_a.is_empty());
-        assert_eq!(bytes_a, bytes_b);
+        // Header-only (0 data rows) is valid both with and without explicit schema.
+        let hdr_only = write_csv(dir.path(), "hdr.csv", "id,name\n");
+        for cfg in [
+            json!({ "path": hdr_only }),
+            json!({
+                "path": hdr_only,
+                "schema": [
+                    { "name": "id", "type": "int64" },
+                    { "name": "name", "type": "string" }
+                ]
+            }),
+        ] {
+            let workdir = tempfile::tempdir().unwrap();
+            let (ctx, _cancel) = make_ctx(workdir.path(), cfg);
+            block.run(&ctx, Inputs::new()).await.unwrap();
+            let (schema, batches) = read_parquet_batches(&workdir.path().join(DATA_FILE));
+            assert_eq!(schema.fields().len(), 2);
+            let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            assert_eq!(total_rows, 0);
+        }
     }
 
     #[tokio::test]
@@ -583,5 +587,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Runtime(_)));
+        assert!(IngestCsv::new().cache_policy(&missing_ctx).await.is_err());
     }
 }

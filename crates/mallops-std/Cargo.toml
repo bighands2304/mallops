@@ -1,0 +1,40 @@
+[package]
+name = "mallops-std"
+description = "Standard blocks of the mallops MLOps framework (one feature flag per block)"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["ingest"]
+ingest = ["ingest-csv", "ingest-parquet"]
+ingest-csv = ["dep:arrow-csv", "_ingest"]
+ingest-parquet = ["_ingest"]
+# Shared ingest plumbing (Parquet writer, Arrow schema/arrays); not a public feature.
+_ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
+
+[dependencies]
+mallops-core = { path = "../mallops-core", version = "0.1.0" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+# 59.x: 60.x requires Rust 1.88 (MSRV is 1.85). Codecs are for reading external files;
+# the output is always uncompressed.
+arrow-array = { version = "59", optional = true }
+arrow-csv = { version = "59", optional = true }
+arrow-schema = { version = "59", optional = true }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"], optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

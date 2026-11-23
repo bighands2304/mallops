@@ -2,5 +2,7 @@
 source: crates/mallops-cli/tests/inspect.rs
 expression: "String::from_utf8(out.stdout).unwrap()"
 ---
-ID         VERSION  STAGE   INPUTS    OUTPUTS
-core/noop  1.0.0    custom  in?:blob  out:blob
+ID                  VERSION  STAGE   INPUTS    OUTPUTS
+core/noop           1.0.0    custom  in?:blob  out:blob
+std/ingest.csv      0.1.0    ingest  -         dataset:dataset
+std/ingest.parquet  0.1.0    ingest  -         dataset:dataset

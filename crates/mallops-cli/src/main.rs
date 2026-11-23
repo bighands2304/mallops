@@ -82,10 +82,11 @@ pub(crate) enum GraphFormat {
     Dot,
 }
 
-/// Blocks available to the CLI. `mallops_std::register_std` joins in #11.
+/// Blocks available to the CLI: `core/noop` plus every standard block.
 pub(crate) fn registry() -> anyhow::Result<BlockRegistry> {
     let mut r = BlockRegistry::new();
     r.register(Arc::new(noop::Noop::new()))?;
+    mallops_std::register_std(&mut r)?;
     Ok(r)
 }
 

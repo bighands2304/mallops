@@ -24,11 +24,12 @@ _ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:blake3", "
 
 [dependencies]
 mallops-core = { path = "../mallops-core", version = "0.1.0" }
-# 59.x: 60.x requires Rust 1.88 (MSRV is 1.85).
+# 59.x: 60.x requires Rust 1.88 (MSRV is 1.85). Codecs are for reading external files;
+# the output is always uncompressed.
 arrow-array = { version = "59", optional = true }
 arrow-csv = { version = "59", optional = true }
 arrow-schema = { version = "59", optional = true }
-parquet = { version = "59", default-features = false, features = ["arrow"], optional = true }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"], optional = true }
 blake3 = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

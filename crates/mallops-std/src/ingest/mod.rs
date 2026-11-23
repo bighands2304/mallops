@@ -3,9 +3,6 @@
 //! Every ingest block emits one `dataset` output with `format: parquet` (ADR-0002): a single
 //! uncompressed `data.parquet` file written into the block workdir, committed by the runtime.
 
-// ponytail: remove once 11.1 and 11.2 use every helper
-#![allow(dead_code)]
-
 #[cfg(feature = "ingest-csv")]
 pub(crate) mod csv;
 #[cfg(feature = "ingest-parquet")]
@@ -62,6 +59,7 @@ pub(crate) struct Column {
 }
 
 /// Arrow schema (all columns nullable) of an expected column list.
+#[cfg_attr(not(feature = "ingest-csv"), allow(dead_code))] // only `std/ingest.csv` parses with it
 pub(crate) fn arrow_schema(columns: &[Column]) -> Schema {
     Schema::new(
         columns
@@ -73,6 +71,7 @@ pub(crate) fn arrow_schema(columns: &[Column]) -> Schema {
 
 /// Checks that `actual` has exactly the `expected` column names and types, in order
 /// (nullability is ignored).
+#[cfg_attr(not(feature = "ingest-parquet"), allow(dead_code))] // CSV checks header names only
 pub(crate) fn check_schema(expected: &[Column], actual: &Schema) -> Result<(), Error> {
     let found: Vec<(&str, &DataType)> = actual
         .fields()

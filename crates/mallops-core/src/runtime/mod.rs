@@ -237,9 +237,7 @@ impl Runtime {
                 started[i] = true;
                 match gate(node, &index, &results, &env.cancel) {
                     Err((status, reason)) => {
-                        let summary = not_run(status, reason);
-                        env.emit_finished(&node.id, &summary).await;
-                        results[i] = Some(summary);
+                        results[i] = Some(env.finish_not_run(&node.id, status, reason).await);
                     }
                     Ok(inputs) => {
                         let workdir = run_path.join(format!("{i:04}"));
@@ -252,21 +250,22 @@ impl Runtime {
             let Some(joined) = tasks.join_next_with_id().await else {
                 break;
             };
-            let (task, summary, panicked) = match joined {
-                Ok((task, summary)) => (task, summary, false),
-                Err(e) => (
-                    e.id(),
-                    finished(Status::Failed, Duration::ZERO, BTreeMap::new(), None)
-                        .with_error(Error::Runtime(format!("node task failed: {e}"))),
-                    true,
-                ),
-            };
-            if let Some(i) = task_node.remove(&task) {
-                // A finished task already emitted its own `BlockFinished`.
-                if panicked {
-                    env.emit_finished(&nodes[i].id, &summary).await;
+            match joined {
+                Ok((task, summary)) => {
+                    // A finished task already emitted its own `BlockFinished`.
+                    if let Some(i) = task_node.remove(&task) {
+                        results[i] = Some(summary);
+                    }
                 }
-                results[i] = Some(summary);
+                Err(e) => {
+                    if let Some(i) = task_node.remove(&e.id()) {
+                        let summary =
+                            finished(Status::Failed, Duration::ZERO, BTreeMap::new(), None)
+                                .with_error(Error::Runtime(format!("node task failed: {e}")));
+                        env.emit_finished(&nodes[i].id, &summary).await;
+                        results[i] = Some(summary);
+                    }
+                }
             }
         }
 
@@ -278,9 +277,8 @@ impl Runtime {
             let r = match r {
                 Some(r) => r,
                 None => {
-                    let r = not_run(Status::Cancelled, "not scheduled".into());
-                    env.emit_finished(&n.id, &r).await;
-                    r
+                    env.finish_not_run(&n.id, Status::Cancelled, "not scheduled".into())
+                        .await
                 }
             };
             summaries.insert(n.id.clone(), r);
@@ -336,6 +334,13 @@ impl NodeEnv {
         };
         emit(&self.sinks, &event).await;
     }
+
+    /// Builds a zero-duration summary for a node that never started and emits `BlockFinished`.
+    async fn finish_not_run(&self, node: &str, status: Status, reason: String) -> NodeSummary {
+        let summary = finished(status, Duration::ZERO, BTreeMap::new(), Some(reason));
+        self.emit_finished(node, &summary).await;
+        summary
+    }
 }
 
 /// Sends `event` to every sink in order; a sink error is logged and never stops the run.
@@ -386,10 +391,6 @@ fn finished(
         error: None,
         cached: false,
     }
-}
-
-fn not_run(status: Status, reason: String) -> NodeSummary {
-    finished(status, Duration::ZERO, BTreeMap::new(), Some(reason))
 }
 
 impl NodeSummary {
@@ -476,14 +477,14 @@ async fn run_node(
     env: NodeEnv,
 ) -> NodeSummary {
     let Ok(_permit) = env.jobs.acquire().await else {
-        let summary = not_run(Status::Cancelled, "job pool closed".into());
-        env.emit_finished(&node.id, &summary).await;
-        return summary;
+        return env
+            .finish_not_run(&node.id, Status::Cancelled, "job pool closed".into())
+            .await;
     };
     if env.cancel.is_cancelled() {
-        let summary = not_run(Status::Cancelled, "run cancelled".into());
-        env.emit_finished(&node.id, &summary).await;
-        return summary;
+        return env
+            .finish_not_run(&node.id, Status::Cancelled, "run cancelled".into())
+            .await;
     }
     let started = LineageEvent::BlockStarted {
         run: env.run_id,
@@ -1615,7 +1616,12 @@ mod tests {
     }
 
     impl Capture {
-        /// Installs a capture on the current thread; returns the guard and the captured text.
+        /// Installs a thread-local capture; returns the guard and the captured text.
+        ///
+        /// Safe in the unit-test binary only while no other unit test executes the same
+        /// `tracing` callsite concurrently (otherwise tracing's global callsite interest cache
+        /// can race and drop events); if another unit test ever activates that callsite, move
+        /// the test into a dedicated integration test under `tests/` like `lineage_leak.rs`.
         fn install() -> (tracing::subscriber::DefaultGuard, Arc<Mutex<String>>) {
             let out = Arc::new(Mutex::new(String::new()));
             let capture = Capture {
@@ -1986,11 +1992,9 @@ mod tests {
         let probe = Arc::new(Probe::default());
         let p = lineage_pipeline(&probe, false);
         let sink: Arc<dyn LineageSink> = Arc::new(JsonSink::new(Arc::clone(&store)));
-        let s = run(
-            &Runtime::new(lineage_config(Arc::clone(&store), vec![sink])),
-            &p,
-        )
-        .await;
+        let cfg = lineage_config(Arc::clone(&store), vec![sink]);
+        let expected_host = serde_json::to_value(&cfg.host).unwrap();
+        let s = run(&Runtime::new(cfg), &p).await;
 
         let bytes = store
             .get_meta(&lineage_key(s.run_id))
@@ -2003,6 +2007,12 @@ mod tests {
         let events = doc["events"].as_array().expect("events array");
         let kind = |e: &serde_json::Value| e["event"].as_str().unwrap_or_default().to_owned();
         assert_eq!(kind(&events[0]), "run_started");
+        assert_eq!(
+            events[0]["pipeline_hash"],
+            pipeline_hash(p.nodes()).to_hex()
+        );
+        assert_eq!(events[0]["host"], expected_host);
+        assert_eq!(events[0]["git_commit"], "0123abc");
         let last = events.last().unwrap();
         assert_eq!(kind(last), "run_finished");
         assert_eq!(last["status"], "failed");
@@ -2021,6 +2031,18 @@ mod tests {
         assert_eq!(ok["seed"], 7);
         let ok_hash = cache::config_hash(&serde_json::json!({ "mode": "ok" }));
         assert_eq!(ok["config_hash"], ok_hash.to_hex());
+        assert_eq!(ok["inputs"], serde_json::json!([]));
+        let ok_out = s.nodes["ok"].outputs["out"];
+        let use_ok = find("block_started", "use_ok");
+        assert_eq!(use_ok["inputs"], serde_json::json!([ok_out.to_hex()]));
+        for id in ["ok", "use_ok"] {
+            let prod = find("artifact_produced", id);
+            assert_eq!(
+                prod["artifact"],
+                s.nodes[id].outputs["out"].to_hex(),
+                "{id}"
+            );
+        }
         let mut statuses = Vec::new();
         for (id, n) in &s.nodes {
             let f = find("block_finished", id);
@@ -2053,6 +2075,8 @@ mod tests {
         let sinks: Vec<Arc<dyn LineageSink>> = vec![Arc::new(FailingSink), sink.clone()];
         let cfg = lineage_config(Arc::new(MemoryStore::new()), sinks);
 
+        // Thread-local subscriber: safe while this is the only unit test triggering
+        // `emit()`'s `tracing::warn!` callsite; otherwise move to `tests/` like `lineage_leak.rs`.
         let (guard, logs) = Capture::install();
         let s = run(&Runtime::new(cfg), &p).await;
         drop(guard);
@@ -2061,6 +2085,17 @@ mod tests {
         // RunStarted, 2 x (started, produced, finished), RunFinished: the next sink got them all.
         let ev = sink.take();
         assert_eq!(ev.len(), 8, "{ev:?}");
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Succeeded,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
         let logs = logs.lock().unwrap();
         let warnings = logs
             .lines()
@@ -2068,6 +2103,88 @@ mod tests {
             .filter(|l| l.contains("sink unavailable"))
             .count();
         assert_eq!(warnings, ev.len(), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn lineage_in_flight_cancel_emits_started_then_cancelled() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "wait", "src", "wait_cancel", &[]);
+        node(&mut b, "next", "one", "ok", &[("a", "wait.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let source = CancelSource::new();
+        let mut cfg = lineage_config(Arc::new(MemoryStore::new()), vec![sink.clone()]);
+        cfg.cancel = source.token();
+        let rt = Runtime::new(cfg);
+
+        let handle = tokio::spawn(async move { rt.run(&p).await });
+        tokio::time::timeout(LIMIT, probe.started.notified())
+            .await
+            .expect("block never started");
+        source.cancel();
+        let s = tokio::time::timeout(LIMIT, handle)
+            .await
+            .expect("run timed out")
+            .unwrap()
+            .unwrap();
+        assert!(!s.is_success());
+
+        let ev = sink.take();
+        assert_eq!(kinds(&ev, "wait"), ["started", "finished"]);
+        let (wait_status, _, wait_cached) = block_finished(&ev, "wait");
+        assert_eq!(wait_status, Status::Cancelled);
+        assert!(!wait_cached);
+        assert_eq!(kinds(&ev, "next"), ["finished"]);
+        assert_eq!(
+            block_finished(&ev, "next"),
+            (Status::Cancelled, Duration::ZERO, false)
+        );
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Cancelled,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_skipped_with_partial_outputs_emits_produced_and_run_succeeds() {
+        let probe = Arc::new(Probe::default());
+        let mut b = PipelineBuilder::new("t");
+        node(&mut b, "gate", "src", "skip_out", &[]);
+        node(&mut b, "opt", "opt", "ok", &[("a", "gate.out")]);
+        let p = b.build(&registry(&probe)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let cfg = lineage_config(Arc::new(MemoryStore::new()), vec![sink.clone()]);
+        let s = run(&Runtime::new(cfg), &p).await;
+        assert!(s.is_success(), "{:?}", s.nodes);
+
+        let ev = sink.take();
+        assert_eq!(kinds(&ev, "gate"), ["started", "produced", "finished"]);
+        assert_eq!(produced(&ev, "gate"), [s.nodes["gate"].outputs["out"]]);
+        assert_eq!(block_finished(&ev, "gate").0, Status::Skipped);
+        assert!(!block_finished(&ev, "gate").2);
+        assert_eq!(kinds(&ev, "opt"), ["started", "produced", "finished"]);
+        assert_eq!(block_finished(&ev, "opt").0, Status::Succeeded);
+        assert!(
+            matches!(
+                ev.last(),
+                Some(LineageEvent::RunFinished {
+                    status: Status::Succeeded,
+                    ..
+                })
+            ),
+            "{:?}",
+            ev.last()
+        );
     }
 
     /// AC: no sink = no `lineage.json`, and caching still serves a rerun.

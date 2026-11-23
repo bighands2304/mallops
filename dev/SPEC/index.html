@@ -621,6 +621,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="5. Pipeline definition (mallops.yaml)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-cli-mallops" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 CLI (mallops)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1368,6 +1385,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="5. Pipeline definition (mallops.yaml)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-cli-mallops" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 CLI (mallops)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1662,7 +1696,7 @@
 <h3 id="41-trust-model">4.1 Trust model<a class="headerlink" href="#41-trust-model" title="Permanent link">&para;</a></h3>
 <p>mallops enforces explicit trust boundaries (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>):</p>
 <ul>
-<li><strong>Pipeline definitions (<code>mallops.yaml</code>) are trusted code.</strong> Running <code>mallops run</code> is equivalent to executing a build script: native blocks run in-process and external blocks run arbitrary configured commands (<code>command:</code>). By contrast, <code>mallops validate</code> and <code>mallops graph</code> <strong>never</strong> execute user code or spawn external processes.</li>
+<li><strong>Pipeline definitions (<code>mallops.yaml</code>) are trusted code.</strong> Running <code>mallops run</code> is equivalent to executing a build script: native blocks run in-process, external blocks run arbitrary configured commands (<code>command:</code>), and <code>mallops run</code> spawns <code>git rev-parse HEAD</code> (best-effort, in the directory of <code>mallops.yaml</code>, stderr discarded; failure yields <code>None</code>) to record <code>RunStarted.git_commit</code>. By contrast, <code>mallops validate</code> and <code>mallops graph</code> <strong>never</strong> execute user code, spawn external processes (not even <code>git</code>), or create the artifact store directory. <code>mallops store verify</code> likewise never runs blocks or spawns external processes.</li>
 <li><strong>Plugin isolation boundaries.</strong> Only WASM component plugins (post-v0.1) execute inside a capability-restricted sandbox. Native Rust blocks have no isolation; external CLI and gRPC blocks run as host processes. In v0.1, external CLI blocks execute via <code>argv</code> (never through a shell), with an explicit allowlisted environment and an isolated workdir, but this is process hygiene rather than a security sandbox.</li>
 <li><strong>Model flavor deserialization.</strong> Formats such as <code>pickle</code>, <code>joblib</code>, <code>sklearn-pickle</code>, and <code>torchscript</code> execute arbitrary code when loaded. <code>Predictor</code> implementations declare <code>executes_code(&amp;self) -&gt; bool</code>, and <code>mallops serve</code> refuses to load code-executing flavors unless <code>--trust-unsafe-flavors</code> is explicitly passed. Prefer non-executing formats (<code>onnx</code>, <code>safetensors</code>, <code>skops</code>) and, from v0.3, cryptographically signed packages.</li>
 <li><strong>Secrets.</strong> <code>${secret:NAME}</code> references are resolved on demand through a <code>SecretProvider</code> (<code>MALLOPS_SECRET_&lt;NAME&gt;</code> environment variable in v0.1) into an opaque <code>Secret</code> newtype whose <code>Debug</code>/<code>Display</code> output is redacted (<code>"***"</code>) and which does not implement <code>Serialize</code>. Secrets never enter <code>Context.config</code>, <code>config.json</code>, cache keys, <code>config_hash</code>, logs, or lineage sinks.</li>
@@ -1736,7 +1770,49 @@
   - Each run gets a temporary workdir under <code>RuntimeConfig::workdir_root</code> (which may be relative) with one subdirectory per node; <code>ctx.workdir()</code> is always absolute and canonical. The run workdir is removed when the run ends.
 - Values may reference environment variables <code>${env:NAME}</code> (resolved into <code>config</code> and included in <code>config_hash</code>; <code>NAME</code> is <code>[A-Za-z0-9_]+</code>; interpolated only in string values of each block's <code>with</code>, of lineage sink <code>with</code>, and in <code>store.path</code>, never in keys, <code>in</code>, <code>seed</code> or elsewhere; replaced text is not re-scanned; no escape syntax; a missing variable is an error naming the file and the block, sink or <code>store.path</code>) and secrets <code>${secret:NAME}</code> (same <code>NAME</code> charset, validated at load; kept literally in the config, never resolved at load time; resolved on demand via <code>MALLOPS_SECRET_&lt;NAME&gt;</code> in v0.1 into a redacted <code>Secret</code>, never written to <code>config.json</code>, cache keys, logs, or lineage).
 - Unknown keys are rejected (<code>deny_unknown_fields</code>); <code>lineage</code> accepts only <code>off</code> or a list of sinks; <code>version</code> must be <code>1</code>; duplicate block ids (or <code>in</code> ports) are rejected. Syntax and schema errors are reported as <code>&lt;file&gt;:&lt;line&gt;:&lt;column&gt;: &lt;message&gt;</code>.
+- Store and lineage backend mapping in the v0.1 CLI (<code>check_backends</code>, enforced by <code>validate</code>, <code>run</code>, and <code>store verify</code>):
+  - <code>store.kind</code> accepts <code>local</code> (<code>LocalStore</code> at <code>&lt;yaml-dir&gt;/&lt;store.path&gt;</code>, where <code>&lt;yaml-dir&gt;</code> is the parent directory of the <code>mallops.yaml</code> path, defaulting to <code>.</code> when empty) and <code>memory</code> (<code>MemoryStore</code>). Any other <code>store.kind</code> fails with an error.
+  - <code>lineage: off</code> disables lineage (<code>RuntimeConfig::lineage = vec![]</code>); otherwise every configured sink must have <code>sink: json</code> (<code>JsonSink</code> on the configured store). Any other sink name fails with an error.
+- Built-in <code>core/noop</code> block (version <code>1.0.0</code>): registered in <code>mallops-cli</code> (<code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload) so <code>init &amp;&amp; validate &amp;&amp; run</code> is self-contained before <code>mallops-std</code>. Test affordances in <code>with:</code>: <code>fail: "&lt;message&gt;"</code> fails the node with <code>Error::Runtime("core/noop: &lt;message&gt;")</code>, and <code>skip: "&lt;reason&gt;"</code> returns <code>BlockOutcome::Skipped</code> with no outputs.
+- Latest run pointer (<code>runs/latest.json</code>): after <code>mallops run</code>, if and only if every node is <code>Succeeded</code>, the CLI writes <code>runs/latest.json</code> via <code>ArtifactStore::put_meta</code> (<code>meta/runs/latest.json</code> on <code>LocalStore</code>) as <code>{"v":1,"pipeline":"&lt;name&gt;","run":"&lt;run-id&gt;","outputs":{"&lt;node&gt;":{"&lt;port&gt;":"&lt;artifact-id&gt;"}}}</code> (deterministic key order via <code>BTreeMap</code>), so <code>mallops serve</code> can resolve <code>serve.package</code> without an explicit id. If any node is <code>Skipped</code> (with no failed/cancelled nodes), <code>mallops run</code> leaves any previous <code>runs/latest.json</code> unchanged, prints <code>latest.json not updated: &lt;S&gt; skipped</code>, and exits <code>0</code>. A failed run leaves any previous <code>runs/latest.json</code> unchanged and exits <code>1</code> (<code>error: run failed</code>).
 - A JSON Schema for <code>mallops.yaml</code> can be generated via the optional <code>schema</code> feature (<code>schemars</code>) for editor completion.</p>
+<h3 id="51-cli-mallops">5.1 CLI (<code>mallops</code>)<a class="headerlink" href="#51-cli-mallops" title="Permanent link">&para;</a></h3>
+<p>Global flags: <code>--version</code> (<code>-V</code>), <code>-v</code> / <code>--verbose</code> (stderr <code>tracing</code> logs at <code>DEBUG</code> instead of <code>WARN</code>), and <code>-f</code> / <code>--file &lt;PATH&gt;</code> (default <code>mallops.yaml</code>).</p>
+<p>Exit codes: <code>0</code> on success, <code>1</code> on configuration, validation, runtime, or store verification error, <code>2</code> on CLI argument/usage error (<code>clap</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mallops init [DIR]</code></td>
+<td>Writes a minimal runnable <code>mallops.yaml</code> (two <code>core/noop</code> nodes, <code>hello</code> → <code>world</code>) into <code>DIR</code> (default <code>.</code>, creating missing parent directories); fails if <code>mallops.yaml</code> already exists.</td>
+</tr>
+<tr>
+<td><code>mallops validate</code></td>
+<td>Parses and validates <code>mallops.yaml</code> (including <code>serve:</code> if present) and checks supported store/lineage backends without executing blocks or spawning processes. Prints <code>ok: &lt;name&gt; (&lt;N&gt; blocks)</code> on stdout, or every validation error (<code>error: &lt;path&gt;: &lt;message&gt;</code>) on stderr.</td>
+</tr>
+<tr>
+<td><code>mallops run [--jobs N] [--no-cache]</code></td>
+<td>Validates and executes the batch DAG (<code>blocks:</code> only; ignores <code>serve:</code>). <code>--jobs N</code> overrides <code>RuntimeConfig::max_jobs</code> (default: available parallelism; <code>0</code> counts as <code>1</code>); <code>--no-cache</code> bypasses the cache. Populates <code>git_commit</code> via best-effort <code>git rev-parse HEAD</code> in the <code>mallops.yaml</code> directory. Prints one line per node in topological order (<code>&lt;node&gt; &lt;status&gt;[ (cached)] &lt;ms&gt;ms[: &lt;reason/error&gt;]</code>) followed by <code>run &lt;run-id&gt;: &lt;E&gt; executed, &lt;C&gt; cached, &lt;F&gt; failed, &lt;S&gt; skipped, &lt;X&gt; cancelled</code> (<code>executed</code> = non-cached <code>Succeeded</code>). Writes <code>runs/latest.json</code> only when every node is <code>Succeeded</code> (if any node is <code>Skipped</code>, prints <code>latest.json not updated: &lt;S&gt; skipped</code> and exits <code>0</code>); exits <code>1</code> on failure.</td>
+</tr>
+<tr>
+<td><code>mallops graph [--format mermaid\|dot]</code></td>
+<td>Prints the validated DAG in topological order as Mermaid (<code>flowchart TD</code>, default) or Graphviz DOT (<code>digraph</code>), with edges labeled by input port name, without executing blocks or spawning processes.</td>
+</tr>
+<tr>
+<td><code>mallops blocks list</code></td>
+<td>Prints registered blocks (<code>ID</code>, <code>VERSION</code>, <code>STAGE</code>, <code>INPUTS</code>, <code>OUTPUTS</code>; optional inputs suffixed with <code>?</code>, empty port list shown as <code>-</code>), sorted by block id.</td>
+</tr>
+<tr>
+<td><code>mallops store verify &lt;ID&gt;</code></td>
+<td>Parses <code>&lt;ID&gt;</code> as an <code>ArtifactId</code>, checks backends, opens the configured store (for <code>kind: local</code>, fails with <code>store not found: &lt;path&gt;</code> without creating it if absent), and calls <code>ArtifactStore::verify</code>. Prints <code>ok: &lt;id&gt;</code> on stdout on success; exits <code>1</code> on invalid id, missing store/artifact, or corruption/tampering.</td>
+</tr>
+</tbody>
+</table>
 <h2 id="6-artifact-contract">6. Artifact contract<a class="headerlink" href="#6-artifact-contract" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>&lt;store&gt;/artifacts/&lt;blake3-hash&gt;/
 ├── manifest.json
@@ -1838,7 +1914,7 @@
 <tbody>
 <tr>
 <td><strong>v0.1</strong></td>
-<td><code>mallops-core</code> (Block trait, canonical artifacts, immutable <code>ArtifactStore</code> + local/memory + auxiliary metadata, explicit <code>BlockRegistry</code>, lineage events + JSON sink, DAG runtime, YAML), CLI (<code>init</code>, <code>validate</code>, <code>run</code>, <code>graph</code>, <code>blocks list</code>, <code>serve</code>), <code>mallops-std</code> (<code>Predictor</code> contract, ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, HTTP serving)</td>
+<td><code>mallops-core</code> (Block trait, canonical artifacts, immutable <code>ArtifactStore</code> + local/memory + auxiliary metadata, explicit <code>BlockRegistry</code>, lineage events + JSON sink, DAG runtime, YAML), CLI (<code>init</code>, <code>validate</code>, <code>run</code>, <code>graph</code>, <code>blocks list</code>, <code>store verify</code>, <code>serve</code>), <code>mallops-std</code> (<code>Predictor</code> contract, ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, HTTP serving)</td>
 </tr>
 <tr>
 <td>v0.2</td>

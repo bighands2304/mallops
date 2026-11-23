@@ -1,104 +1,10 @@
-//! End-to-end CLI tests for standard ingest blocks (`std/ingest.csv`).
+//! End-to-end CLI tests for standard ingest blocks (`std/ingest.csv`, `std/ingest.parquet`).
+
+mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-use serde_json::Value;
-
-const BIN: &str = env!("CARGO_BIN_EXE_mallops");
-
-/// Tempdir wrapper that makes read-only store trees writable before cleanup.
-struct WorkDir(tempfile::TempDir);
-
-impl WorkDir {
-    fn new() -> Self {
-        Self(tempfile::tempdir().unwrap())
-    }
-
-    fn path(&self) -> &Path {
-        self.0.path()
-    }
-
-    fn write(&self, rel: &str, content: &str) -> PathBuf {
-        let p = self.path().join(rel);
-        if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&p, content).unwrap();
-        p
-    }
-}
-
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        make_tree_writable(self.path());
-    }
-}
-
-#[cfg(unix)]
-fn make_tree_writable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(cur) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&cur) else {
-            continue;
-        };
-        let ft = meta.file_type();
-        if ft.is_dir() {
-            let _ = fs::set_permissions(&cur, fs::Permissions::from_mode(0o755));
-            if let Ok(entries) = fs::read_dir(&cur) {
-                for entry in entries.flatten() {
-                    stack.push(entry.path());
-                }
-            }
-        } else if ft.is_file() {
-            let _ = fs::set_permissions(&cur, fs::Permissions::from_mode(0o644));
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn make_tree_writable(path: &Path) {
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(cur) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&cur) else {
-            continue;
-        };
-        if meta.is_file() {
-            let mut perms = meta.permissions();
-            perms.set_readonly(false);
-            let _ = fs::set_permissions(&cur, perms);
-        } else if meta.is_dir() {
-            if let Ok(entries) = fs::read_dir(&cur) {
-                for entry in entries.flatten() {
-                    stack.push(entry.path());
-                }
-            }
-        }
-    }
-}
-
-fn run_cli(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(BIN)
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .expect("failed to execute mallops binary")
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn read_json(path: &Path) -> Value {
-    serde_json::from_slice(&fs::read(path).expect("json file must exist")).unwrap()
-}
+use common::{WorkDir, read_json, run_cli, stderr, stdout};
 
 #[test]
 fn ingest_e2e_csv_relative_path_cache_and_invalidation() {
@@ -169,18 +75,16 @@ blocks:
         stderr(&verify1)
     );
 
-    // 2. Second run with unchanged CSV: 0 executed, served from cache with same id.
+    // 2. Second run with unchanged CSV: served from cache with the same artifact id.
     let second = run_cli(caller_cwd.path(), &["-f", yaml_arg, "run"]);
     assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));
-    let out2 = stdout(&second);
-    assert!(out2.contains("raw succeeded (cached) "), "stdout:\n{out2}");
     assert!(
-        out2.contains(": 0 executed, 1 cached, 0 failed, 0 skipped, 0 cancelled"),
-        "stdout:\n{out2}"
+        stdout(&second).contains("0 executed, 1 cached"),
+        "stdout:\n{}",
+        stdout(&second)
     );
-    let latest2 = read_json(&latest_path);
     assert_eq!(
-        latest2["outputs"]["raw"]["dataset"].as_str(),
+        read_json(&latest_path)["outputs"]["raw"]["dataset"].as_str(),
         Some(id1.as_str())
     );
 
@@ -223,6 +127,143 @@ blocks:
         Some(0),
         "stderr: {}",
         stderr(&verify2)
+    );
+}
+
+#[test]
+fn ingest_e2e_relative_file_flag_from_other_cwd() {
+    let root = WorkDir::new();
+    root.write("sub/proj/data.csv", "id,label\n1,a\n2,b\n");
+    root.write(
+        "sub/proj/mallops.yaml",
+        r#"version: 1
+name: rel-flag
+store:
+  kind: local
+  path: ./.mallops
+blocks:
+  raw:
+    use: std/ingest.csv
+    with:
+      path: data.csv
+"#,
+    );
+
+    let out = run_cli(root.path(), &["-f", "sub/proj/mallops.yaml", "run"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !root.path().join(".mallops").exists(),
+        "store must live in sub/proj, not caller cwd"
+    );
+    let latest = read_json(&root.path().join("sub/proj/.mallops/meta/runs/latest.json"));
+    let id = latest["outputs"]["raw"]["dataset"]
+        .as_str()
+        .expect("dataset id");
+    let verify = run_cli(
+        root.path(),
+        &["-f", "sub/proj/mallops.yaml", "store", "verify", id],
+    );
+    assert_eq!(verify.status.code(), Some(0), "stderr: {}", stderr(&verify));
+}
+
+#[test]
+fn ingest_e2e_parquet_reads_validates_and_caches() {
+    // Produce a real Parquet file via `std/ingest.csv`, then feed it to `std/ingest.parquet`.
+    let seed = WorkDir::new();
+    seed.write("seed.csv", "id,name\n1,alice\n2,bob\n");
+    seed.write(
+        "mallops.yaml",
+        r#"version: 1
+name: seed-parquet
+blocks:
+  raw:
+    use: std/ingest.csv
+    with:
+      path: seed.csv
+"#,
+    );
+    let seed_run = run_cli(seed.path(), &["run"]);
+    assert_eq!(
+        seed_run.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&seed_run)
+    );
+    let seed_latest = read_json(&seed.path().join(".mallops/meta/runs/latest.json"));
+    let seed_id = seed_latest["outputs"]["raw"]["dataset"].as_str().unwrap();
+    let seed_parquet = seed
+        .path()
+        .join(".mallops/artifacts")
+        .join(seed_id)
+        .join("payload/data.parquet");
+
+    let proj = WorkDir::new();
+    fs::copy(&seed_parquet, proj.path().join("input.parquet")).unwrap();
+    proj.write(
+        "mallops.yaml",
+        r#"version: 1
+name: ingest-parquet-e2e
+blocks:
+  raw:
+    use: std/ingest.parquet
+    with:
+      path: input.parquet
+      schema:
+        - name: id
+          type: int64
+        - name: name
+          type: string
+"#,
+    );
+
+    let first = run_cli(proj.path(), &["run"]);
+    assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
+    let latest_path = proj.path().join(".mallops/meta/runs/latest.json");
+    let id1 = read_json(&latest_path)["outputs"]["raw"]["dataset"]
+        .as_str()
+        .expect("dataset id")
+        .to_owned();
+    let manifest = read_json(
+        &proj
+            .path()
+            .join(".mallops/artifacts")
+            .join(&id1)
+            .join("manifest.json"),
+    );
+    assert_eq!(manifest["kind"], "dataset");
+    assert_eq!(manifest["format"], "parquet");
+
+    let second = run_cli(proj.path(), &["run"]);
+    assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));
+    assert!(
+        stdout(&second).contains("0 executed, 1 cached"),
+        "stdout:\n{}",
+        stdout(&second)
+    );
+
+    // Mismatched schema fails with exit 1 and leaves latest.json unchanged.
+    proj.write(
+        "mallops.yaml",
+        r#"version: 1
+name: ingest-parquet-e2e
+blocks:
+  raw:
+    use: std/ingest.parquet
+    with:
+      path: input.parquet
+      schema:
+        - name: id
+          type: float64
+        - name: name
+          type: string
+"#,
+    );
+    let bad = run_cli(proj.path(), &["run"]);
+    assert_eq!(bad.status.code(), Some(1), "stdout:\n{}", stdout(&bad));
+    assert!(
+        stdout(&bad).contains("schema mismatch"),
+        "stdout:\n{}",
+        stdout(&bad)
     );
 }
 

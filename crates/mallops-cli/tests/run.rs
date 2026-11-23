@@ -1,100 +1,12 @@
 //! Integration tests for `mallops run` and `mallops store verify` (task 10.2).
 
+mod common;
+
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
+use common::{BIN, WorkDir, make_tree_writable, run_cli, stderr, stdout};
 use serde_json::Value;
-
-const BIN: &str = env!("CARGO_BIN_EXE_mallops");
-
-/// Tempdir wrapper that makes read-only store trees writable before cleanup.
-struct WorkDir(tempfile::TempDir);
-
-impl WorkDir {
-    fn new() -> Self {
-        Self(tempfile::tempdir().unwrap())
-    }
-
-    fn path(&self) -> &Path {
-        self.0.path()
-    }
-
-    fn write(&self, rel: &str, content: &str) -> PathBuf {
-        let p = self.path().join(rel);
-        if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&p, content).unwrap();
-        p
-    }
-}
-
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        make_tree_writable(self.path());
-    }
-}
-
-#[cfg(unix)]
-fn make_tree_writable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(cur) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&cur) else {
-            continue;
-        };
-        let ft = meta.file_type();
-        if ft.is_dir() {
-            let _ = fs::set_permissions(&cur, fs::Permissions::from_mode(0o755));
-            if let Ok(entries) = fs::read_dir(&cur) {
-                for entry in entries.flatten() {
-                    stack.push(entry.path());
-                }
-            }
-        } else if ft.is_file() {
-            let _ = fs::set_permissions(&cur, fs::Permissions::from_mode(0o644));
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn make_tree_writable(path: &Path) {
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(cur) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&cur) else {
-            continue;
-        };
-        if meta.is_file() {
-            let mut perms = meta.permissions();
-            perms.set_readonly(false);
-            let _ = fs::set_permissions(&cur, perms);
-        } else if meta.is_dir() {
-            if let Ok(entries) = fs::read_dir(&cur) {
-                for entry in entries.flatten() {
-                    stack.push(entry.path());
-                }
-            }
-        }
-    }
-}
-
-fn run_cli(dir: &Path, args: &[&str]) -> Output {
-    Command::new(BIN)
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("failed to execute mallops binary")
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
 
 /// Two-node DAG where `z` runs before `a` (topological order != alphabetical order).
 const TWO_NODE_PIPELINE: &str = r#"version: 1

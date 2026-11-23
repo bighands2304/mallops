@@ -3,9 +3,8 @@
 mod common;
 
 use std::fs;
-use std::process::Command;
 
-use common::{BIN, WorkDir, make_tree_writable, run_cli, stderr, stdout};
+use common::{WorkDir, make_tree_writable, run_cli, stderr, stdout};
 use serde_json::Value;
 
 /// Two-node DAG where `z` runs before `a` (topological order != alphabetical order).
@@ -319,7 +318,7 @@ fn run_spawns_git() {
     }
     // Place mallops.yaml in a nested directory to also verify relative store.path resolution.
     let yaml = wd.write("proj/mallops.yaml", TWO_NODE_PIPELINE);
-    let out = Command::new(BIN)
+    let out = std::process::Command::new(common::BIN)
         .current_dir(wd.path())
         .env("PATH", &fake_bin)
         .args(["-f", yaml.to_str().unwrap(), "run"])

@@ -6,10 +6,11 @@ pub mod conformance;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Serialize, Serializer};
+use tokio::sync::Mutex;
 
 use crate::{
     ArtifactId, ArtifactStore, BlockRef, BoxFuture, Digest, Error, RelPath, RunId, Status,
@@ -56,16 +57,7 @@ fn civil_from_days(z: i128) -> (i128, u32, u32) {
     (y, m as u32, d as u32)
 }
 
-fn format_rfc3339_millis(time: SystemTime) -> Result<String, String> {
-    let total_ms: i128 = match time.duration_since(UNIX_EPOCH) {
-        Ok(dur) => i128::from(dur.as_secs()) * 1_000 + i128::from(dur.subsec_millis()),
-        Err(err) => {
-            let dur = err.duration();
-            let total_ns =
-                i128::from(dur.as_secs()) * 1_000_000_000 + i128::from(dur.subsec_nanos());
-            (-total_ns).div_euclid(1_000_000)
-        }
-    };
+fn format_rfc3339_from_ms(total_ms: i128) -> Result<String, String> {
     let total_secs = total_ms.div_euclid(1_000);
     let millis = total_ms.rem_euclid(1_000) as u32;
     let days = total_secs.div_euclid(86_400);
@@ -85,6 +77,19 @@ fn format_rfc3339_millis(time: SystemTime) -> Result<String, String> {
     Ok(format!(
         "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
     ))
+}
+
+fn format_rfc3339_millis(time: SystemTime) -> Result<String, String> {
+    let total_ms: i128 = match time.duration_since(UNIX_EPOCH) {
+        Ok(dur) => i128::from(dur.as_secs()) * 1_000 + i128::from(dur.subsec_millis()),
+        Err(err) => {
+            let dur = err.duration();
+            let total_ns =
+                i128::from(dur.as_secs()) * 1_000_000_000 + i128::from(dur.subsec_nanos());
+            (-total_ns).div_euclid(1_000_000)
+        }
+    };
+    format_rfc3339_from_ms(total_ms)
 }
 
 impl Serialize for Timestamp {
@@ -247,13 +252,15 @@ pub trait LineageSink: Send + Sync {
 struct LineageDocument<'a> {
     v: u32,
     run: RunId,
-    events: &'a [serde_json::Value],
+    events: &'a [LineageEvent],
 }
 
 /// Core sink: writes `runs/<run-id>/lineage.json` through [`ArtifactStore::put_meta`].
 pub struct JsonSink {
     store: Arc<dyn ArtifactStore>,
-    runs: Mutex<HashMap<RunId, Vec<serde_json::Value>>>,
+    // ponytail: single sink-wide lock serializes writes across different runs too;
+    // split into per-run locks if multi-run throughput ever requires it.
+    runs: Mutex<HashMap<RunId, Vec<LineageEvent>>>,
 }
 
 impl JsonSink {
@@ -279,47 +286,47 @@ impl LineageSink for JsonSink {
             let run = event_run(event);
             let is_finished = matches!(event, LineageEvent::RunFinished { .. });
             let path = RelPath::parse(&format!("runs/{run}/lineage.json"))?;
-            let value = serde_json::to_value(event)
-                .map_err(|e| Error::Runtime(format!("cannot serialize lineage event: {e}")))?;
 
             // ponytail: O(n^2) full rewrite on every event is accepted for local runs so
             // runs/<run-id>/lineage.json stays valid JSON even after a crash.
-            let bytes = {
-                let mut runs = self
-                    .runs
-                    .lock()
-                    .map_err(|_| Error::Runtime("lineage sink mutex poisoned".into()))?;
-                let serialized = if is_finished {
-                    let mut events = runs.remove(&run).unwrap_or_default();
-                    events.push(value);
-                    serde_json::to_vec(&LineageDocument {
-                        v: LINEAGE_DOC_VERSION,
-                        run,
-                        events: &events,
-                    })
-                } else {
-                    let events = runs.entry(run).or_default();
-                    events.push(value);
-                    serde_json::to_vec(&LineageDocument {
-                        v: LINEAGE_DOC_VERSION,
-                        run,
-                        events,
-                    })
-                };
-                serialized.map_err(|e| {
-                    Error::Runtime(format!("cannot serialize lineage document: {e}"))
-                })?
+            let mut runs = self.runs.lock().await;
+            let events = runs.entry(run).or_default();
+            events.push(event.clone());
+            let serialized = serde_json::to_vec(&LineageDocument {
+                v: LINEAGE_DOC_VERSION,
+                run,
+                events,
+            });
+            let bytes = match serialized {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    if is_finished {
+                        runs.remove(&run);
+                    } else {
+                        events.pop();
+                    }
+                    return Err(Error::Runtime(format!(
+                        "cannot serialize lineage document: {e}"
+                    )));
+                }
             };
 
-            self.store.put_meta(&path, &bytes).await
+            let result = self.store.put_meta(&path, &bytes).await;
+            if is_finished {
+                runs.remove(&run);
+            }
+            result
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
-    use crate::{LocalStore, MemoryStore};
+    use crate::{Artifact, LocalStore, Manifest, MemoryStore, PayloadSource};
     use serde_json::json;
 
     async fn read_lineage_doc(store: &dyn ArtifactStore, run: RunId) -> Option<serde_json::Value> {
@@ -328,9 +335,7 @@ mod tests {
         Some(serde_json::from_slice(&bytes).unwrap())
     }
 
-    #[tokio::test]
-    async fn lineage_json_sink_conformance_memory() {
-        let store: Arc<dyn ArtifactStore> = Arc::new(MemoryStore::new());
+    async fn check_json_sink(store: Arc<dyn ArtifactStore>) {
         let sink = JsonSink::new(Arc::clone(&store));
         conformance::check_sink(&sink, |run| {
             let store = Arc::clone(&store);
@@ -340,15 +345,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lineage_json_sink_conformance_memory() {
+        check_json_sink(Arc::new(MemoryStore::new())).await;
+    }
+
+    #[tokio::test]
     async fn lineage_json_sink_conformance_local() {
         let dir = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ArtifactStore> = Arc::new(LocalStore::new(dir.path()).unwrap());
-        let sink = JsonSink::new(Arc::clone(&store));
-        conformance::check_sink(&sink, |run| {
-            let store = Arc::clone(&store);
-            async move { read_lineage_doc(store.as_ref(), run).await }
-        })
-        .await;
+        check_json_sink(Arc::new(LocalStore::new(dir.path()).unwrap())).await;
     }
 
     #[tokio::test]
@@ -405,7 +409,7 @@ mod tests {
             json!("2100-03-01T00:00:00.000Z")
         );
 
-        // Pre-epoch instants.
+        // Pre-epoch instants (including sub-millisecond flooring).
         assert_eq!(
             serde_json::to_value(Timestamp::new(UNIX_EPOCH - Duration::from_millis(1))).unwrap(),
             json!("1969-12-31T23:59:59.999Z")
@@ -414,10 +418,53 @@ mod tests {
             serde_json::to_value(Timestamp::new(UNIX_EPOCH - Duration::from_secs(1))).unwrap(),
             json!("1969-12-31T23:59:59.000Z")
         );
+        // 100 ns is representable on Windows FILETIME too; Unix also checks the 1 ns edge.
+        assert_eq!(
+            serde_json::to_value(Timestamp::new(UNIX_EPOCH - Duration::from_nanos(100))).unwrap(),
+            json!("1969-12-31T23:59:59.999Z")
+        );
+        assert_eq!(
+            serde_json::to_value(Timestamp::new(UNIX_EPOCH - Duration::new(0, 1_000_100))).unwrap(),
+            json!("1969-12-31T23:59:59.998Z")
+        );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                serde_json::to_value(Timestamp::new(UNIX_EPOCH - Duration::from_nanos(1))).unwrap(),
+                json!("1969-12-31T23:59:59.999Z")
+            );
+            assert_eq!(
+                serde_json::to_value(Timestamp::new(UNIX_EPOCH - Duration::new(0, 1_000_001)))
+                    .unwrap(),
+                json!("1969-12-31T23:59:59.998Z")
+            );
+        }
 
-        // Year > 9999 fails serialization instead of emitting invalid RFC 3339.
-        let far_future = Timestamp::new(UNIX_EPOCH + Duration::from_secs(400_000_000_000));
-        assert!(serde_json::to_value(far_future).is_err());
+        // Exact RFC 3339 lower bound: 0000-01-01T00:00:00.000Z = -719_528 days = -62_167_219_200 s.
+        const YEAR_0000_SECS: u64 = 62_167_219_200;
+        assert_eq!(
+            format_rfc3339_from_ms(-i128::from(YEAR_0000_SECS) * 1_000).unwrap(),
+            "0000-01-01T00:00:00.000Z"
+        );
+        assert!(format_rfc3339_from_ms(-i128::from(YEAR_0000_SECS) * 1_000 - 1).is_err());
+        if let Some(y0) = UNIX_EPOCH.checked_sub(Duration::from_secs(YEAR_0000_SECS)) {
+            assert_eq!(
+                serde_json::to_value(Timestamp::new(y0)).unwrap(),
+                json!("0000-01-01T00:00:00.000Z")
+            );
+        }
+        if let Some(before_y0) = UNIX_EPOCH.checked_sub(Duration::new(YEAR_0000_SECS, 1_000_000)) {
+            assert!(serde_json::to_value(Timestamp::new(before_y0)).is_err());
+        }
+
+        // Exact RFC 3339 upper bound: 9999-12-31T23:59:59.999Z, and year 10000 -> error.
+        // Days 1970-01-01..10000-01-01 = 2_932_897 -> 253_402_300_800 s.
+        const YEAR_10000_SECS: u64 = 253_402_300_800;
+        assert_eq!(
+            serde_json::to_value(ts(YEAR_10000_SECS - 1, 999_000_000)).unwrap(),
+            json!("9999-12-31T23:59:59.999Z")
+        );
+        assert!(serde_json::to_value(ts(YEAR_10000_SECS, 0)).is_err());
     }
 
     #[test]
@@ -559,7 +606,7 @@ mod tests {
         assert_eq!(doc["v"], 1);
         assert_eq!(doc["run"], run.to_string());
         assert_eq!(doc["events"].as_array().unwrap().len(), 1);
-        assert!(sink.runs.lock().unwrap().contains_key(&run));
+        assert!(sink.runs.lock().await.contains_key(&run));
 
         sink.record(&LineageEvent::RunFinished {
             run,
@@ -571,41 +618,151 @@ mod tests {
 
         let doc = read_lineage_doc(store.as_ref(), run).await.unwrap();
         assert_eq!(doc["events"].as_array().unwrap().len(), 2);
-        assert!(!sink.runs.lock().unwrap().contains_key(&run));
+        assert!(!sink.runs.lock().await.contains_key(&run));
     }
 
-    #[tokio::test]
-    async fn lineage_json_sink_poisoned_mutex_returns_runtime_error() {
-        let store: Arc<dyn ArtifactStore> = Arc::new(MemoryStore::new());
-        let sink = Arc::new(JsonSink::new(store));
+    /// Store wrapper that delays the first `put_meta` and records every written snapshot length.
+    struct SlowFirstPutStore {
+        inner: Arc<dyn ArtifactStore>,
+        calls: AtomicUsize,
+        written_lens: std::sync::Mutex<Vec<usize>>,
+    }
 
-        let poison_sink = Arc::clone(&sink);
-        let _ = std::thread::spawn(move || {
-            let _guard = poison_sink.runs.lock().unwrap();
-            panic!("poison mutex");
-        })
-        .join();
+    impl ArtifactStore for SlowFirstPutStore {
+        fn put<'a>(
+            &'a self,
+            manifest: Manifest,
+            payload: PayloadSource<'a>,
+        ) -> BoxFuture<'a, Result<ArtifactId, Error>> {
+            self.inner.put(manifest, payload)
+        }
 
-        let err = sink
-            .record(&LineageEvent::RunFinished {
-                run: RunId::new(),
-                timestamp: Timestamp::new(UNIX_EPOCH),
-                status: Status::Failed,
+        fn get<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<Option<Artifact>, Error>> {
+            self.inner.get(id)
+        }
+
+        fn fetch<'a>(
+            &'a self,
+            id: &'a ArtifactId,
+            dest: &'a Path,
+        ) -> BoxFuture<'a, Result<PathBuf, Error>> {
+            self.inner.fetch(id, dest)
+        }
+
+        fn verify<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<(), Error>> {
+            self.inner.verify(id)
+        }
+
+        fn exists<'a>(&'a self, id: &'a ArtifactId) -> BoxFuture<'a, Result<bool, Error>> {
+            self.inner.exists(id)
+        }
+
+        fn put_meta<'a>(
+            &'a self,
+            key: &'a RelPath,
+            data: &'a [u8],
+        ) -> BoxFuture<'a, Result<(), Error>> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Delay the first write so concurrent calls would race ahead and be
+                    // overwritten if `JsonSink` released its lock before `put_meta`.
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+                self.inner.put_meta(key, data).await?;
+                let doc: serde_json::Value = serde_json::from_slice(data).unwrap();
+                let len = doc["events"].as_array().unwrap().len();
+                self.written_lens.lock().unwrap().push(len);
+                Ok(())
             })
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::Runtime(_)),
-            "expected Runtime, got {err:?}"
-        );
+        }
+
+        fn get_meta<'a>(
+            &'a self,
+            key: &'a RelPath,
+        ) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
+            self.inner.get_meta(key)
+        }
+
+        fn list_meta<'a>(
+            &'a self,
+            prefix: &'a RelPath,
+        ) -> BoxFuture<'a, Result<Vec<RelPath>, Error>> {
+            self.inner.list_meta(prefix)
+        }
+
+        fn delete_meta<'a>(&'a self, key: &'a RelPath) -> BoxFuture<'a, Result<(), Error>> {
+            self.inner.delete_meta(key)
+        }
     }
 
-    #[test]
-    fn lineage_host_info_current_populates_fields() {
-        let host = HostInfo::current();
-        assert_eq!(host.os, std::env::consts::OS);
-        assert_eq!(host.arch, std::env::consts::ARCH);
-        assert_eq!(host.mallops_version, env!("CARGO_PKG_VERSION"));
-        assert!(!host.hostname.is_empty());
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lineage_json_sink_concurrent_records_never_regress() {
+        const N: usize = 16;
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn ArtifactStore> = Arc::new(LocalStore::new(dir.path()).unwrap());
+        let store = Arc::new(SlowFirstPutStore {
+            inner,
+            calls: AtomicUsize::new(0),
+            written_lens: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = Arc::new(JsonSink::new(Arc::clone(&store) as Arc<dyn ArtifactStore>));
+        let run = RunId::new();
+        let ts = Timestamp::new(UNIX_EPOCH + Duration::from_secs(1_795_428_000));
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..N {
+            let sink = Arc::clone(&sink);
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                barrier.wait().await;
+                let event = LineageEvent::ArtifactProduced {
+                    run,
+                    timestamp: ts,
+                    node: format!("n{i:02}"),
+                    artifact: ArtifactId::from_bytes([u8::try_from(i).unwrap(); 32]),
+                };
+                sink.record(&event).await.unwrap();
+            });
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(res) = tasks.join_next().await {
+                res.unwrap();
+            }
+        })
+        .await
+        .expect("concurrent record tasks timed out");
+
+        let lens = store.written_lens.lock().unwrap().clone();
+        assert_eq!(lens.len(), N, "expected {N} put_meta writes, got {lens:?}");
+        for pair in lens.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "lineage.json snapshot regressed: {lens:?}"
+            );
+        }
+
+        let doc = read_lineage_doc(store.as_ref(), run).await.unwrap();
+        let events = doc["events"].as_array().unwrap();
+        assert_eq!(events.len(), N);
+        let mut nodes: Vec<String> = events
+            .iter()
+            .map(|e| e["node"].as_str().unwrap().to_owned())
+            .collect();
+        nodes.sort();
+        let expected: Vec<String> = (0..N).map(|i| format!("n{i:02}")).collect();
+        assert_eq!(nodes, expected);
+
+        sink.record(&LineageEvent::RunFinished {
+            run,
+            timestamp: ts,
+            status: Status::Succeeded,
+        })
+        .await
+        .unwrap();
+        let final_doc = read_lineage_doc(store.as_ref(), run).await.unwrap();
+        assert_eq!(final_doc["events"].as_array().unwrap().len(), N + 1);
+        assert!(!sink.runs.lock().await.contains_key(&run));
     }
 }

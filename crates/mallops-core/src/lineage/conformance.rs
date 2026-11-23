@@ -1,6 +1,7 @@
-//! Shared conformance suite for [`LineageSink`] implementations.
+//! Shared test conformance suite for [`LineageSink`] implementations.
 //!
-//! Sink backends (in this crate or in `mallops-std`/plugins) call [`check_sink`] from a test.
+//! Intended strictly for tests of sink backends (in this crate or in `mallops-std`/plugins);
+//! do not call from production code — checks assert invariants and panic on failure.
 
 use std::future::Future;
 use std::time::{Duration, UNIX_EPOCH};

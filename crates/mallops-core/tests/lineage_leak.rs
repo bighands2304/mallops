@@ -4,7 +4,7 @@
 //! subscriber cannot race with parallel unit tests on tracing's global callsite interest cache.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -113,10 +113,12 @@ fn blob(bytes: Vec<u8>) -> OutputDraft {
     )
 }
 
-/// Reads `TOKEN` through `ctx.secret()`, logs it (redacted) and outputs a value derived from it.
+/// Reads `TOKEN` through `ctx.secret()`, logs it (redacted), writes a file payload into
+/// `ctx.workdir()`, inspects `ctx.workdir()` for leaks, and outputs that file.
 struct SecretBlock {
     spec: BlockSpec,
     used: AtomicBool,
+    workdir_scanned: AtomicUsize,
 }
 
 impl Block for SecretBlock {
@@ -137,10 +139,22 @@ impl Block for SecretBlock {
             }
             self.used.store(true, Ordering::SeqCst);
             let proof = Digest::hash(token.expose().as_bytes());
-            Ok(BlockOutcome::Produced(OutputDrafts::new().with(
-                "out",
-                blob(format!("authorized {proof}").into_bytes()),
-            )))
+            let out_file = ctx.workdir().join("auth.txt");
+            std::fs::write(&out_file, format!("authorized {proof}")).unwrap();
+
+            let mut scanned = 0;
+            let hits = files_containing(ctx.workdir(), SECRET.as_bytes(), &mut scanned);
+            assert!(hits.is_empty(), "secret leaked into workdir: {hits:?}");
+            assert!(scanned > 0, "no file scanned in node workdir");
+            self.workdir_scanned.store(scanned, Ordering::SeqCst);
+
+            let draft = OutputDraft::new(
+                Manifest::new(ArtifactKind::Blob, "text"),
+                DraftPayload::File(out_file),
+            );
+            Ok(BlockOutcome::Produced(
+                OutputDrafts::new().with("out", draft),
+            ))
         })
     }
 }
@@ -200,6 +214,7 @@ async fn lineage_anti_leak_secret_absent_from_lineage_logs_and_files() {
     let auth = Arc::new(SecretBlock {
         spec: auth_spec,
         used: AtomicBool::new(false),
+        workdir_scanned: AtomicUsize::new(0),
     });
     reg.register(auth.clone()).unwrap();
 
@@ -241,6 +256,10 @@ async fn lineage_anti_leak_secret_absent_from_lineage_logs_and_files() {
         auth.used.load(Ordering::SeqCst),
         "the block never used the secret"
     );
+    assert!(
+        auth.workdir_scanned.load(Ordering::SeqCst) > 0,
+        "node workdir was not inspected during the run"
+    );
 
     // Lineage: `runs/<run-id>/lineage.json` (written by `JsonSink`) and the recorded events.
     let lineage_path = RelPath::parse(&format!("runs/{}/lineage.json", summary.run_id)).unwrap();
@@ -264,10 +283,11 @@ async fn lineage_anti_leak_secret_absent_from_lineage_logs_and_files() {
     assert!(captured.contains("debug=***"), "{captured}");
     assert!(!captured.contains(SECRET), "{captured}");
 
-    // Files: run workdir root and the whole `LocalStore` root.
+    // Files: run workdir root was cleaned up, and the whole `LocalStore` root is secret-free.
     let mut work_scanned = 0;
     let hits = files_containing(work_root.path(), SECRET.as_bytes(), &mut work_scanned);
     assert!(hits.is_empty(), "{hits:?}");
+    assert_eq!(work_scanned, 0, "run workdir not cleaned up");
 
     let mut store_scanned = 0;
     let hits = files_containing(store_root.path(), SECRET.as_bytes(), &mut store_scanned);

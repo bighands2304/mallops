@@ -865,7 +865,8 @@ mod tests {
         let probe = Arc::new(Probe::default());
         let mut b = PipelineBuilder::new("t");
         node(&mut b, "a", "src", "ok", &[]);
-        node(&mut b, "b", "src", "ok", &[]);
+        // Different `with` from `a`: an identical node would be a cache hit.
+        node(&mut b, "b", "src", "ok-too", &[]);
         node(&mut b, "c", "one", "ok", &[("a", "a.out")]);
         let p = b.build(&registry(&probe)).unwrap();
         let s = run(&runtime(Arc::new(MemoryStore::new()), 0), &p).await;

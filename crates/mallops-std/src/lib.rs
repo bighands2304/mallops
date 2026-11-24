@@ -13,8 +13,6 @@ mod ingest;
 #[cfg(feature = "preprocess-tabular")]
 mod preprocess;
 #[cfg(feature = "train-external")]
-// ponytail: skeleton of 13.0, the allow goes away once 13.1/13.2 wire every item.
-#[allow(dead_code)]
 mod train;
 
 #[cfg(feature = "preprocess-tabular")]

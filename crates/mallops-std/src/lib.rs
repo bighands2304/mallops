@@ -12,6 +12,8 @@
 mod ingest;
 #[cfg(feature = "preprocess-tabular")]
 mod preprocess;
+#[cfg(feature = "train-external")]
+mod train;
 
 #[cfg(feature = "preprocess-tabular")]
 pub use preprocess::transform::{FittedTransform, TRANSFORM_FILE};
@@ -31,6 +33,8 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
     registry.register(std::sync::Arc::new(ingest::parquet::IngestParquet::new()))?;
     #[cfg(feature = "preprocess-tabular")]
     registry.register(std::sync::Arc::new(preprocess::PreprocessTabular::new()))?;
+    #[cfg(feature = "train-external")]
+    registry.register(std::sync::Arc::new(train::external::TrainExternal::new()))?;
     Ok(())
 }
 
@@ -48,6 +52,7 @@ mod tests {
         let csv: BlockRef = "std/ingest.csv".parse().unwrap();
         let parquet: BlockRef = "std/ingest.parquet".parse().unwrap();
         let preprocess: BlockRef = "std/preprocess.tabular".parse().unwrap();
+        let train_external: BlockRef = "std/train.external".parse().unwrap();
 
         assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
         assert_eq!(
@@ -57,6 +62,10 @@ mod tests {
         assert_eq!(
             registry.contains(&preprocess),
             cfg!(feature = "preprocess-tabular")
+        );
+        assert_eq!(
+            registry.contains(&train_external),
+            cfg!(feature = "train-external")
         );
     }
 
@@ -68,7 +77,8 @@ mod tests {
         if cfg!(any(
             feature = "ingest-csv",
             feature = "ingest-parquet",
-            feature = "preprocess-tabular"
+            feature = "preprocess-tabular",
+            feature = "train-external"
         )) {
             assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");
         } else {

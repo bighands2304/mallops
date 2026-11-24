@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use mallops_core::config::{LineageConfig, PipelineConfig};
 use mallops_core::{
-    ArtifactId, ArtifactStore, JsonSink, LineageSink, LocalStore, MemoryStore, RelPath, RunSummary,
-    Runtime, RuntimeConfig, Status, ValidatedPipeline,
+    ArtifactId, ArtifactStore, CancelSource, JsonSink, LineageSink, LocalStore, MemoryStore,
+    RelPath, RunSummary, Runtime, RuntimeConfig, Status, ValidatedPipeline,
 };
 
 /// Store metadata key of the latest successful run pointer (SPEC §4.1, ARCHITECTURE §6.1).
@@ -197,7 +197,17 @@ pub(crate) fn run(file: &Path, jobs: Option<usize>, no_cache: bool) -> anyhow::R
     rt_cfg.lineage = lineage;
     rt_cfg.git_commit = git_commit(base);
 
+    // Ctrl-C cancels the run cooperatively, so blocks can stop their children (e.g. the process
+    // group of `std/train.external`, which no longer receives the terminal's SIGINT).
+    let cancel = CancelSource::new();
+    rt_cfg.cancel = cancel.token();
+
     let rt = tokio::runtime::Runtime::new().context("cannot start tokio runtime")?;
+    rt.spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel.cancel();
+        }
+    });
     let summary = rt.block_on(Runtime::new(rt_cfg).run(&pipeline))?;
 
     print_summary(&pipeline, &summary);

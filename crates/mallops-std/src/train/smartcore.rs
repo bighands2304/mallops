@@ -21,6 +21,7 @@ use mallops_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::has_secret_ref;
 use crate::ingest::{Column, ColumnType, DATA_FILE, blocking, parse_config, read_parquet_batch};
 
 /// Required input port: training features Parquet.
@@ -113,7 +114,7 @@ pub(crate) struct TrainSmartcoreConfig {
 impl TrainSmartcoreConfig {
     /// Deserializes and validates `with:`; every error is an [`Error::Config`].
     pub(crate) fn parse(config: &serde_json::Value) -> Result<Self, Error> {
-        if serde_json::to_string(config).is_ok_and(|json| json.contains("${secret:")) {
+        if has_secret_ref(config) {
             return Err(Error::Config(
                 "`${secret:...}` is not supported in `std/train.smartcore` config".into(),
             ));
@@ -165,11 +166,12 @@ impl TrainSmartcoreConfig {
         }
     }
 
-    fn effective_hyperparameters(&self) -> serde_json::Value {
+    fn effective_hyperparameters(&self) -> Result<serde_json::Value, Error> {
         match self.algorithm {
-            AlgorithmConfig::Logistic(hp) => json!({ "alpha": hp.alpha }),
-            AlgorithmConfig::Linear(hp) => json!({ "solver": hp.solver }),
+            AlgorithmConfig::Logistic(hp) => serde_json::to_value(hp),
+            AlgorithmConfig::Linear(hp) => serde_json::to_value(hp),
         }
+        .map_err(|e| Error::Runtime(format!("failed to serialize hyperparameters: {e}")))
     }
 }
 
@@ -296,6 +298,61 @@ fn map_smartcore_err(err: Failed) -> Error {
     Error::Runtime(format!("smartcore fit failed: {err}"))
 }
 
+fn cast_finite_f64(col: &arrow_array::ArrayRef, role: &str, name: &str) -> Result<Vec<f64>, Error> {
+    if col.null_count() > 0 {
+        return Err(Error::Runtime(format!(
+            "{role} column `{name}` contains {} null value(s)",
+            col.null_count()
+        )));
+    }
+    let cast_arr = arrow_cast::cast(col, &DataType::Float64).map_err(|e| {
+        Error::Runtime(format!(
+            "failed to cast {role} column `{name}` to float64: {e}"
+        ))
+    })?;
+    let f64_arr = cast_arr
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| {
+            Error::Runtime(format!(
+                "internal error: {role} column `{name}` did not cast to Float64Array"
+            ))
+        })?;
+    let mut out = Vec::with_capacity(f64_arr.len());
+    for (row, &v) in f64_arr.values().iter().enumerate() {
+        if !v.is_finite() {
+            return Err(Error::Runtime(format!(
+                "{role} column `{name}` contains non-finite value `{v}` at row {row}"
+            )));
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+fn encode_binary<T: Ord + Clone>(
+    values: impl Iterator<Item = T>,
+) -> Result<(Vec<i32>, Vec<T>), Error> {
+    let collected: Vec<T> = values.collect();
+    let classes: Vec<T> = collected
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if classes.len() != 2 {
+        return Err(Error::Runtime(format!(
+            "logistic_regression requires binary target (2 classes), found {}",
+            classes.len()
+        )));
+    }
+    let y = collected
+        .iter()
+        .map(|v| i32::from(*v == classes[1]))
+        .collect();
+    Ok((y, classes))
+}
+
 fn extract_features(
     batch: &arrow_array::RecordBatch,
     target_idx: usize,
@@ -309,51 +366,18 @@ fn extract_features(
         if idx == target_idx {
             continue;
         }
-        let dt = field.data_type();
-        if !matches!(dt, DataType::Boolean | DataType::Int64 | DataType::Float64) {
-            return Err(Error::Runtime(format!(
-                "feature column `{}` has unsupported type `{dt}`; use `encode` or `select` in `std/preprocess.tabular` first",
-                field.name()
-            )));
-        }
-        let Some(ty) = ColumnType::from_data_type(dt) else {
-            return Err(Error::Runtime(format!(
-                "feature column `{}` has unsupported type `{dt}`",
-                field.name()
-            )));
-        };
-        let col = batch.column(idx);
-        if col.null_count() > 0 {
-            return Err(Error::Runtime(format!(
-                "feature column `{}` contains {} null value(s)",
-                field.name(),
-                col.null_count()
-            )));
-        }
-        let cast_arr = arrow_cast::cast(col, &DataType::Float64).map_err(|e| {
-            Error::Runtime(format!(
-                "failed to cast feature column `{}` to float64: {e}",
-                field.name()
-            ))
-        })?;
-        let f64_arr = cast_arr
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| {
-                Error::Runtime(format!(
-                    "internal error: feature column `{}` did not cast to Float64Array",
-                    field.name()
-                ))
-            })?;
-        for (row, &v) in f64_arr.values().iter().enumerate() {
-            if !v.is_finite() {
+        let ty = match field.data_type() {
+            DataType::Boolean => ColumnType::Bool,
+            DataType::Int64 => ColumnType::Int64,
+            DataType::Float64 => ColumnType::Float64,
+            dt => {
                 return Err(Error::Runtime(format!(
-                    "feature column `{}` contains non-finite value `{v}` at row {row}",
+                    "feature column `{}` has unsupported type `{dt}`; use `encode` or `select` in `std/preprocess.tabular` first",
                     field.name()
                 )));
             }
-            values.push(v);
-        }
+        };
+        values.extend(cast_finite_f64(batch.column(idx), "feature", field.name())?);
         feature_cols.push(Column {
             name: field.name().clone(),
             ty,
@@ -388,24 +412,7 @@ fn extract_logistic_target(
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| Error::Runtime(format!("target column `{name}` is not Int64")))?;
-            let classes: Vec<i64> = arr
-                .values()
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            if classes.len() != 2 {
-                return Err(Error::Runtime(format!(
-                    "logistic_regression requires binary target (2 classes), found {}",
-                    classes.len()
-                )));
-            }
-            let y = arr
-                .values()
-                .iter()
-                .map(|&v| i32::from(v == classes[1]))
-                .collect();
+            let (y, classes) = encode_binary(arr.values().iter().copied())?;
             Ok((y, ModelClasses::Int64(classes), ColumnType::Int64))
         }
         DataType::Boolean => {
@@ -413,20 +420,7 @@ fn extract_logistic_target(
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| Error::Runtime(format!("target column `{name}` is not Boolean")))?;
-            let mut set = BTreeSet::new();
-            for i in 0..arr.len() {
-                set.insert(arr.value(i));
-            }
-            let classes: Vec<bool> = set.into_iter().collect();
-            if classes.len() != 2 {
-                return Err(Error::Runtime(format!(
-                    "logistic_regression requires binary target (2 classes), found {}",
-                    classes.len()
-                )));
-            }
-            let y = (0..arr.len())
-                .map(|i| i32::from(arr.value(i) == classes[1]))
-                .collect();
+            let (y, classes) = encode_binary((0..arr.len()).map(|i| arr.value(i)))?;
             Ok((y, ModelClasses::Bool(classes), ColumnType::Bool))
         }
         DataType::Utf8 => {
@@ -434,20 +428,7 @@ fn extract_logistic_target(
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| Error::Runtime(format!("target column `{name}` is not Utf8")))?;
-            let mut set = BTreeSet::new();
-            for i in 0..arr.len() {
-                set.insert(arr.value(i).to_owned());
-            }
-            let classes: Vec<String> = set.into_iter().collect();
-            if classes.len() != 2 {
-                return Err(Error::Runtime(format!(
-                    "logistic_regression requires binary target (2 classes), found {}",
-                    classes.len()
-                )));
-            }
-            let y = (0..arr.len())
-                .map(|i| i32::from(arr.value(i) == classes[1]))
-                .collect();
+            let (y, classes) = encode_binary((0..arr.len()).map(|i| arr.value(i).to_owned()))?;
             Ok((y, ModelClasses::String(classes), ColumnType::String))
         }
         _ => Err(Error::Runtime(format!(
@@ -461,40 +442,12 @@ fn extract_linear_target(
     name: &str,
     dt: &DataType,
 ) -> Result<Vec<f64>, Error> {
-    if col.null_count() > 0 {
-        return Err(Error::Runtime(format!(
-            "target column `{name}` contains {} null value(s)",
-            col.null_count()
-        )));
-    }
     if !matches!(dt, DataType::Int64 | DataType::Float64) {
         return Err(Error::Runtime(format!(
             "linear_regression target column `{name}` has unsupported type `{dt}`; expected int64 or float64"
         )));
     }
-    let cast_arr = arrow_cast::cast(col, &DataType::Float64).map_err(|e| {
-        Error::Runtime(format!(
-            "failed to cast target column `{name}` to float64: {e}"
-        ))
-    })?;
-    let f64_arr = cast_arr
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            Error::Runtime(format!(
-                "internal error: target column `{name}` did not cast to Float64Array"
-            ))
-        })?;
-    let mut y = Vec::with_capacity(f64_arr.len());
-    for (row, &v) in f64_arr.values().iter().enumerate() {
-        if !v.is_finite() {
-            return Err(Error::Runtime(format!(
-                "target column `{name}` contains non-finite value `{v}` at row {row}"
-            )));
-        }
-        y.push(v);
-    }
-    Ok(y)
+    cast_finite_f64(col, "target", name)
 }
 
 fn check_finite_params(intercept: f64, coefficients: &[f64]) -> Result<(), Error> {
@@ -617,7 +570,7 @@ fn execute_blocking(
             "output": [output_col],
         }))
         .with_metadata_entry("algorithm", json!(cfg.algorithm_kind()))
-        .with_metadata_entry("hyperparameters", cfg.effective_hyperparameters())
+        .with_metadata_entry("hyperparameters", cfg.effective_hyperparameters()?)
         .with_metadata_entry("target", json!(target_name))
         .with_metadata_entry("framework", json!(FRAMEWORK))
         .with_metadata_entry("framework_version", json!(FRAMEWORK_VERSION));

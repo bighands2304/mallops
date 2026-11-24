@@ -5,7 +5,7 @@ pub(crate) mod contract;
 pub(crate) mod process;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use mallops_core::{
@@ -171,13 +171,17 @@ impl TrainExternalConfig {
         )
     }
 
-    /// argv with `./` and `../` arguments made absolute against `pipeline_dir` (D13-8).
+    /// argv with `./` and `../` arguments made absolute against `pipeline_dir` (D13-8), rebuilt
+    /// from their components so the separators are native on every OS.
     fn argv(&self, pipeline_dir: &Path) -> Result<Vec<String>, Error> {
         self.command
             .iter()
             .map(|arg| {
                 if arg.starts_with("./") || arg.starts_with("../") {
-                    path_string(&pipeline_dir.join(arg.strip_prefix("./").unwrap_or(arg)))
+                    let rel = Path::new(arg)
+                        .components()
+                        .filter(|c| *c != Component::CurDir);
+                    path_string(&pipeline_dir.join(rel.collect::<PathBuf>()))
                 } else {
                     Ok(arg.clone())
                 }
@@ -268,20 +272,31 @@ fn hash_watch_files(files: &[PathBuf]) -> Result<Digest, Error> {
     Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
 }
 
-/// Makes every file under `dir` read-only; directories stay writable so the run cleanup works.
-fn make_files_readonly(dir: &Path) -> Result<(), Error> {
+/// Sets or clears the read-only flag of every file under `dir`; directories stay writable.
+fn set_files_readonly(dir: &Path, readonly: bool) -> Result<(), Error> {
     for entry in std::fs::read_dir(dir).map_err(io_err(dir))? {
         let path = entry.map_err(io_err(dir))?.path();
         let meta = std::fs::symlink_metadata(&path).map_err(io_err(&path))?;
         if meta.is_dir() {
-            make_files_readonly(&path)?;
+            set_files_readonly(&path, readonly)?;
         } else if meta.is_file() {
             let mut perms = meta.permissions();
-            perms.set_readonly(true);
+            // Clearing it only touches our own copies, inside the private (0o700) workdir.
+            perms.set_readonly(readonly);
             std::fs::set_permissions(&path, perms).map_err(io_err(&path))?;
         }
     }
     Ok(())
+}
+
+/// Makes the files under `inputs/` writable again on drop, whatever the outcome of the run:
+/// Windows cannot delete read-only files, so the run workdir cleanup would fail.
+struct WritableOnDrop(PathBuf);
+
+impl Drop for WritableOnDrop {
+    fn drop(&mut self) {
+        let _ = set_files_readonly(&self.0, false);
+    }
 }
 
 /// Last `max` bytes of `s` (on a char boundary).
@@ -357,12 +372,14 @@ impl Block for TrainExternal {
                 std::fs::set_permissions(workdir, std::fs::Permissions::from_mode(0o700))
                     .map_err(io_err(workdir))?;
             }
+            // Already absolute; no `canonicalize`, its `\\?\` prefix on Windows disables `/` and
+            // `..` handling in the paths joined to it.
             let cwd = std::env::current_dir()
-                .and_then(std::fs::canonicalize)
                 .map_err(|e| Error::Runtime(format!("cannot resolve the pipeline dir: {e}")))?;
 
             let inputs_dir = workdir.join("inputs");
             std::fs::create_dir_all(&inputs_dir).map_err(io_err(&inputs_dir))?;
+            let _writable = WritableOnDrop(inputs_dir.clone());
             let mut entries = BTreeMap::new();
             for (port, artifact) in inputs.iter() {
                 // Library callers bypass the pipeline validation: never join an unchecked name.
@@ -372,7 +389,7 @@ impl Block for TrainExternal {
                 let rel = format!("inputs/{port}");
                 let dest = inputs_dir.join(port);
                 ctx.store().fetch(&artifact.id(), &dest).await?;
-                make_files_readonly(&dest)?;
+                set_files_readonly(&dest, true)?;
                 entries.insert(
                     port.to_owned(),
                     InputEntry {
@@ -625,6 +642,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn train_external_contract_v1_inputs_writable_after_run() {
+        // Not unix-only: on Windows read-only inputs would make the cleanup fail.
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("w");
+        std::fs::create_dir(&workdir).unwrap();
+        let err = run_one_input(TRAIN, &workdir).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("failed to spawn")),
+            "{err:?}"
+        );
+        assert!(workdir.join("inputs/train").exists());
+        std::fs::remove_dir_all(&workdir).unwrap();
+    }
+
+    #[tokio::test]
     async fn train_external_security_rejects_bad_input_port_names() {
         for port in ["../x", "/abs"] {
             let dir = tempfile::tempdir().unwrap();
@@ -679,13 +711,14 @@ mod tests {
     #[test]
     fn train_external_argv_resolves_relative_paths() {
         let cfg = TrainExternalConfig::parse(&json!({
-            "command": ["./bin/run", "../train.py", "python", "data/x", "--out=./m"],
+            "command": ["./a/b.py", "../x", "python", "data/x", "--out=./m"],
         }))
         .unwrap();
         let base = Path::new("/pipe/line");
         let argv = cfg.argv(base).unwrap();
-        assert_eq!(argv[0], path_string(&base.join("bin/run")).unwrap());
-        assert_eq!(argv[1], path_string(&base.join("../train.py")).unwrap());
+        // Native separators only: `/` is not a separator in Windows `\\?\` paths.
+        assert_eq!(argv[0], path_string(&base.join("a").join("b.py")).unwrap());
+        assert_eq!(argv[1], path_string(&base.join("..").join("x")).unwrap());
         assert_eq!(&argv[2..], ["python", "data/x", "--out=./m"]);
     }
 
@@ -721,7 +754,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/f"), "x").unwrap();
-        make_files_readonly(dir.path()).unwrap();
+        set_files_readonly(dir.path(), true).unwrap();
         let ro = |p: &str| {
             std::fs::metadata(dir.path().join(p))
                 .unwrap()

@@ -354,17 +354,11 @@ async fn finish_readers(
     let _ = tokio::time::timeout(
         READER_DRAIN_TIMEOUT,
         std::future::poll_fn(|cx| {
-            if !stdout_done
-                && let Some(handle) = stdout_handle.as_mut()
-                && Pin::new(handle).poll(cx).is_ready()
-            {
-                stdout_done = true;
+            if let (false, Some(handle)) = (stdout_done, stdout_handle.as_mut()) {
+                stdout_done = Pin::new(handle).poll(cx).is_ready();
             }
-            if !stderr_done
-                && let Some(handle) = stderr_handle.as_mut()
-                && Pin::new(handle).poll(cx).is_ready()
-            {
-                stderr_done = true;
+            if let (false, Some(handle)) = (stderr_done, stderr_handle.as_mut()) {
+                stderr_done = Pin::new(handle).poll(cx).is_ready();
             }
             if stdout_done && stderr_done {
                 Poll::Ready(())
@@ -375,11 +369,11 @@ async fn finish_readers(
     )
     .await;
 
-    if !stdout_done && let Some(handle) = stdout_handle {
+    if let (false, Some(handle)) = (stdout_done, stdout_handle) {
         handle.abort();
         let _ = handle.await;
     }
-    if !stderr_done && let Some(handle) = stderr_handle {
+    if let (false, Some(handle)) = (stderr_done, stderr_handle) {
         handle.abort();
         let _ = handle.await;
     }
@@ -481,10 +475,9 @@ mod tests {
     async fn wait_for_file(path: &Path, timeout: Duration) -> String {
         tokio::time::timeout(timeout, async {
             loop {
-                if let Ok(contents) = std::fs::read_to_string(path)
-                    && !contents.is_empty()
-                {
-                    return contents;
+                match std::fs::read_to_string(path) {
+                    Ok(contents) if !contents.is_empty() => return contents,
+                    _ => {}
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }

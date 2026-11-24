@@ -393,6 +393,23 @@ fn redact_and_truncate(
             text = text.replace(secret, REDACTED);
         }
     }
+    if overflowed {
+        // The capture cut can split a secret (and a char, which lossy turns into U+FFFD): a
+        // trailing proper prefix of a secret would survive `replace`, so redact it too.
+        if text.ends_with(char::REPLACEMENT_CHARACTER) {
+            text.pop();
+        }
+        let partial = secrets
+            .iter()
+            .flat_map(|s| {
+                (1..s.len()).filter(|&n| s.is_char_boundary(n) && text.ends_with(&s[..n]))
+            })
+            .max();
+        if let Some(n) = partial {
+            text.truncate(text.len() - n);
+            text.push_str(REDACTED);
+        }
+    }
 
     let truncated = overflowed || text.len() > log_cap;
     if text.len() > log_cap {
@@ -566,19 +583,12 @@ mod tests {
                 }
                 stderr.flush().expect("flush stderr");
             }
-            "emit_secret_boundary" => {
-                let prefix_len: usize = rest[0].parse().expect("prefix len");
-                let suffix_len: usize = rest[1].parse().expect("suffix len");
-                let secret = std::env::var("TEST_SECRET").unwrap_or_default();
-                let mut stderr = std::io::stderr().lock();
-                stderr
-                    .write_all(&vec![b'A'; prefix_len])
-                    .expect("write prefix");
-                stderr.write_all(secret.as_bytes()).expect("write secret");
-                stderr
-                    .write_all(&vec![b'B'; suffix_len])
-                    .expect("write suffix");
-                stderr.flush().expect("flush stderr");
+            // Prints the template in `rest[0]` to stderr, each `@` replaced by `TEST_SECRET`.
+            "emit_secret" => {
+                eprint!(
+                    "{}",
+                    rest[0].replace('@', &std::env::var("TEST_SECRET").unwrap())
+                );
             }
             "exit_code" => {
                 let code: i32 = rest[0].parse().expect("exit code");
@@ -740,8 +750,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let secret_val = "TOPSECRET_BOUNDARY_VALUE";
         // log_cap = 20; 16 'A's + 24-byte secret + 20 'B's -> secret crosses byte 20.
+        let template = format!("{}@{}", "A".repeat(16), "B".repeat(20));
         let spec = ChildSpec {
-            argv: child_argv("emit_secret_boundary", &["16", "20"]),
+            argv: child_argv("emit_secret", &[&template]),
             cwd: dir.path().to_path_buf(),
             env: base_env(),
             secret_env: vec![("TEST_SECRET".to_string(), Secret::new(secret_val))],
@@ -758,6 +769,38 @@ mod tests {
         assert!(output.truncated[1]);
         assert!(!output.stderr.contains("TOPSECRET"));
         assert_eq!(output.stderr, format!("{}***B", "A".repeat(16)));
+    }
+
+    #[tokio::test]
+    async fn train_external_security_redacts_secret_cut_at_capture_cap() {
+        // Redacting the first occurrence pulls the second, cut at log_cap + secret len, into
+        // the log_cap window: no byte of it may survive.
+        let long = "0123456789".repeat(10);
+        let short = "0123456789".to_owned();
+        let pad = |n| "A".repeat(n);
+        for (secret, template) in [
+            (long, "@@".to_owned()),
+            (short, format!("{}@{}@", pad(10), pad(45))),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let spec = ChildSpec {
+                argv: child_argv("emit_secret", &[&template]),
+                cwd: dir.path().to_path_buf(),
+                env: base_env(),
+                secret_env: vec![("TEST_SECRET".to_string(), Secret::new(secret))],
+                timeout: Some(Duration::from_secs(10)),
+                log_cap: 64,
+            };
+            let output = run_child(spec, &CancelSource::new().token())
+                .await
+                .expect("child should succeed");
+            assert!(output.truncated[1]);
+            assert!(
+                !output.stderr.contains(|c: char| c.is_ascii_digit()),
+                "{template}: secret bytes leaked: {}",
+                output.stderr
+            );
+        }
     }
 
     #[tokio::test]
@@ -1043,5 +1086,9 @@ mod tests {
         let (out, trunc) = redact_and_truncate(b"longsecretvalue", true, &["longsecretvalue"], 10);
         assert_eq!(out, "***");
         assert!(trunc);
+
+        // A secret cut by the capture inside a multi-byte char is still redacted.
+        let (out, _) = redact_and_truncate(&"x:ab€".as_bytes()[..5], true, &["ab€z"], 64);
+        assert_eq!(out, "x:***");
     }
 }

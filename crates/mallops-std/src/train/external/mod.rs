@@ -275,7 +275,7 @@ fn make_files_readonly(dir: &Path) -> Result<(), Error> {
         let meta = std::fs::symlink_metadata(&path).map_err(io_err(&path))?;
         if meta.is_dir() {
             make_files_readonly(&path)?;
-        } else {
+        } else if meta.is_file() {
             let mut perms = meta.permissions();
             perms.set_readonly(true);
             std::fs::set_permissions(&path, perms).map_err(io_err(&path))?;
@@ -365,6 +365,10 @@ impl Block for TrainExternal {
             std::fs::create_dir_all(&inputs_dir).map_err(io_err(&inputs_dir))?;
             let mut entries = BTreeMap::new();
             for (port, artifact) in inputs.iter() {
+                // Library callers bypass the pipeline validation: never join an unchecked name.
+                if !is_port_name(port) {
+                    return Err(Error::Runtime(format!("invalid input port name `{port}`")));
+                }
                 let rel = format!("inputs/{port}");
                 let dest = inputs_dir.join(port);
                 ctx.store().fetch(&artifact.id(), &dest).await?;
@@ -436,7 +440,10 @@ fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<(), Error> {
 mod tests {
     use std::sync::Arc;
 
-    use mallops_core::{CancelSource, MemorySecretProvider, MemoryStore, RunId};
+    use mallops_core::{
+        Artifact, ArtifactStore, CancelSource, Manifest, MemorySecretProvider, MemoryStore,
+        PayloadSource, RunId,
+    };
     use serde_json::json;
 
     use super::*;
@@ -594,6 +601,39 @@ mod tests {
             CancelSource::new().token(),
             Arc::new(MemorySecretProvider::default()),
         )
+    }
+
+    /// Runs the block with one stored input bound to `port` and a command that cannot spawn.
+    async fn run_one_input(port: &str, workdir: &Path) -> Result<BlockOutcome, Error> {
+        let store = Arc::new(MemoryStore::new());
+        let manifest = Manifest::new(ArtifactKind::Features, "csv");
+        let id = store
+            .put(manifest.clone(), PayloadSource::Bytes(b"x,y\n"))
+            .await
+            .unwrap();
+        let missing = workdir.join("missing-binary");
+        let ctx = Context::new(
+            RunId::new(),
+            workdir.to_path_buf(),
+            store,
+            json!({ "command": [missing] }),
+            CancelSource::new().token(),
+            Arc::new(MemorySecretProvider::default()),
+        );
+        let inputs = Inputs::new().with(port, Artifact::new(id, manifest));
+        TrainExternal::new().run(&ctx, inputs).await
+    }
+
+    #[tokio::test]
+    async fn train_external_security_rejects_bad_input_port_names() {
+        for port in ["../x", "/abs"] {
+            let dir = tempfile::tempdir().unwrap();
+            let err = run_one_input(port, dir.path()).await.unwrap_err();
+            assert!(
+                matches!(&err, Error::Runtime(m) if m.contains("invalid input port name")),
+                "{port}: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

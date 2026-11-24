@@ -146,6 +146,12 @@ pub(crate) fn output_payload(workdir: &Path, rel: &str) -> Result<DraftPayload, 
         }
         meta = Some(m);
     }
+    // Belt and braces for what the symlink walk cannot see (e.g. NTFS junctions).
+    let root = std::fs::canonicalize(workdir).map_err(|e| err(e.to_string()))?;
+    let canon = std::fs::canonicalize(&path).map_err(|e| err(e.to_string()))?;
+    if !canon.starts_with(&root) {
+        return Err(err("resolves outside the workdir".into()));
+    }
     match meta {
         Some(m) if m.is_file() => Ok(DraftPayload::File(path)),
         Some(m) if m.is_dir() => Ok(DraftPayload::Dir(path)),

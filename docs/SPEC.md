@@ -92,7 +92,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 ### 3.4 Training
 - FR-TRN-1: native Rust training (linfa for classic ML) — v0.1.
 - FR-TRN-2: deep learning via burn/candle — v0.3.
-- FR-TRN-3: **external trainer**: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings.
+- FR-TRN-3: **external trainer**: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings. The block is `std/train.external`; the CLI contract v1 is specified in [`std/train.external`](reference/train-external.md).
 - FR-TRN-4: hyperparameters, seed and environment recorded in the run lineage.
 
 ### 3.5 Model engineering
@@ -205,7 +205,7 @@ blocks:
     use: std/train.external            # any language, any library
     in: { train: features.train }      # wire `val: features.validation` when `split.validation` is set
     with:
-      command: ["python", "train.py"]
+      command: ["python", "./train.py"]
       flavor: sklearn-pickle
       params: { n_estimators: 200 }
 

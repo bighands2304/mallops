@@ -76,5 +76,7 @@ nav:
       - adr/0007-core-contracts-revision.md
       - adr/0008-edge-build-profiles-and-on-device-training.md
       - adr/0009-mqtt-blocks-and-serve-transport.md
+  - Reference:
+      - std/train.external: reference/train-external.md
   - Contributing: contributing.md
   - API reference: https://docs.rs/mallops-core

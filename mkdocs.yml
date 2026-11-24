@@ -78,5 +78,6 @@ nav:
       - adr/0009-mqtt-blocks-and-serve-transport.md
   - Reference:
       - std/train.external: reference/train-external.md
+      - std/train.smartcore: reference/train-smartcore.md
   - Contributing: contributing.md
   - API reference: https://docs.rs/mallops-core

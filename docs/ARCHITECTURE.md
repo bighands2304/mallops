@@ -61,7 +61,7 @@ Crates are created only when implemented. Splitting `mallops-std` into per-stage
 | Crate | Depends on | Dependencies |
 |---|---|---|
 | `mallops-core` | — | Core allowlist: `tokio`, `serde`, `serde_json`, `blake3`, `tracing`, `thiserror`, `ulid`, `tempfile`; optional features: `yaml` (`yaml_serde`, default), `schema` (`schemars`) ([ADR-0007](adr/0007-core-contracts-revision.md)) |
-| `mallops-std` | core | workspace `blake3`, `serde`, `serde_json`, `tokio` (already in the graph via core); optional behind per-block Cargo features (`--no-default-features` pulls in no Arrow or Parquet crate): `ingest-csv` (`arrow-csv` `60`), `ingest-parquet`, meta-feature `ingest = ["ingest-csv", "ingest-parquet"]` (default), `preprocess-tabular` (default; `arrow-cast` `60`, `arrow-ord` `60`, `arrow-select` `60`, internal SplitMix64+Fisher-Yates PRNG with no `rand`), `train-external` (`tracing`, `tokio` features `io-util`, `process`, `time`; Unix only: `nix` `0.32` with `default-features = false, features = ["signal"]` for a safe `killpg`), the Arrow blocks all sharing internal `_ingest` (`arrow-array` `60`, `arrow-schema` `60`, `parquet` `60` with `default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]` — codecs are for reading external Parquet files while outputs stay uncompressed); future features: `linfa`, `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
+| `mallops-std` | core | workspace `blake3`, `serde`, `serde_json`, `tokio` (already in the graph via core); optional behind per-block Cargo features (`--no-default-features` pulls in no Arrow or Parquet crate): `ingest-csv` (`arrow-csv` `60`), `ingest-parquet`, meta-feature `ingest = ["ingest-csv", "ingest-parquet"]` (default), `preprocess-tabular` (default; `arrow-cast` `60`, `arrow-ord` `60`, `arrow-select` `60`, internal SplitMix64+Fisher-Yates PRNG with no `rand`), `train-external` (`tracing`, `tokio` features `io-util`, `process`, `time`; Unix only: `nix` `0.32` with `default-features = false, features = ["signal"]` for a safe `killpg`), `train-smartcore` (`smartcore` `0.7` with `default-features = false, features = ["std"]`, plus `arrow-cast` `60` and `arrow-select` `60`), the Arrow blocks all sharing internal `_ingest` (`arrow-array` `60`, `arrow-schema` `60`, `parquet` `60` with `default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]` — codecs are for reading external Parquet files while outputs stay uncompressed); future features: `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
 | `mallops-cli` | core, std (feature `train-external`) | `clap` (`derive`), `anyhow`, `serde_json`, `tracing-subscriber` (`fmt`), `tokio` (`rt-multi-thread`, `signal` for Ctrl-C cancellation); dev: `insta`, `tempfile` |
 | `mallops-edge` | core, std (`profile-edge`, ADR-0008) | `tonic`, `rumqttc` (via `serve-mqtt`) |
 
@@ -381,7 +381,7 @@ flowchart LR
     C[Client] -->|HTTP/gRPC/MQTT| S[mallops serve]
     S --> T[Preprocess transform<br/>from package]
     T --> P{Predictor by flavor}
-    P --> LF[linfa]
+    P --> SC[smartcore]
     P --> O[ort]
     P --> TR[tract]
     P --> CA[candle]
@@ -398,7 +398,7 @@ pub enum PredictInput {
 }
 
 pub trait Predictor: Send + Sync {
-    fn flavors(&self) -> &[&str];                       // e.g. ["linfa-logistic"], ["sklearn-pickle"]
+    fn flavors(&self) -> &[&str];                       // e.g. ["smartcore-logistic", "smartcore-linear"], ["sklearn-pickle"]
     fn executes_code(&self) -> bool;                    // true for pickle/joblib/torchscript
     fn load(&self, pkg: &Artifact, workdir: &Path) -> BoxFuture<'_, Result<Box<dyn LoadedPredictor>, Error>>;
 }

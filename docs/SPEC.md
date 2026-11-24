@@ -1,6 +1,6 @@
 # mallops — Technical Specification
 
-> Status: **Draft** · Target: v0.1 · Last update: 2026-11-23
+> Status: **Draft** · Target: v0.1 · Last update: 2026-11-24
 
 ## 1. Vision
 
@@ -90,7 +90,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
   - `apply_json`: accepts a JSON array of row objects keyed by `input` columns (`target` optional, unknown keys ignored, explicit `null` allowed; a missing key for a non-target column fails with `Error::Runtime("…row {i}: missing column '{col}'")`; `int64` columns accept whole-number floats; type mismatches report row index and column name), builds the `RecordBatch`, and applies the exact same steps as `apply_batch`.
 
 ### 3.4 Training
-- FR-TRN-1: native Rust training (linfa for classic ML) — v0.1.
+- FR-TRN-1: native Rust training (`smartcore` for classic ML) — v0.1. The block is `std/train.smartcore` (feature `train-smartcore`, not in `default`; binary logistic regression and linear regression); see [`std/train.smartcore`](reference/train-smartcore.md).
 - FR-TRN-2: deep learning via burn/candle — v0.3.
 - FR-TRN-3: **external trainer**: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings. The block is `std/train.external`; the CLI contract v1 is specified in [`std/train.external`](reference/train-external.md).
 - FR-TRN-4: hyperparameters, seed and environment recorded in the run lineage.
@@ -122,7 +122,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-SRV-1: HTTP/JSON inference server (`mallops serve [package-id]`) running outside the batch DAG, consuming a `package` artifact produced by `mallops run` — v0.1 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 - FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.
 - FR-SRV-4: MQTT transport (`serve.transport: mqtt`): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 ([ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
-- FR-SRV-3: **backend-agnostic**: the server dispatches to a `Predictor` chosen by the package flavor (linfa, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) and is promoted to `mallops-core` before 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)).
+- FR-SRV-3: **backend-agnostic**: the server dispatches to a `Predictor` chosen by the package flavor (smartcore, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) and is promoted to `mallops-core` before 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)).
 
 ### 3.11 Monitoring and logging
 - FR-MON-1: structured logs (`tracing`) for every run and every request — v0.1.
@@ -295,7 +295,7 @@ Per-run provenance (`run`, `node`) is **not** part of `manifest.json`; it is rec
 | `dataset` | `parquet`, `arrow-ipc`, `csv`, `json`, `images`, `tfrecord`, any | Arrow/Parquet is the interchange default for std blocks only ([ADR-0002](adr/0002-arrow-default-interchange.md)): `std/ingest.*` emit `format: parquet` with a single uncompressed `payload/data.parquet` file (`created_by: "mallops-std"`, deterministic per `mallops-std` version, source schema metadata stripped) |
 | `features` | as dataset | preprocessed feature splits: `std/preprocess.tabular` emits `format: parquet` (`payload/data.parquet`, uncompressed) with `metadata["target"]` and `io_schema: {"features": [{"name", "type"}], "target": {"name", "type"}}` |
 | `transform` | `json`, `bin`, `pickle`, any | fitted preprocessor (scaler, imputer, encoder…) reused by `package` and `serve`: `std/preprocess.tabular` emits `format: json` (`payload/transform.json` = `{"v":1,"target":…,"input":[…],"steps":[…]}`) with `io_schema: {"input": [{"name", "type"}], "output": [{"name", "type"}]}` |
-| `model` | `onnx`, `safetensors`, `torchscript`, `pickle`, `joblib`, `gguf`, `xgboost-json`, `savedmodel`, any | `flavor` selects the predictor |
+| `model` | `json`, `onnx`, `safetensors`, `torchscript`, `pickle`, `joblib`, `gguf`, `xgboost-json`, `savedmodel`, any | `flavor` selects the predictor: `std/train.smartcore` emits `format: json` (`payload/model.json`), `flavor: smartcore-logistic` or `smartcore-linear`, and `io_schema: {"input": [{"name", "type"}], "output": [{"name", "type"}]}` (same shape as `transform`; see [`std/train.smartcore`](reference/train-smartcore.md)) |
 | `metrics` | `json` | key → number map + optional plots |
 | `package` | `dir`, `oci` | model + transforms + manifest |
 | `blob` | any | escape hatch |
@@ -304,7 +304,7 @@ Per-run provenance (`run`, `node`) is **not** part of `manifest.json`; it is rec
 
 | Flavor / format | Executes code on load? | Serving default |
 |---|---|---|
-| `onnx`, `safetensors`, `linfa-*`, `xgboost-json`, `gguf`, `skops` | No | Allowed |
+| `onnx`, `safetensors`, `smartcore-*`, `xgboost-json`, `gguf`, `skops` | No | Allowed |
 | `pickle`, `joblib`, `sklearn-pickle`, `torchscript` | **Yes** | Refused unless `--trust-unsafe-flavors` |
 
 Inputs and outputs of blocks declare the accepted `kind` and optionally accepted `format`s / `flavor`s; `mallops validate` checks compatibility before running (using `Block::resolve_ports` when ports depend on `with:` config); an output is wired into an input only if its `kind` is equal and every `format`/`flavor` it may produce is accepted (an empty accepted list means any; an unconstrained output, i.e. an empty list, does not satisfy a constrained input). Error paths are listed in [§5](#5-pipeline-definition-mallopsyaml).
@@ -313,7 +313,7 @@ Inputs and outputs of blocks declare the accepted `kind` and optionally accepted
 
 | Version | Scope |
 |---|---|
-| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `store verify`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train linfa + external, evaluate classification/regression, package, HTTP serving) |
+| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `store verify`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train smartcore + external, evaluate classification/regression, package, HTTP serving) |
 | v0.2 | remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry & versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging |
 | v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport |
 | v0.4 | `mallops-edge` (edge build profiles), on-device online learning, federated learning, fleet deploy, distributed monitoring |

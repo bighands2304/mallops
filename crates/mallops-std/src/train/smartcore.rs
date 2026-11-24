@@ -125,7 +125,7 @@ impl TrainSmartcoreConfig {
         }
         let algorithm = match raw.algorithm {
             Algorithm::LogisticRegression => {
-                let hp: LogisticHyperparameters = match raw.hyperparameters {
+                let mut hp: LogisticHyperparameters = match raw.hyperparameters {
                     None => LogisticHyperparameters::default(),
                     Some(v) => parse_config(&v)?,
                 };
@@ -134,6 +134,9 @@ impl TrainSmartcoreConfig {
                         "hyperparameters.alpha must be a finite number >= 0, got {}",
                         hp.alpha
                     )));
+                }
+                if hp.alpha == 0.0 {
+                    hp.alpha = 0.0;
                 }
                 AlgorithmConfig::Logistic(hp)
             }
@@ -795,6 +798,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn train_smartcore_logistic_alpha() {
+        let store = Arc::new(MemoryStore::new());
+        let batch = separable_logistic_batch_int64();
+        let inputs = store_features(&store, &batch, Some("y")).await;
+
+        let (_w_def, d_def) = run_block(
+            &store,
+            &inputs,
+            json!({ "algorithm": "logistic_regression" }),
+        )
+        .await
+        .unwrap();
+        let (_w_reg, d_reg) = run_block(
+            &store,
+            &inputs,
+            json!({ "algorithm": "logistic_regression", "hyperparameters": { "alpha": 10.0 } }),
+        )
+        .await
+        .unwrap();
+        let draft_reg = d_reg.get(MODEL).unwrap();
+        assert_eq!(
+            draft_reg.manifest.metadata.get("hyperparameters"),
+            Some(&json!({ "alpha": 10.0 }))
+        );
+        let coef_def = read_model_json(d_def.get(MODEL).unwrap())["coefficients"][0]
+            .as_f64()
+            .unwrap();
+        let coef_reg = read_model_json(draft_reg)["coefficients"][0]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (coef_reg.abs() - coef_def.abs()).abs() > 1e-3,
+            "expected alpha=10.0 to change |coef[0]|: default={coef_def}, alpha=10.0={coef_reg}"
+        );
+
+        // -0.0 is normalized to 0.0 before being recorded in manifest metadata.
+        let (_w_neg0, d_neg0) = run_block(
+            &store,
+            &inputs,
+            json!({ "algorithm": "logistic_regression", "hyperparameters": { "alpha": -0.0 } }),
+        )
+        .await
+        .unwrap();
+        let hp_json = serde_json::to_string(
+            d_neg0
+                .get(MODEL)
+                .unwrap()
+                .manifest
+                .metadata
+                .get("hyperparameters")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hp_json, r#"{"alpha":0.0}"#);
+    }
+
+    #[tokio::test]
     async fn train_smartcore_logistic_bool_and_string_targets_and_permuted_rows() {
         let store = Arc::new(MemoryStore::new());
 
@@ -1123,6 +1183,128 @@ mod tests {
             "{err:?}"
         );
 
+        // +inf in feature
+        let batch_inf = RecordBatch::try_from_iter([
+            (
+                "x",
+                Arc::new(Float64Array::from(vec![1.0, 2.0, f64::INFINITY, 4.0])) as ArrayRef,
+            ),
+            ("y", Arc::new(Int64Array::from(vec![0, 0, 1, 1])) as _),
+        ])
+        .unwrap();
+        let err = run_block(
+            &store,
+            &store_features(&store, &batch_inf, Some("y")).await,
+            json!({ "algorithm": "logistic_regression" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("`x`") && m.contains("row 2")),
+            "{err:?}"
+        );
+
+        // Null in target (logistic and linear)
+        let batch_null_target_log = RecordBatch::try_from_iter([
+            (
+                "x",
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef,
+            ),
+            (
+                "y",
+                Arc::new(Int64Array::from(vec![Some(0), None, Some(1), Some(1)])) as _,
+            ),
+        ])
+        .unwrap();
+        let err = run_block(
+            &store,
+            &store_features(&store, &batch_null_target_log, Some("y")).await,
+            json!({ "algorithm": "logistic_regression" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("`y`") && m.contains("null")),
+            "{err:?}"
+        );
+        let batch_null_target_lin = RecordBatch::try_from_iter([
+            (
+                "x",
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef,
+            ),
+            (
+                "y",
+                Arc::new(Float64Array::from(vec![
+                    Some(1.0),
+                    None,
+                    Some(3.0),
+                    Some(4.0),
+                ])) as _,
+            ),
+        ])
+        .unwrap();
+        let err = run_block(
+            &store,
+            &store_features(&store, &batch_null_target_lin, Some("y")).await,
+            json!({ "algorithm": "linear_regression" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("`y`") && m.contains("null")),
+            "{err:?}"
+        );
+
+        // NaN in linear target
+        let batch_nan_target = RecordBatch::try_from_iter([
+            (
+                "x",
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef,
+            ),
+            (
+                "y",
+                Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0, 4.0])) as _,
+            ),
+        ])
+        .unwrap();
+        let err = run_block(
+            &store,
+            &store_features(&store, &batch_nan_target, Some("y")).await,
+            json!({ "algorithm": "linear_regression" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Runtime(m) if m.contains("`y`") && m.contains("row 1")),
+            "{err:?}"
+        );
+
+        // Boolean and Utf8 targets with linear_regression -> error
+        for y_arr in [
+            Arc::new(BooleanArray::from(vec![false, false, true, true])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["a", "b", "c", "d"])) as ArrayRef,
+        ] {
+            let b = RecordBatch::try_from_iter([
+                (
+                    "x",
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef,
+                ),
+                ("y", y_arr),
+            ])
+            .unwrap();
+            let err = run_block(
+                &store,
+                &store_features(&store, &b, Some("y")).await,
+                json!({ "algorithm": "linear_regression" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::Runtime(m) if m.contains("unsupported type")),
+                "{err:?}"
+            );
+        }
+
         // String feature -> suggests encode/select
         let batch_str_feat = RecordBatch::try_from_iter([
             (
@@ -1294,15 +1476,22 @@ mod tests {
             matches!(&err, Error::Runtime(m) if m.contains("features are linearly dependent")),
             "{err:?}"
         );
-        // SVD handles collinear columns without panicking.
+        // SVD handles collinear columns without panicking and produces finite parameters.
+        let (_w_svd, d_svd) = run_block(
+            &store,
+            &inputs_col,
+            json!({ "algorithm": "linear_regression", "hyperparameters": { "solver": "svd" } }),
+        )
+        .await
+        .unwrap();
+        let m_svd = read_model_json(d_svd.get(MODEL).unwrap());
+        assert!(m_svd["intercept"].as_f64().unwrap().is_finite());
         assert!(
-            run_block(
-                &store,
-                &inputs_col,
-                json!({ "algorithm": "linear_regression", "hyperparameters": { "solver": "svd" } }),
-            )
-            .await
-            .is_ok()
+            m_svd["coefficients"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v.as_f64().unwrap().is_finite())
         );
 
         // Cancel before run -> Error::Cancelled

@@ -209,15 +209,15 @@ impl PreprocessConfig {
                     if !ratio_ok(s.test) {
                         return err(i, format!("split.test {} must be in (0, 1)", s.test));
                     }
-                    if let Some(v) = s.validation {
-                        if !ratio_ok(v) || s.test + v >= 1.0 {
-                            return err(
-                                i,
-                                format!(
-                                    "split.validation {v} must be in (0, 1) with test + validation < 1"
-                                ),
-                            );
-                        }
+                    if let Some(v) = s.validation
+                        && (!ratio_ok(v) || s.test + v >= 1.0)
+                    {
+                        return err(
+                            i,
+                            format!(
+                                "split.validation {v} must be in (0, 1) with test + validation < 1"
+                            ),
+                        );
                     }
                 }
                 s if s.is_fitted() && split_at.is_none() => {

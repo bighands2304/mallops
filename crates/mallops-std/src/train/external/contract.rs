@@ -21,16 +21,14 @@ pub(crate) const CONFIG_FILE: &str = "config.json";
 pub(crate) const OUTPUTS_FILE: &str = "outputs.json";
 
 /// `inputs.json`: input port name → materialized, read-only copy in the workdir.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub(crate) struct InputsFile {
     pub(crate) protocol_version: u32,
     pub(crate) inputs: BTreeMap<String, InputEntry>,
 }
 
 /// One materialized input artifact.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub(crate) struct InputEntry {
     /// Artifact id (hex).
     pub(crate) id: String,
@@ -41,8 +39,7 @@ pub(crate) struct InputEntry {
 }
 
 /// `config.json`: `with.flavor`, `with.params` and the run id. Never contains resolved secrets.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub(crate) struct ConfigFile {
     pub(crate) protocol_version: u32,
     pub(crate) flavor: Option<String>,
@@ -111,15 +108,10 @@ pub(crate) fn read_outputs(workdir: &Path) -> Result<OutputsFile, Error> {
     let bytes = std::fs::read(&path).map_err(|e| err(e.to_string()))?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| err(format!("invalid JSON: {e}")))?;
-    let version = value
-        .get("protocol_version")
-        .and_then(serde_json::Value::as_u64);
-    if version != Some(u64::from(PROTOCOL_VERSION)) {
+    let version = &value["protocol_version"];
+    if version != PROTOCOL_VERSION {
         return Err(err(format!(
-            "protocol_version must be {PROTOCOL_VERSION}, got {}",
-            value
-                .get("protocol_version")
-                .unwrap_or(&serde_json::Value::Null)
+            "protocol_version must be {PROTOCOL_VERSION}, got {version}"
         )));
     }
     serde_json::from_value(value).map_err(|e| err(e.to_string()))

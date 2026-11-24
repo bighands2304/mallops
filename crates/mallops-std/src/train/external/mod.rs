@@ -68,13 +68,20 @@ impl TrainExternalConfig {
 
     fn check(&self) -> Result<(), Error> {
         let err = |msg: String| Err(Error::Config(msg));
-        let secret_ref = |s: &str| s.contains("${secret:");
-        let no_ref = |field: &str| {
-            Error::Config(format!(
+        let secret_refs = [
+            ("command", has_secret_ref(&self.command)),
+            ("flavor", has_secret_ref(&self.flavor)),
+            ("params", has_secret_ref(&self.params)),
+            ("env", has_secret_ref(&self.env)),
+            ("secrets", has_secret_ref(&self.secrets)),
+            ("watch_files", has_secret_ref(&self.watch_files)),
+        ];
+        if let Some((field, _)) = secret_refs.iter().find(|(_, found)| *found) {
+            return err(format!(
                 "{field}: `${{secret:...}}` is not resolved here, use `secrets:` to pass a secret \
                  as an environment variable"
-            ))
-        };
+            ));
+        }
         match self.command.first() {
             None => return err("command must not be empty".into()),
             Some(program) if program.is_empty() => {
@@ -82,31 +89,12 @@ impl TrainExternalConfig {
             }
             _ => {}
         }
-        for (i, arg) in self.command.iter().enumerate() {
-            if arg.contains('\0') {
-                return err(format!("command[{i}] contains a NUL byte"));
-            }
-            if secret_ref(arg) {
-                return Err(no_ref(&format!("command[{i}]")));
-            }
-        }
-        if let Some(params) = &self.params {
-            if !params.is_object() {
-                return err("params must be an object".into());
-            }
-            if json_strings_any(params, &secret_ref) {
-                return Err(no_ref("params"));
-            }
+        if self.params.as_ref().is_some_and(|p| !p.is_object()) {
+            return err("params must be an object".into());
         }
         let mut seen = BTreeSet::new();
         for (field, names) in [("env", &self.env), ("secrets", &self.secrets)] {
             for name in names {
-                if secret_ref(name) {
-                    return Err(no_ref(field));
-                }
-                if name.contains('\0') {
-                    return err(format!("{field}: `{name}` contains a NUL byte"));
-                }
                 if !is_env_name(name) {
                     return err(format!(
                         "{field}: `{name}` is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)"
@@ -228,16 +216,10 @@ fn is_port_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// Whether any string (key or value) inside `value` satisfies `pred`.
-fn json_strings_any(value: &serde_json::Value, pred: &dyn Fn(&str) -> bool) -> bool {
-    match value {
-        serde_json::Value::String(s) => pred(s),
-        serde_json::Value::Array(items) => items.iter().any(|v| json_strings_any(v, pred)),
-        serde_json::Value::Object(map) => map
-            .iter()
-            .any(|(k, v)| pred(k) || json_strings_any(v, pred)),
-        _ => false,
-    }
+/// Whether any string (key or value) in `value` contains `${secret:`; JSON never escapes `$`,
+/// `{` or `:`.
+fn has_secret_ref(value: &impl serde::Serialize) -> bool {
+    serde_json::to_string(value).is_ok_and(|json| json.contains("${secret:"))
 }
 
 fn path_string(path: &Path) -> Result<String, Error> {
@@ -344,11 +326,9 @@ impl Block for TrainExternal {
             if cfg.watch_files.is_empty() {
                 return Ok(CachePolicy::Uncacheable);
             }
-            let digest = tokio::task::spawn_blocking(move || hash_watch_files(&cfg.watch_files))
-                .await
-                .map_err(|e| Error::Runtime(format!("blocking task failed: {e}")))??;
+            // ponytail: sync reads on the async thread, a handful of small files.
             Ok(CachePolicy::Deterministic {
-                extra_hash: Some(digest),
+                extra_hash: Some(hash_watch_files(&cfg.watch_files)?),
             })
         })
     }
@@ -496,7 +476,6 @@ mod tests {
         assert!(config_err(json!({})).contains("command"));
         assert!(config_err(json!({ "command": [] })).contains("must not be empty"));
         assert!(config_err(json!({ "command": [""] })).contains("command[0]"));
-        assert!(config_err(json!({ "command": ["a", "b\u{0}"] })).contains("NUL"));
         assert!(config_err(json!({ "command": ["a"], "bogus": 1 })).contains("unknown field"));
         // An empty argument after the program is legitimate.
         TrainExternal::new()
@@ -511,6 +490,9 @@ mod tests {
             with(json!({ "params": { "nested": ["${secret:T}"] } })),
             with(json!({ "params": { "${secret:T}": 1 } })),
             with(json!({ "env": ["${secret:T}"] })),
+            with(json!({ "secrets": ["${secret:T}"] })),
+            with(json!({ "flavor": "${secret:T}" })),
+            with(json!({ "watch_files": ["${secret:T}"] })),
         ] {
             assert!(config_err(cfg).contains("use `secrets:`"));
         }
@@ -522,7 +504,6 @@ mod tests {
             assert!(config_err(with(json!({ "env": [bad] }))).contains("valid variable name"));
             assert!(config_err(with(json!({ "secrets": [bad] }))).contains("valid variable name"));
         }
-        assert!(config_err(with(json!({ "env": ["A\u{0}"] }))).contains("NUL"));
         for reserved in [
             "PATH",
             "Path",

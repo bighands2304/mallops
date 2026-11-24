@@ -38,7 +38,7 @@ fn parse_lowercase_hex_32(input: &str) -> Result<[u8; 32], String> {
     }
 
     let mut bytes = [0u8; 32];
-    for (i, chunk) in raw.chunks_exact(2).enumerate() {
+    for (i, chunk) in raw.as_chunks::<2>().0.iter().enumerate() {
         let hi = decode_hex_nibble(chunk[0]).ok_or_else(|| {
             format!(
                 "invalid character at byte offset {}: expected lowercase hex [0-9a-f]",

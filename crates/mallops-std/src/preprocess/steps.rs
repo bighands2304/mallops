@@ -648,10 +648,10 @@ fn apply_one_hot(
             let lookup = category_lookup(cats);
             let mut buffers = vec![vec![0.0_f64; n_rows]; cats.len()];
             for (row, opt) in array.as_string::<i32>().iter().enumerate() {
-                if let Some(val) = opt {
-                    if let Some(&cat_idx) = lookup.get(val) {
-                        buffers[cat_idx][row] = 1.0;
-                    }
+                if let Some(val) = opt
+                    && let Some(&cat_idx) = lookup.get(val)
+                {
+                    buffers[cat_idx][row] = 1.0;
                 }
             }
             for (cat, buf) in cats.iter().zip(buffers) {

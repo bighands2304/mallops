@@ -602,10 +602,10 @@ async fn execute(
         produced,
     )
     .await?;
-    if let (Some(key), None) = (&key, &reason) {
-        if let Err(e) = cache::record(&*env.store, key, &outputs).await {
-            tracing::warn!(error = %e, "cannot record cache entry");
-        }
+    if let (Some(key), None) = (&key, &reason)
+        && let Err(e) = cache::record(&*env.store, key, &outputs).await
+    {
+        tracing::warn!(error = %e, "cannot record cache entry");
     }
     Ok((outputs, reason, false))
 }

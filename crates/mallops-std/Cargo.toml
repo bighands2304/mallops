@@ -31,19 +31,18 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing = { workspace = true, optional = true }
-# 59.x: 60.x requires Rust 1.88 (MSRV is 1.85). Codecs are for reading external files;
-# the output is always uncompressed.
-arrow-array = { version = "59", optional = true }
-arrow-cast = { version = "59", optional = true }
-arrow-csv = { version = "59", optional = true }
-arrow-ord = { version = "59", optional = true }
-arrow-schema = { version = "59", optional = true }
-arrow-select = { version = "59", optional = true }
-parquet = { version = "59", default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"], optional = true }
+# Codecs are for reading external files; the output is always uncompressed.
+arrow-array = { version = "60", optional = true }
+arrow-cast = { version = "60", optional = true }
+arrow-csv = { version = "60", optional = true }
+arrow-ord = { version = "60", optional = true }
+arrow-schema = { version = "60", optional = true }
+arrow-select = { version = "60", optional = true }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"], optional = true }
 
 # Process-group kill for train.external (safe `killpg`; `unsafe_code` is forbidden).
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", default-features = false, features = ["signal"], optional = true }
+nix = { version = "0.32", default-features = false, features = ["signal"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

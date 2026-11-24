@@ -349,6 +349,7 @@ mod tests {
         std::fs::rename(&tmp, path).expect("rename marker file into place");
     }
 
+    #[cfg(unix)] // only the process-group tests wait for a marker file
     async fn wait_for_file(path: &Path, timeout: Duration) -> String {
         tokio::time::timeout(timeout, async {
             loop {
@@ -475,8 +476,8 @@ mod tests {
             assert!(output.truncated[1]);
             assert!(
                 !output.stderr.contains(|c: char| c.is_ascii_digit()),
-                "{template}: secret bytes leaked: {}",
-                output.stderr
+                // Never print the captured stderr: on failure it holds the secret.
+                "{template}: secret bytes leaked into captured stderr"
             );
         }
     }

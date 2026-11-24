@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_read_outputs_rejects_wrong_version() {
+    fn train_external_contract_v1_read_outputs_rejects_wrong_version() {
         let dir = tempfile::tempdir().unwrap();
         write_outputs(
             dir.path(),
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_read_outputs_rejects_unknown_fields() {
+    fn train_external_contract_v1_read_outputs_rejects_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
         write_outputs(
             dir.path(),
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_read_outputs_missing_or_malformed() {
+    fn train_external_contract_v1_read_outputs_missing_or_malformed() {
         let dir = tempfile::tempdir().unwrap();
         assert!(runtime_msg(read_outputs(dir.path())).contains("not written"));
         fs::write(dir.path().join(OUTPUTS_FILE), "{").unwrap();
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_read_outputs_skipped_into_outcome() {
+    fn train_external_contract_v1_read_outputs_skipped_into_outcome() {
         let dir = tempfile::tempdir().unwrap();
         write_outputs(
             dir.path(),
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_read_outputs_produced_into_outcome() {
+    fn train_external_contract_v1_read_outputs_produced_into_outcome() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("out")).unwrap();
         fs::write(dir.path().join("out/model.onnx"), b"m").unwrap();

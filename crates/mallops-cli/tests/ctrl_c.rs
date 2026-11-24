@@ -43,11 +43,12 @@ fn read_pid(path: &Path) -> Option<String> {
 fn ctrl_c_cancels_run_and_kills_trainer_process_group() {
     let wd = WorkDir::new();
     let pid_file = wd.path().join("grandchild.pid");
-    let script = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+    // The pid file path is `$1` (quoted), written atomically so `read_pid` never sees it partial.
+    let script = r#"sleep 30 & echo $! > "$1.tmp" && mv "$1.tmp" "$1"; wait"#;
     let yaml = format!(
         "version: 1\nname: ctrl-c\nblocks:\n  train:\n    use: std/train.external\n    with:\n      \
          command: {}\n      inputs: {{}}\n",
-        serde_json::json!(["sh", "-c", script])
+        serde_json::json!(["sh", "-c", script, "_", pid_file])
     );
     wd.write("mallops.yaml", &yaml);
 

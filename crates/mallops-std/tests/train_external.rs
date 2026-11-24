@@ -87,10 +87,8 @@ fn child_entry() {
                 "echo": echo(json!({ "inputs": inputs, "config": config, "write_failed": write_failed })),
             }));
         }
-        "skip" => write_json(
-            "outputs.json",
-            &json!({ "protocol_version": 1, "status": "skipped", "skip_reason": "nothing new" }),
-        ),
+        // Writes `params.outputs` verbatim as `outputs.json`.
+        "raw" => write_json("outputs.json", &params["outputs"]),
         "echo" => {
             let args: Vec<String> = std::env::args().skip(HARNESS_ARGS).collect();
             let env: BTreeMap<String, String> = std::env::vars().collect();
@@ -336,11 +334,32 @@ async fn train_external_contract_v1_files_inputs_and_manifest() {
 #[tokio::test]
 async fn train_external_contract_v1_skipped_status() {
     let env = Env::new();
-    let summary = env.run(with_mode("skip", json!({}))).await;
+    let outputs =
+        json!({ "protocol_version": 1, "status": "skipped", "skip_reason": "nothing new" });
+    let summary = env
+        .run(with_mode(
+            "raw",
+            json!({ "params": { "outputs": outputs } }),
+        ))
+        .await;
     let node = train(&summary);
     assert_eq!(node.status, Status::Skipped, "{node:?}");
     assert_eq!(node.reason.as_deref(), Some("nothing new"));
     assert!(node.outputs.is_empty());
+}
+
+#[tokio::test]
+async fn train_external_contract_v1_rejects_wrong_outputs_version() {
+    let env = Env::new();
+    let outputs = json!({ "protocol_version": 2, "status": "produced" });
+    let summary = env
+        .run(with_mode(
+            "raw",
+            json!({ "params": { "outputs": outputs } }),
+        ))
+        .await;
+    let msg = runtime_error(&summary);
+    assert!(msg.contains("protocol_version must be 1, got 2"), "{msg}");
 }
 
 // ---------------------------------------------------------------------------------------------

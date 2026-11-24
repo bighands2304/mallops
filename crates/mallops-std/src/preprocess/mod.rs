@@ -10,13 +10,10 @@ pub(crate) mod steps;
 pub mod transform;
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use arrow_array::{RecordBatch, RecordBatchIterator};
 use arrow_schema::Schema;
-use arrow_select::concat::concat_batches;
 use mallops_core::{
     ArtifactKind, Block, BlockOutcome, BlockSpec, BoxFuture, CancelToken, Context, DraftPayload,
     Error, Inputs, Manifest, OutputDraft, OutputDrafts, Port, ResolvedPorts, Stage,
@@ -24,7 +21,9 @@ use mallops_core::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::ingest::{Column, ColumnType, DATA_FILE, blocking, parse_config, write_parquet};
+use crate::ingest::{
+    Column, ColumnType, DATA_FILE, blocking, parse_config, read_parquet_batch, write_parquet,
+};
 use transform::{FittedTransform, TRANSFORM_FILE};
 
 /// Input port: the dataset to transform.
@@ -331,25 +330,6 @@ fn columns_from_schema(schema: &Schema, target: &str) -> Result<Vec<Column>, Err
             })
         })
         .collect()
-}
-
-/// Reads a Parquet file into a single concatenated [`RecordBatch`], checking `cancel` between
-/// batches.
-fn read_parquet_batch(path: &Path, cancel: &CancelToken) -> Result<RecordBatch, Error> {
-    let err = |e: &dyn std::fmt::Display| Error::Runtime(format!("{}: {e}", path.display()));
-    let file = File::open(path)
-        .map_err(|e| Error::Runtime(format!("cannot read {}: {e}", path.display())))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
-    let schema = builder.schema().clone();
-    let reader = builder.build().map_err(|e| err(&e))?;
-    let mut batches = Vec::new();
-    for batch in reader {
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        batches.push(batch.map_err(|e| err(&e))?);
-    }
-    concat_batches(&schema, &batches).map_err(|e| err(&e))
 }
 
 /// Writes a single partition batch to `<workdir>/<port>/data.parquet`.

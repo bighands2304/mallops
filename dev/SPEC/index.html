@@ -1053,6 +1053,93 @@
   
   
   
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/train-external/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/train.external
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../contributing/" class="md-nav__link">
         
@@ -1609,7 +1696,7 @@
 <ul>
 <li>FR-TRN-1: native Rust training (linfa for classic ML) — v0.1.</li>
 <li>FR-TRN-2: deep learning via burn/candle — v0.3.</li>
-<li>FR-TRN-3: <strong>external trainer</strong>: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings.</li>
+<li>FR-TRN-3: <strong>external trainer</strong>: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings. The block is <code>std/train.external</code>; the CLI contract v1 is specified in <a href="../reference/train-external/"><code>std/train.external</code></a>.</li>
 <li>FR-TRN-4: hyperparameters, seed and environment recorded in the run lineage.</li>
 </ul>
 <h3 id="35-model-engineering">3.5 Model engineering<a class="headerlink" href="#35-model-engineering" title="Permanent link">&para;</a></h3>
@@ -1756,7 +1843,7 @@
 <span class="w">    </span><span class="nt">use</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">std/train.external</span><span class="w">            </span><span class="c1"># any language, any library</span>
 <span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> train</span><span class="p">:</span><span class="w"> </span><span class="nv">features.train</span><span class="w"> </span><span class="p p-Indicator">}</span><span class="w">      </span><span class="c1"># wire `val: features.validation` when `split.validation` is set</span>
 <span class="w">    </span><span class="nt">with</span><span class="p">:</span>
-<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"train.py"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"./train.py"</span><span class="p p-Indicator">]</span>
 <span class="w">      </span><span class="nt">flavor</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sklearn-pickle</span>
 <span class="w">      </span><span class="nt">params</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> n_estimators</span><span class="p">:</span><span class="w"> </span><span class="nv">200</span><span class="w"> </span><span class="p p-Indicator">}</span>
 
@@ -1793,7 +1880,7 @@
 - Store and lineage backend mapping in the v0.1 CLI (<code>check_backends</code>, enforced by <code>validate</code>, <code>run</code>, and <code>store verify</code>):
   - <code>store.kind</code> accepts <code>local</code> (<code>LocalStore</code> at <code>&lt;yaml-dir&gt;/&lt;store.path&gt;</code>, where <code>&lt;yaml-dir&gt;</code> is the parent directory of the <code>mallops.yaml</code> path, defaulting to <code>.</code> when empty) and <code>memory</code> (<code>MemoryStore</code>). Any other <code>store.kind</code> fails with an error.
   - <code>lineage: off</code> disables lineage (<code>RuntimeConfig::lineage = vec![]</code>); otherwise every configured sink must have <code>sink: json</code> (<code>JsonSink</code> on the configured store). Any other sink name fails with an error.
-- Built-in blocks in <code>mallops-cli</code>: <code>core/noop</code> (version <code>1.0.0</code>, <code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload; test affordances <code>fail: "&lt;message&gt;"</code> and <code>skip: "&lt;reason&gt;"</code> in <code>with:</code>) plus all feature-enabled standard blocks registered via <code>mallops_std::register_std(&amp;mut registry)</code> (in v0.1 so far: <code>std/ingest.csv</code>, <code>std/ingest.parquet</code>, <code>std/preprocess.tabular</code>).
+- Built-in blocks in <code>mallops-cli</code>: <code>core/noop</code> (version <code>1.0.0</code>, <code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload; test affordances <code>fail: "&lt;message&gt;"</code> and <code>skip: "&lt;reason&gt;"</code> in <code>with:</code>) plus all feature-enabled standard blocks registered via <code>mallops_std::register_std(&amp;mut registry)</code> (in v0.1 so far: <code>std/ingest.csv</code>, <code>std/ingest.parquet</code>, <code>std/preprocess.tabular</code>, <code>std/train.external</code>).
 - Latest run pointer (<code>runs/latest.json</code>): after <code>mallops run</code>, if and only if every node is <code>Succeeded</code>, the CLI writes <code>runs/latest.json</code> via <code>ArtifactStore::put_meta</code> (<code>meta/runs/latest.json</code> on <code>LocalStore</code>) as <code>{"v":1,"pipeline":"&lt;name&gt;","run":"&lt;run-id&gt;","outputs":{"&lt;node&gt;":{"&lt;port&gt;":"&lt;artifact-id&gt;"}}}</code> (deterministic key order via <code>BTreeMap</code>), so <code>mallops serve</code> can resolve <code>serve.package</code> without an explicit id. If any node is <code>Skipped</code> (with no failed/cancelled nodes), <code>mallops run</code> leaves any previous <code>runs/latest.json</code> unchanged, prints <code>latest.json not updated: &lt;S&gt; skipped</code>, and exits <code>0</code>. A failed run leaves any previous <code>runs/latest.json</code> unchanged and exits <code>1</code> (<code>error: run failed</code>).
 - A JSON Schema for <code>mallops.yaml</code> can be generated via the optional <code>schema</code> feature (<code>schemars</code>) for editor completion.</p>
 <h3 id="51-cli-mallops">5.1 CLI (<code>mallops</code>)<a class="headerlink" href="#51-cli-mallops" title="Permanent link">&para;</a></h3>
@@ -1817,7 +1904,7 @@
 </tr>
 <tr>
 <td><code>mallops run [--jobs N] [--no-cache]</code></td>
-<td>Validates and executes the batch DAG (<code>blocks:</code> only; ignores <code>serve:</code>). Changes the working directory to the directory of <code>mallops.yaml</code> so relative paths in block configs (such as <code>std/ingest.*</code> <code>path</code>) resolve against the pipeline directory, matching <code>store.path</code>. <code>--jobs N</code> overrides <code>RuntimeConfig::max_jobs</code> (default: available parallelism; <code>0</code> counts as <code>1</code>); <code>--no-cache</code> bypasses the cache. Populates <code>git_commit</code> via best-effort <code>git rev-parse HEAD</code> in the <code>mallops.yaml</code> directory. Prints one line per node in topological order (<code>&lt;node&gt; &lt;status&gt;[ (cached)] &lt;ms&gt;ms[: &lt;reason/error&gt;]</code>) followed by <code>run &lt;run-id&gt;: &lt;E&gt; executed, &lt;C&gt; cached, &lt;F&gt; failed, &lt;S&gt; skipped, &lt;X&gt; cancelled</code> (<code>executed</code> = non-cached <code>Succeeded</code>). Writes <code>runs/latest.json</code> only when every node is <code>Succeeded</code> (if any node is <code>Skipped</code>, prints <code>latest.json not updated: &lt;S&gt; skipped</code> and exits <code>0</code>); exits <code>1</code> on failure.</td>
+<td>Validates and executes the batch DAG (<code>blocks:</code> only; ignores <code>serve:</code>). Changes the working directory to the directory of <code>mallops.yaml</code> so relative paths in block configs (such as <code>std/ingest.*</code> <code>path</code>) resolve against the pipeline directory, matching <code>store.path</code>. <code>--jobs N</code> overrides <code>RuntimeConfig::max_jobs</code> (default: available parallelism; <code>0</code> counts as <code>1</code>); <code>--no-cache</code> bypasses the cache. Populates <code>git_commit</code> via best-effort <code>git rev-parse HEAD</code> in the <code>mallops.yaml</code> directory. Prints one line per node in topological order (<code>&lt;node&gt; &lt;status&gt;[ (cached)] &lt;ms&gt;ms[: &lt;reason/error&gt;]</code>) followed by <code>run &lt;run-id&gt;: &lt;E&gt; executed, &lt;C&gt; cached, &lt;F&gt; failed, &lt;S&gt; skipped, &lt;X&gt; cancelled</code> (<code>executed</code> = non-cached <code>Succeeded</code>). Writes <code>runs/latest.json</code> only when every node is <code>Succeeded</code> (if any node is <code>Skipped</code>, prints <code>latest.json not updated: &lt;S&gt; skipped</code> and exits <code>0</code>); exits <code>1</code> on failure. Ctrl-C (SIGINT) cancels the run cooperatively through the run's <code>CancelToken</code>: running nodes end <code>Cancelled</code> (<code>std/train.external</code> kills its child's process group), the summary is printed and the exit code is <code>1</code>.</td>
 </tr>
 <tr>
 <td><code>mallops graph [--format mermaid\|dot]</code></td>

@@ -870,6 +870,93 @@
   
   
   
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/train-external/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/train.external
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../contributing/" class="md-nav__link">
         
@@ -1163,12 +1250,12 @@
 <tr>
 <td><code>mallops-std</code></td>
 <td>core</td>
-<td>workspace <code>blake3</code>, <code>serde</code>, <code>serde_json</code>, <code>tokio</code> (already in the graph via core); optional behind per-block Cargo features (<code>--no-default-features</code> pulls in no Arrow or Parquet crate): <code>ingest-csv</code> (<code>arrow-csv</code> <code>59</code>), <code>ingest-parquet</code>, meta-feature <code>ingest = ["ingest-csv", "ingest-parquet"]</code> (default), <code>preprocess-tabular</code> (default; <code>arrow-cast</code> <code>59</code>, <code>arrow-ord</code> <code>59</code>, <code>arrow-select</code> <code>59</code>, internal SplitMix64+Fisher-Yates PRNG with no <code>rand</code>), all sharing internal <code>_ingest</code> (<code>arrow-array</code> <code>59</code>, <code>arrow-schema</code> <code>59</code>, <code>parquet</code> <code>59</code> with <code>default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]</code> — pinned to <code>59</code> because <code>60</code> requires Rust 1.88 &gt; MSRV 1.85; codecs are for reading external Parquet files while outputs stay uncompressed); future features: <code>linfa</code>, <code>ort</code>, <code>axum</code>, <code>object_store</code> (<code>store-s3</code>, <code>store-gcs</code>, <code>store-azure</code>), <code>rusqlite</code> (<code>lineage-sqlite</code>), …</td>
+<td>workspace <code>blake3</code>, <code>serde</code>, <code>serde_json</code>, <code>tokio</code> (already in the graph via core); optional behind per-block Cargo features (<code>--no-default-features</code> pulls in no Arrow or Parquet crate): <code>ingest-csv</code> (<code>arrow-csv</code> <code>59</code>), <code>ingest-parquet</code>, meta-feature <code>ingest = ["ingest-csv", "ingest-parquet"]</code> (default), <code>preprocess-tabular</code> (default; <code>arrow-cast</code> <code>59</code>, <code>arrow-ord</code> <code>59</code>, <code>arrow-select</code> <code>59</code>, internal SplitMix64+Fisher-Yates PRNG with no <code>rand</code>), <code>train-external</code> (<code>tracing</code>, <code>tokio</code> features <code>io-util</code>, <code>process</code>, <code>time</code>; Unix only: <code>nix</code> <code>0.30</code> with <code>default-features = false, features = ["signal"]</code> for a safe <code>killpg</code>), the Arrow blocks all sharing internal <code>_ingest</code> (<code>arrow-array</code> <code>59</code>, <code>arrow-schema</code> <code>59</code>, <code>parquet</code> <code>59</code> with <code>default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]</code> — pinned to <code>59</code> because <code>60</code> requires Rust 1.88 &gt; MSRV 1.85; codecs are for reading external Parquet files while outputs stay uncompressed); future features: <code>linfa</code>, <code>ort</code>, <code>axum</code>, <code>object_store</code> (<code>store-s3</code>, <code>store-gcs</code>, <code>store-azure</code>), <code>rusqlite</code> (<code>lineage-sqlite</code>), …</td>
 </tr>
 <tr>
 <td><code>mallops-cli</code></td>
-<td>core, std</td>
-<td><code>clap</code> (<code>derive</code>), <code>anyhow</code>, <code>serde_json</code>, <code>tracing-subscriber</code> (<code>fmt</code>), <code>tokio</code> (<code>rt-multi-thread</code>); dev: <code>insta</code>, <code>tempfile</code></td>
+<td>core, std (feature <code>train-external</code>)</td>
+<td><code>clap</code> (<code>derive</code>), <code>anyhow</code>, <code>serde_json</code>, <code>tracing-subscriber</code> (<code>fmt</code>), <code>tokio</code> (<code>rt-multi-thread</code>, <code>signal</code> for Ctrl-C cancellation); dev: <code>insta</code>, <code>tempfile</code></td>
 </tr>
 <tr>
 <td><code>mallops-edge</code></td>
@@ -1384,7 +1471,7 @@
 </table>
 <ul>
 <li><strong>Explicit registry in v0.1</strong>: <code>BlockRegistry</code> is an explicit, instance-local map populated via <code>registry.register(...)</code>. <code>mallops-cli</code> registers the built-in <code>core/noop</code> block and calls <code>mallops_std::register_std(&amp;mut registry)</code> (returning <code>Result&lt;(), Error&gt;</code> so duplicate block ids fail with <code>Error::Validation</code>). This supersedes compile-time <code>inventory</code> registration from <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a> for v0.1 to avoid linker stripping and global test state (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). Blocks are keyed by their <code>spec().id</code>, parsed as a <code>BlockRef</code> (grammar in SPEC §5); registering an id twice returns <code>Error::Validation</code> and keeps the original, and <code>list()</code> returns specs sorted by id.</li>
-<li><strong>External CLI contract</strong>: mallops materializes read-only inputs into the workdir, writes <code>inputs.json</code> (materialized paths + manifests) and <code>config.json</code> (never containing secrets; secrets pass only via explicit env allowlist), runs <code>command</code> via <code>argv</code> (never <code>sh -c</code>), and collects output files declared in <code>outputs.json</code> after validating every path with <code>RelPath</code> and rejecting symlinks. The gRPC variant adds long-lived workers and streaming. See <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</li>
+<li><strong>External CLI contract</strong> (<code>std/train.external</code>, details in <a href="../reference/train-external/">reference</a>): mallops materializes read-only inputs into the node workdir (the child's cwd), writes <code>inputs.json</code> and <code>config.json</code> (both <code>protocol_version: 1</code>; <code>config.json</code> never contains secrets) and runs <code>command</code> as <code>argv</code> (never <code>sh -c</code>) with a cleared environment (<code>env_clear</code> + allowlist: <code>PATH</code>, <code>SYSTEMROOT</code> on Windows, <code>MALLOPS_PIPELINE_DIR</code>, the names in <code>env</code>, and <code>secrets</code> as env vars only), in its own process group killed on timeout or cancel (on Windows only the direct child is killed, grandchildren may survive). The command writes <code>outputs.json</code>; mallops validates every path with <code>RelPath</code>, rejects symlinks and accepts only regular files or directories before the runtime commits the outputs. The command is trusted, not sandboxed (ADR-0007 D7). The gRPC variant adds long-lived workers and streaming. See <a href="../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</li>
 </ul>
 <h2 id="6-artifact-store-and-lineage">6. Artifact store and lineage<a class="headerlink" href="#6-artifact-store-and-lineage" title="Permanent link">&para;</a></h2>
 <p>Two kinds of "storage" exist and must not be confused:</p>
@@ -1594,7 +1681,7 @@
 </tr>
 <tr>
 <td>Async</td>
-<td><code>tokio</code> (<code>rt-multi-thread</code> in <code>mallops-cli</code>)</td>
+<td><code>tokio</code> (<code>rt-multi-thread</code> and <code>signal</code> in <code>mallops-cli</code>)</td>
 </tr>
 <tr>
 <td>CLI</td>

@@ -65,7 +65,7 @@ Validation rules:
 
 - **Target resolution:** uses `with.target` when set, otherwise `metadata["target"]` (string) from
   the input artifact manifest. Missing in both is an error; **present in both with different values
-  is an error** (`with.target '<x>' differs from the input's metadata target '<y>'`). The target
+  is an error** (`` with.target `<x>` differs from the input's metadata target `<y>` ``). The target
   column must exist in the Parquet schema.
 - **Feature columns:** every column other than the target, in the input schema's order. Allowed
   Arrow types are `Boolean`, `Int64`, and `Float64` (cast to `f64`). Any other type fails with an
@@ -169,7 +169,7 @@ Output manifest fields:
 
 | Situation | Error |
 |---|---|
-| Unknown field, invalid `algorithm`/`solver`, cross-algorithm hyperparameter key, negative or non-finite `alpha`, empty `target`, `${secret:` in config | `Error::Config` (`mallops validate` and `run`) |
+| Unknown field, invalid `algorithm`/`solver`, cross-algorithm hyperparameter key, negative or non-finite `alpha`, empty `target`, `${secret:` in config | `Error::Config` (in `mallops validate`, aggregated into `Error::Validation` under `blocks.<id>.with`) |
 | Missing `target`, `with.target` differing from input `metadata["target"]`, or `target` absent from schema | `Error::Runtime` naming the target |
 | Unsupported feature column type (not `Boolean`, `Int64`, or `Float64`) | `Error::Runtime` suggesting `encode`/`select` in preprocess |
 | Null value in features or target | `Error::Runtime` naming the column |

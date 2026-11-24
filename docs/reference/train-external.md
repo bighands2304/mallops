@@ -27,9 +27,9 @@ Unknown fields are rejected.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `command` | list of strings | required | argv, executed directly (never through a shell). Not empty; `command[0]` not empty. |
-| `flavor` | string | none | Flavor given to model outputs that do not set their own. |
+| `flavor` | string | none | Flavor of every port of kind `model` (inputs and outputs); fills model outputs that do not set their own. |
 | `params` | object | `{}` | Free-form, written to `config.json`. |
-| `env` | list of names | `[]` | Host environment variables passed to the child. |
+| `env` | list of names | `[]` | Host environment variables passed to the child; names unset on the host are skipped. |
 | `secrets` | list of names | `[]` | Resolved with `ctx.secret(name)` and passed as env vars of the same name. |
 | `timeout_secs` | integer > 0 | none (no timeout) | Kill the process group after this many seconds. |
 | `log_cap_bytes` | integer > 0 | 1 MiB | Max bytes kept per stream (stdout, stderr); the rest is drained and dropped. |
@@ -40,10 +40,11 @@ Unknown fields are rejected.
 Validation (`mallops validate`, which never runs the command):
 
 - `env` / `secrets` names match `[A-Za-z_][A-Za-z0-9_]*`, are disjoint from each other and differ
-  from `PATH`, `SYSTEMROOT` and `MALLOPS_*`; no NUL in argv or env.
-- Port names match `[a-z][a-z0-9_]*`.
-- Strings containing `${secret:` in `command`, `params` or `env` are rejected: use `secrets:`.
-- `flavor` is only allowed on ports of kind `model`.
+  from `PATH`, `SYSTEMROOT` and `MALLOPS_*`.
+- Port names match `[a-z][a-z0-9_]*` (also re-checked at run time for input names given through
+  the library API).
+- Strings containing `${secret:` in `command`, `flavor`, `params`, `env`, `secrets` or
+  `watch_files` are rejected: use `secrets:`.
 
 ## Ports
 
@@ -65,7 +66,9 @@ Every contract file carries `"protocol_version": 1`; a command must refuse any o
   …                  whatever the command writes (outputs live here)
 ```
 
-Input files are materialized read-only (directories stay writable so the run can be cleaned up).
+Input files are materialized read-only (directories stay writable) and made writable again when
+the node ends, whatever the outcome, so the run workdir can be removed (Windows refuses to delete
+read-only files).
 All paths in the contract use `/` and are relative to the workdir.
 
 ### `inputs.json`
@@ -165,8 +168,9 @@ here.**
 ```
 
 `status` is `"produced"` or `"skipped"`; a skip may carry `"skip_reason": "…"` and no outputs.
-Per output: `path` and `kind` and `format` are required; `flavor` (absent → the configured
-`with.flavor`), `io_schema` and `metadata` are optional.
+Per output: `path` and `kind` and `format` are required; `flavor`, `io_schema` and `metadata` are
+optional. An explicit `flavor` is accepted on any port; when absent, outputs of kind `model` get the
+configured `with.flavor`.
 
 ```json
 {
@@ -198,8 +202,9 @@ Per output: `path` and `kind` and `format` are required; `flavor` (absent → th
 ```
 
 mallops validates each `path`: it must be a valid relative path (no `..`, not absolute), no
-component under the workdir may be a symlink, and it must be a regular file (committed as a file
-artifact) or a directory (committed as a directory artifact). A non-zero exit is an error even if
+component under the workdir may be a symlink, its canonical path must stay inside the workdir,
+and it must be a regular file (committed as a file artifact) or a directory (committed as a
+directory artifact). A non-zero exit is an error even if
 `outputs.json` exists.
 
 ## Environment of the child
@@ -207,8 +212,10 @@ artifact) or a directory (committed as a directory artifact). A non-zero exit is
 The inherited environment is **cleared**. The child always gets:
 
 - `PATH` (and `SYSTEMROOT` on Windows),
-- `MALLOPS_PIPELINE_DIR`: the canonical directory of `mallops.yaml` (the CLI changes into it),
-- the host variables listed in `env`, and the `secrets` (same name as in the config).
+- `MALLOPS_PIPELINE_DIR`: mallops' current directory, absolute (the directory of `mallops.yaml`:
+  the CLI changes into it),
+- the host variables listed in `env` that are set on the host (unset ones are skipped), and the
+  `secrets` (same name as in the config).
 
 Nothing else leaks in: list what you need (`HOME`, `CUDA_VISIBLE_DEVICES`, `VIRTUAL_ENV`…).
 

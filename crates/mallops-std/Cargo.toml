@@ -21,6 +21,7 @@ ingest-csv = ["dep:arrow-csv", "_ingest"]
 ingest-parquet = ["_ingest"]
 preprocess-tabular = ["_ingest", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-select"]
 train-external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
+train-smartcore = ["_ingest", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
 # Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.
 _ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 
@@ -39,6 +40,8 @@ arrow-ord = { version = "60", optional = true }
 arrow-schema = { version = "60", optional = true }
 arrow-select = { version = "60", optional = true }
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"], optional = true }
+# Native classic ML for std/train.smartcore (pure Rust, no BLAS).
+smartcore = { version = "0.7", default-features = false, features = ["std"], optional = true }
 
 # Process-group kill for train.external (safe `killpg`; `unsafe_code` is forbidden).
 [target.'cfg(unix)'.dependencies]

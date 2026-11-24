@@ -14,6 +14,7 @@ use mallops_core::{
 };
 use serde::Deserialize;
 
+use super::has_secret_ref;
 use contract::{CONFIG_FILE, ConfigFile, INPUTS_FILE, InputEntry, InputsFile, PROTOCOL_VERSION};
 use process::{ChildSpec, run_child};
 
@@ -214,12 +215,6 @@ fn is_port_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
-/// Whether any string (key or value) in `value` contains `${secret:`; JSON never escapes `$`,
-/// `{` or `:`.
-fn has_secret_ref(value: &impl serde::Serialize) -> bool {
-    serde_json::to_string(value).is_ok_and(|json| json.contains("${secret:"))
 }
 
 fn path_string(path: &Path) -> Result<String, Error> {

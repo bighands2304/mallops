@@ -12,10 +12,16 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use ::parquet::arrow::ArrowWriter;
+#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use ::parquet::basic::Compression;
 use ::parquet::file::properties::WriterProperties;
+#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+use arrow_array::RecordBatch;
 use arrow_array::RecordBatchReader;
 use arrow_schema::DataType;
+#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+use arrow_select::concat::concat_batches;
 use mallops_core::{
     ArtifactKind, BlockOutcome, CachePolicy, CancelToken, Digest, DraftPayload, Error, Manifest,
     OutputDraft, OutputDrafts, Port,
@@ -55,7 +61,7 @@ impl ColumnType {
     }
 
     /// Inverse of [`Self::data_type`]; `None` for types outside the v0.1 subset.
-    #[cfg(feature = "preprocess-tabular")]
+    #[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
     pub(crate) fn from_data_type(dt: &DataType) -> Option<Self> {
         Some(match dt {
             DataType::Boolean => Self::Bool,
@@ -109,6 +115,26 @@ pub(crate) fn write_parquet(
     }
     writer.close().map_err(|e| out_err(&e))?;
     Ok(rows)
+}
+
+/// Reads a Parquet file into a single concatenated [`RecordBatch`], checking `cancel` between
+/// batches.
+#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+pub(crate) fn read_parquet_batch(path: &Path, cancel: &CancelToken) -> Result<RecordBatch, Error> {
+    let err = |e: &dyn std::fmt::Display| Error::Runtime(format!("{}: {e}", path.display()));
+    let file = File::open(path)
+        .map_err(|e| Error::Runtime(format!("cannot read {}: {e}", path.display())))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
+    let schema = builder.schema().clone();
+    let reader = builder.build().map_err(|e| err(&e))?;
+    let mut batches = Vec::new();
+    for batch in reader {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        batches.push(batch.map_err(|e| err(&e))?);
+    }
+    concat_batches(&schema, &batches).map_err(|e| err(&e))
 }
 
 /// BLAKE3 digest of the file content at `path`, read as a stream.

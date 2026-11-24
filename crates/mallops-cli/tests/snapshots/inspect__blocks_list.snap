@@ -8,3 +8,4 @@ std/ingest.csv          0.1.0    ingest      -                             datas
 std/ingest.parquet      0.1.0    ingest      -                             dataset:dataset
 std/preprocess.tabular  0.1.0    preprocess  data:dataset                  train:features,test:features,transform:transform
 std/train.external      0.1.0    train       train:features,val?:features  model:model
+std/train.smartcore     0.1.0    train       train:features                model:model

@@ -17,7 +17,6 @@
 //! - **Output (`smartcore-linear`):** [`PredictInput::Json`] object `{"prediction": <f64>}`,
 //!   where `y = intercept + Σ coefficients[i] * x[i]`.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use mallops_core::{Artifact, ArtifactKind, BoxFuture, Error};
@@ -69,22 +68,22 @@ impl Predictor for SmartcorePredictor {
         Box::pin(async move {
             let manifest = artifact.manifest();
             if manifest.kind != ArtifactKind::Model {
-                return Err(Error::Runtime(format!(
-                    "expected model artifact, got {:?}",
+                return Err(Error::Config(format!(
+                    "expected a model artifact, got `{}`",
                     manifest.kind
                 )));
             }
             if manifest.format != "json" {
-                return Err(Error::Runtime(format!(
+                return Err(Error::Config(format!(
                     "expected model format `json`, got `{}`",
                     manifest.format
                 )));
             }
             let flavor = manifest.flavor.as_deref().ok_or_else(|| {
-                Error::Runtime("model artifact manifest is missing `flavor`".into())
+                Error::Config("model artifact manifest is missing `flavor`".into())
             })?;
             if !self.flavors().contains(&flavor) {
-                return Err(Error::Runtime(format!(
+                return Err(Error::Config(format!(
                     "unsupported smartcore flavor `{flavor}`"
                 )));
             }
@@ -113,6 +112,10 @@ struct LoadedSmartcore {
     kind: LoadedKind,
 }
 
+fn bad(msg: impl Into<String>) -> Error {
+    Error::Runtime(msg.into())
+}
+
 fn extract_binary_classes(classes: ModelClasses) -> Result<[Value; 2], Error> {
     let values: Vec<Value> = match classes {
         ModelClasses::Int64(v) => v.into_iter().map(Value::from).collect(),
@@ -120,17 +123,19 @@ fn extract_binary_classes(classes: ModelClasses) -> Result<[Value; 2], Error> {
         ModelClasses::String(v) => v.into_iter().map(Value::from).collect(),
     };
     let len = values.len();
-    values.try_into().map_err(|_| {
-        Error::Runtime(format!(
+    match <[Value; 2]>::try_from(values) {
+        Ok([a, b]) if a != b => Ok([a, b]),
+        Ok(_) => Err(bad("logistic_regression model requires 2 distinct classes")),
+        Err(_) => Err(bad(format!(
             "logistic_regression model requires exactly 2 classes, got {len}"
-        ))
-    })
+        ))),
+    }
 }
 
 impl LoadedSmartcore {
     fn from_payload(flavor: &str, payload: ModelPayload) -> Result<Self, Error> {
         if payload.v != MODEL_SCHEMA_VERSION {
-            return Err(Error::Runtime(format!(
+            return Err(bad(format!(
                 "unsupported model schema version {}, expected {MODEL_SCHEMA_VERSION}",
                 payload.v
             )));
@@ -139,69 +144,56 @@ impl LoadedSmartcore {
             (FLAVOR_LOGISTIC, Algorithm::LogisticRegression)
             | (FLAVOR_LINEAR, Algorithm::LinearRegression) => {}
             (_, alg) => {
-                return Err(Error::Runtime(format!(
+                return Err(bad(format!(
                     "manifest flavor `{flavor}` does not match model algorithm `{alg:?}`"
                 )));
             }
         }
         if payload.features.is_empty() {
-            return Err(Error::Runtime(
-                "model `features` list must not be empty".into(),
-            ));
+            return Err(bad("model `features` list must not be empty"));
         }
-        let mut seen = HashSet::with_capacity(payload.features.len());
-        for f in &payload.features {
-            if !seen.insert(f.as_str()) {
-                return Err(Error::Runtime(format!(
-                    "duplicate feature `{f}` in model payload"
-                )));
-            }
+        let fs = &payload.features;
+        if let Some((_, f)) = fs.iter().enumerate().find(|(i, f)| fs[..*i].contains(f)) {
+            return Err(bad(format!("duplicate feature `{f}` in model payload")));
         }
         if payload.target.is_empty() {
-            return Err(Error::Runtime("model `target` must not be empty".into()));
+            return Err(bad("model `target` must not be empty"));
         }
         if payload.coefficients.len() != payload.features.len() {
-            return Err(Error::Runtime(format!(
+            return Err(bad(format!(
                 "model has {} coefficients for {} features",
                 payload.coefficients.len(),
                 payload.features.len()
             )));
         }
         if !payload.intercept.is_finite() {
-            return Err(Error::Runtime("model `intercept` must be finite".into()));
+            return Err(bad("model `intercept` must be finite"));
         }
         if payload.coefficients.iter().any(|c| !c.is_finite()) {
-            return Err(Error::Runtime(
-                "model `coefficients` must all be finite".into(),
-            ));
+            return Err(bad("model `coefficients` must all be finite"));
         }
 
         let kind = match payload.algorithm {
             Algorithm::LogisticRegression => {
-                let raw_classes = payload.classes.ok_or_else(|| {
-                    Error::Runtime("logistic_regression model is missing `classes`".into())
-                })?;
-                let classes = extract_binary_classes(raw_classes)?;
-                let threshold = payload.threshold.ok_or_else(|| {
-                    Error::Runtime("logistic_regression model is missing `threshold`".into())
-                })?;
+                let classes = extract_binary_classes(
+                    payload
+                        .classes
+                        .ok_or_else(|| bad("logistic_regression model is missing `classes`"))?,
+                )?;
+                let threshold = payload
+                    .threshold
+                    .ok_or_else(|| bad("logistic_regression model is missing `threshold`"))?;
                 if !threshold.is_finite() {
-                    return Err(Error::Runtime(
-                        "logistic_regression `threshold` must be finite".into(),
-                    ));
+                    return Err(bad("logistic_regression `threshold` must be finite"));
                 }
                 LoadedKind::Logistic { classes, threshold }
             }
             Algorithm::LinearRegression => {
                 if payload.classes.is_some() {
-                    return Err(Error::Runtime(
-                        "linear_regression model must not specify `classes`".into(),
-                    ));
+                    return Err(bad("linear_regression model must not specify `classes`"));
                 }
                 if payload.threshold.is_some() {
-                    return Err(Error::Runtime(
-                        "linear_regression model must not specify `threshold`".into(),
-                    ));
+                    return Err(bad("linear_regression model must not specify `threshold`"));
                 }
                 LoadedKind::Linear
             }
@@ -235,22 +227,15 @@ impl LoadedSmartcore {
             let raw = map
                 .get(name)
                 .ok_or_else(|| Error::Runtime(format!("missing feature `{name}`")))?;
-            let x = match raw {
-                Value::Bool(b) => f64::from(u8::from(*b)),
-                Value::Number(n) => match n.as_f64() {
-                    Some(v) if v.is_finite() => v,
-                    _ => {
-                        return Err(Error::Runtime(format!(
-                            "feature `{name}` must be a finite number or boolean"
-                        )));
-                    }
-                },
-                _ => {
-                    return Err(Error::Runtime(format!(
+            let x = raw
+                .as_f64()
+                .or_else(|| raw.as_bool().map(f64::from))
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| {
+                    bad(format!(
                         "feature `{name}` must be a finite number or boolean"
-                    )));
-                }
-            };
+                    ))
+                })?;
             z += coef * x;
         }
 
@@ -298,13 +283,7 @@ impl LoadedPredictor for LoadedSmartcore {
         &self,
         inputs: Vec<PredictInput>,
     ) -> BoxFuture<'_, Result<Vec<PredictInput>, Error>> {
-        Box::pin(async move {
-            let mut out = Vec::with_capacity(inputs.len());
-            for input in inputs {
-                out.push(self.predict_sync(input)?);
-            }
-            Ok(out)
-        })
+        Box::pin(async move { inputs.into_iter().map(|i| self.predict_sync(i)).collect() })
     }
 }
 
@@ -356,171 +335,79 @@ mod tests {
         })
     }
 
+    /// Mutates a valid payload (`true` = logistic, else linear); the load must fail with Runtime.
+    type Mutate = fn(&mut Value);
+
     #[tokio::test]
     async fn smartcore_predictor_load_validates_manifest_and_payload() {
         let predictor = SmartcorePredictor::new();
         assert!(!predictor.executes_code());
         assert_eq!(predictor.flavors(), &[FLAVOR_LOGISTIC, FLAVOR_LINEAR]);
-
-        // Wrong kind
+        let log_art = model_artifact(Some(FLAVOR_LOGISTIC));
+        let lin_art = model_artifact(Some(FLAVOR_LINEAR));
         let dir = write_model(&valid_logistic_json());
-        let bad_kind = Artifact::new(
-            ArtifactId::from_bytes([0; 32]),
+
+        // Manifest problems: Error::Config.
+        let manifest_cases = [
             Manifest::new(ArtifactKind::Features, "json").with_flavor(FLAVOR_LOGISTIC),
-        );
-        assert!(matches!(
-            predictor.load(&bad_kind, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Wrong format
-        let bad_format = Artifact::new(
-            ArtifactId::from_bytes([0; 32]),
             Manifest::new(ArtifactKind::Model, "parquet").with_flavor(FLAVOR_LOGISTIC),
-        );
-        assert!(matches!(
-            predictor.load(&bad_format, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Missing flavor
-        let no_flavor = model_artifact(None);
-        assert!(matches!(
-            predictor.load(&no_flavor, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Unsupported flavor
-        let unknown_flavor = model_artifact(Some("sklearn-pickle"));
-        assert!(matches!(
-            predictor.load(&unknown_flavor, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
+            Manifest::new(ArtifactKind::Model, "json"),
+            Manifest::new(ArtifactKind::Model, "json").with_flavor("sklearn-pickle"),
+        ];
+        for manifest in manifest_cases {
+            let art = Artifact::new(ArtifactId::from_bytes([0; 32]), manifest.clone());
+            let r = predictor.load(&art, dir.path()).await.map(drop);
+            assert!(matches!(r, Err(Error::Config(_))), "{manifest:?}: {r:?}");
+        }
 
         // Missing model.json
         let empty_dir = tempfile::tempdir().unwrap();
-        let log_art = model_artifact(Some(FLAVOR_LOGISTIC));
-        assert!(matches!(
-            predictor.load(&log_art, empty_dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
+        let r = predictor.load(&log_art, empty_dir.path()).await.map(drop);
+        assert!(matches!(r, Err(Error::Runtime(_))), "{r:?}");
 
-        // Unknown field rejected (deny_unknown_fields)
-        let mut with_extra = valid_logistic_json();
-        with_extra["extra_field"] = json!(123);
-        let dir = write_model(&with_extra);
-        assert!(matches!(
-            predictor.load(&log_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Wrong schema version
-        let mut bad_v = valid_logistic_json();
-        bad_v["v"] = json!(2);
-        let dir = write_model(&bad_v);
-        assert!(matches!(
-            predictor.load(&log_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Flavor / algorithm mismatch (both directions)
-        let lin_art = model_artifact(Some(FLAVOR_LINEAR));
-        let dir_log = write_model(&valid_logistic_json());
-        assert!(matches!(
-            predictor.load(&lin_art, dir_log.path()).await,
-            Err(Error::Runtime(_))
-        ));
-        let dir_lin = write_model(&valid_linear_json());
-        assert!(matches!(
-            predictor.load(&log_art, dir_lin.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Empty features
-        let mut empty_feat = valid_linear_json();
-        empty_feat["features"] = json!([]);
-        empty_feat["coefficients"] = json!([]);
-        let dir = write_model(&empty_feat);
-        assert!(matches!(
-            predictor.load(&lin_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Duplicate features
-        let mut dup_feat = valid_linear_json();
-        dup_feat["features"] = json!(["x1", "x1"]);
-        let dir = write_model(&dup_feat);
-        assert!(matches!(
-            predictor.load(&lin_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Empty target
-        let mut empty_target = valid_linear_json();
-        empty_target["target"] = json!("");
-        let dir = write_model(&empty_target);
-        assert!(matches!(
-            predictor.load(&lin_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Coefficients length mismatch
-        let mut bad_coefs = valid_linear_json();
-        bad_coefs["coefficients"] = json!([2.0]);
-        let dir = write_model(&bad_coefs);
-        assert!(matches!(
-            predictor.load(&lin_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Logistic missing classes
-        let mut no_classes = valid_logistic_json();
-        no_classes.as_object_mut().unwrap().remove("classes");
-        let dir = write_model(&no_classes);
-        assert!(matches!(
-            predictor.load(&log_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Logistic classes with != 2 entries
-        for classes in [json!([]), json!([0]), json!([0, 1, 2])] {
-            let mut bad_classes = valid_logistic_json();
-            bad_classes["classes"] = classes;
-            let dir = write_model(&bad_classes);
-            assert!(matches!(
-                predictor.load(&log_art, dir.path()).await,
-                Err(Error::Runtime(_))
-            ));
+        // Payload problems: (logistic?, mutation).
+        let payload_cases: [(bool, Mutate); 17] = [
+            (true, |m| m["extra_field"] = json!(123)),
+            (true, |m| m["v"] = json!(2)),
+            (false, |m| {
+                m["features"] = json!([]);
+                m["coefficients"] = json!([]);
+            }),
+            (false, |m| m["features"] = json!(["x1", "x1"])),
+            (false, |m| m["features"] = json!(["a", "b", "a"])),
+            (false, |m| m["target"] = json!("")),
+            (false, |m| m["coefficients"] = json!([2.0])),
+            (true, |m| _ = m.as_object_mut().unwrap().remove("classes")),
+            (true, |m| m["classes"] = json!([])),
+            (true, |m| m["classes"] = json!([0])),
+            (true, |m| m["classes"] = json!([0, 1, 2])),
+            (true, |m| m["classes"] = json!([1, 1])),
+            (true, |m| m["classes"] = json!(["a", "a"])),
+            (true, |m| _ = m.as_object_mut().unwrap().remove("threshold")),
+            (false, |m| m["classes"] = json!([0, 1])),
+            (false, |m| m["threshold"] = json!(0.5)),
+            (true, |m| m["algorithm"] = json!("linear_regression")),
+        ];
+        for (i, (logistic, mutate)) in payload_cases.into_iter().enumerate() {
+            let mut model = if logistic {
+                valid_logistic_json()
+            } else {
+                valid_linear_json()
+            };
+            mutate(&mut model);
+            let dir = write_model(&model);
+            let art = if logistic { &log_art } else { &lin_art };
+            let r = predictor.load(art, dir.path()).await.map(drop);
+            assert!(matches!(r, Err(Error::Runtime(_))), "case {i}: {r:?}");
         }
 
-        // Logistic missing threshold
-        let mut no_thresh = valid_logistic_json();
-        no_thresh.as_object_mut().unwrap().remove("threshold");
-        let dir = write_model(&no_thresh);
-        assert!(matches!(
-            predictor.load(&log_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
+        // Flavor / algorithm mismatch (linear model under the logistic flavor).
+        let dir_lin = write_model(&valid_linear_json());
+        let r = predictor.load(&log_art, dir_lin.path()).await.map(drop);
+        assert!(matches!(r, Err(Error::Runtime(_))), "{r:?}");
 
-        // Linear with classes or threshold present
-        let mut lin_classes = valid_linear_json();
-        lin_classes["classes"] = json!([0, 1]);
-        let dir = write_model(&lin_classes);
-        assert!(matches!(
-            predictor.load(&lin_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        let mut lin_thresh = valid_linear_json();
-        lin_thresh["threshold"] = json!(0.5);
-        let dir = write_model(&lin_thresh);
-        assert!(matches!(
-            predictor.load(&lin_art, dir.path()).await,
-            Err(Error::Runtime(_))
-        ));
-
-        // Non-finite intercept, coefficient, and threshold (tested via from_payload)
-        let base_payload = ModelPayload {
+        // Non-finite intercept, coefficient, and threshold (via from_payload).
+        let base = ModelPayload {
             v: MODEL_SCHEMA_VERSION,
             algorithm: Algorithm::LogisticRegression,
             features: vec!["x".into()],
@@ -530,26 +417,17 @@ mod tests {
             classes: Some(ModelClasses::Int64(vec![0, 1])),
             threshold: Some(0.5),
         };
-        let mut nan_intercept = base_payload.clone();
-        nan_intercept.intercept = f64::NAN;
-        assert!(matches!(
-            LoadedSmartcore::from_payload(FLAVOR_LOGISTIC, nan_intercept),
-            Err(Error::Runtime(_))
-        ));
-
-        let mut inf_coef = base_payload.clone();
-        inf_coef.coefficients = vec![f64::INFINITY];
-        assert!(matches!(
-            LoadedSmartcore::from_payload(FLAVOR_LOGISTIC, inf_coef),
-            Err(Error::Runtime(_))
-        ));
-
-        let mut nan_thresh = base_payload;
-        nan_thresh.threshold = Some(f64::NEG_INFINITY);
-        assert!(matches!(
-            LoadedSmartcore::from_payload(FLAVOR_LOGISTIC, nan_thresh),
-            Err(Error::Runtime(_))
-        ));
+        let non_finite: [fn(&mut ModelPayload); 3] = [
+            |p| p.intercept = f64::NAN,
+            |p| p.coefficients = vec![f64::INFINITY],
+            |p| p.threshold = Some(f64::NEG_INFINITY),
+        ];
+        for mutate in non_finite {
+            let mut p = base.clone();
+            mutate(&mut p);
+            let r = LoadedSmartcore::from_payload(FLAVOR_LOGISTIC, p);
+            assert!(matches!(r, Err(Error::Runtime(_))));
+        }
     }
 
     #[tokio::test]

@@ -22,6 +22,9 @@ ingest-parquet = ["_ingest"]
 preprocess-tabular = ["_ingest", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-select"]
 train-external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
 train-smartcore = ["_ingest", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
+predictor = []
+predict-smartcore = ["predictor"]
+predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]
 # Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.
 _ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 
@@ -50,3 +53,9 @@ nix = { version = "0.32", default-features = false, features = ["signal"], optio
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "predict_external"
+path = "tests/predict_external.rs"
+harness = false # libtest writes to stdout and would corrupt the NDJSON worker protocol
+required-features = ["predict-external"]

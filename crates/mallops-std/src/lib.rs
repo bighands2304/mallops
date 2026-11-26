@@ -10,8 +10,13 @@
     allow(dead_code)
 )]
 mod ingest;
+#[cfg(feature = "predictor")]
+pub mod predictor;
 #[cfg(feature = "preprocess-tabular")]
 mod preprocess;
+#[cfg(any(feature = "train-smartcore", feature = "predict-smartcore"))]
+#[allow(dead_code)] // filled in by the smartcore predictor / trainer
+mod smartcore_model;
 #[cfg(any(feature = "train-external", feature = "train-smartcore"))]
 mod train;
 

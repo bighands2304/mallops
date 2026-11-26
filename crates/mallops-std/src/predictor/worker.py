@@ -40,11 +40,7 @@ import pickle  # noqa: E402
 
 def to_json(x):
     """Converts NumPy scalars and arrays to plain Python values."""
-    if hasattr(x, "tolist"):
-        return x.tolist()
-    if hasattr(x, "item"):
-        return x.item()
-    return x
+    return x.tolist() if hasattr(x, "tolist") else x
 
 
 def row(names, j):
@@ -89,8 +85,6 @@ def main():
     send({"v": 1, "type": "ready"})
 
     for line in sys.stdin:
-        if not line.strip():
-            continue
         rid = None
         try:
             req = json.loads(line)

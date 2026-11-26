@@ -137,21 +137,19 @@ fn model_file(dir: &Path) -> Result<PathBuf, Error> {
         return Ok(pkl);
     }
     let io = |e: std::io::Error| Error::Runtime(format!("{}: {e}", dir.display()));
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(io)? {
-        let entry = entry.map_err(io)?;
-        if entry.file_type().map_err(io)?.is_file() {
-            files.push(entry.path());
-        }
-    }
-    match <[PathBuf; 1]>::try_from(files) {
-        Ok([file]) => Ok(file),
-        Err(files) => Err(Error::Runtime(format!(
-            "{}: expected model.pkl or exactly one file, found {} files",
-            dir.display(),
-            files.len()
-        ))),
-    }
+    let files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(io)?
+        .filter_map(|e| e.ok().map(|e| e.path()).filter(|p| p.is_file()))
+        .collect();
+    <[PathBuf; 1]>::try_from(files)
+        .map(|[f]| f)
+        .map_err(|files| {
+            Error::Runtime(format!(
+                "{}: expected model.pkl or exactly one file, found {} files",
+                dir.display(),
+                files.len()
+            ))
+        })
 }
 
 /// Names in `io_schema.input` (`[{"name", "type"}, …]`); empty without one.
@@ -383,12 +381,12 @@ impl Loaded {
 
 /// The JSON body of `input`; the worker takes nothing else.
 fn json_input(input: PredictInput) -> Result<Value, Error> {
-    match input {
-        PredictInput::Json(v) => Ok(v),
-        PredictInput::Bytes { content_type, .. } => Err(Error::Runtime(format!(
-            "sklearn-pickle takes JSON input, got `{content_type}` bytes"
-        ))),
-    }
+    let PredictInput::Json(v) = input else {
+        return Err(Error::Runtime(
+            "sklearn-pickle takes JSON input, got bytes".into(),
+        ));
+    };
+    Ok(v)
 }
 
 impl LoadedPredictor for Loaded {

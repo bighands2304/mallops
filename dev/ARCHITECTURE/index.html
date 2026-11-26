@@ -972,6 +972,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/predictor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predictor contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1278,7 +1306,7 @@
 <tr>
 <td><code>mallops-std</code></td>
 <td>core</td>
-<td>workspace <code>blake3</code>, <code>serde</code>, <code>serde_json</code>, <code>tokio</code> (already in the graph via core); optional behind per-block Cargo features (<code>--no-default-features</code> pulls in no Arrow or Parquet crate): <code>ingest-csv</code> (<code>arrow-csv</code> <code>60</code>), <code>ingest-parquet</code>, meta-feature <code>ingest = ["ingest-csv", "ingest-parquet"]</code> (default), <code>preprocess-tabular</code> (default; <code>arrow-cast</code> <code>60</code>, <code>arrow-ord</code> <code>60</code>, <code>arrow-select</code> <code>60</code>, internal SplitMix64+Fisher-Yates PRNG with no <code>rand</code>), <code>train-external</code> (<code>tracing</code>, <code>tokio</code> features <code>io-util</code>, <code>process</code>, <code>time</code>; Unix only: <code>nix</code> <code>0.32</code> with <code>default-features = false, features = ["signal"]</code> for a safe <code>killpg</code>), <code>train-smartcore</code> (<code>smartcore</code> <code>0.7</code> with <code>default-features = false, features = ["std"]</code>, plus <code>arrow-cast</code> <code>60</code> and <code>arrow-select</code> <code>60</code>), the Arrow blocks all sharing internal <code>_ingest</code> (<code>arrow-array</code> <code>60</code>, <code>arrow-schema</code> <code>60</code>, <code>parquet</code> <code>60</code> with <code>default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]</code> — codecs are for reading external Parquet files while outputs stay uncompressed); future features: <code>ort</code>, <code>axum</code>, <code>object_store</code> (<code>store-s3</code>, <code>store-gcs</code>, <code>store-azure</code>), <code>rusqlite</code> (<code>lineage-sqlite</code>), …</td>
+<td>workspace <code>blake3</code>, <code>serde</code>, <code>serde_json</code>, <code>tokio</code> (already in the graph via core); optional behind per-block Cargo features (<code>--no-default-features</code> pulls in no Arrow or Parquet crate): <code>ingest-csv</code> (<code>arrow-csv</code> <code>60</code>), <code>ingest-parquet</code>, meta-feature <code>ingest = ["ingest-csv", "ingest-parquet"]</code> (default), <code>preprocess-tabular</code> (default; <code>arrow-cast</code> <code>60</code>, <code>arrow-ord</code> <code>60</code>, <code>arrow-select</code> <code>60</code>, internal SplitMix64+Fisher-Yates PRNG with no <code>rand</code>), <code>train-external</code> (<code>tracing</code>, <code>tokio</code> features <code>io-util</code>, <code>process</code>, <code>time</code>; Unix only: <code>nix</code> <code>0.32</code> with <code>default-features = false, features = ["signal"]</code> for a safe <code>killpg</code>), <code>predictor</code> (the <code>Predictor</code> contract and registry, no extra dependency), <code>predict-smartcore</code> (in-process, no extra dependency), <code>predict-external</code> (Python worker over NDJSON; <code>tokio</code> features <code>io-util</code>, <code>process</code>, <code>time</code>), <code>train-smartcore</code> (<code>smartcore</code> <code>0.7</code> with <code>default-features = false, features = ["std"]</code>, plus <code>arrow-cast</code> <code>60</code> and <code>arrow-select</code> <code>60</code>), the Arrow blocks all sharing internal <code>_ingest</code> (<code>arrow-array</code> <code>60</code>, <code>arrow-schema</code> <code>60</code>, <code>parquet</code> <code>60</code> with <code>default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]</code> — codecs are for reading external Parquet files while outputs stay uncompressed); future features: <code>ort</code>, <code>axum</code>, <code>object_store</code> (<code>store-s3</code>, <code>store-gcs</code>, <code>store-azure</code>), <code>rusqlite</code> (<code>lineage-sqlite</code>), …</td>
 </tr>
 <tr>
 <td><code>mallops-cli</code></td>
@@ -1642,23 +1670,32 @@
     P --&gt; EXT[external Python worker]
     S --&gt; M[metrics / logs]</code></pre>
 <p>In v0.1, the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) before promotion to <code>mallops-core</code> ahead of 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>):</p>
-<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">PredictInput</span><span class="w"> </span><span class="p">{</span>
+<div class="highlight"><pre><span></span><code><span class="cp">#[derive(Debug, Clone, PartialEq)]</span>
+<span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">PredictInput</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="n">Json</span><span class="p">(</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">),</span>
 <span class="w">    </span><span class="n">Bytes</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">content_type</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="w"> </span><span class="p">},</span>
 <span class="p">}</span>
 
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Predictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">flavors</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">];</span><span class="w">                       </span><span class="c1">// e.g. ["smartcore-logistic", "smartcore-linear"], ["sklearn-pickle"]</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">executes_code</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="p">;</span><span class="w">                    </span><span class="c1">// true for pickle/joblib/torchscript</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">load</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">pkg</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Artifact</span><span class="p">,</span><span class="w"> </span><span class="n">workdir</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">flavors</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">];</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">executes_code</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">load</span><span class="o">&lt;'</span><span class="na">a</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;'</span><span class="na">a</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">artifact</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="na">a</span><span class="w"> </span><span class="nc">Artifact</span><span class="p">,</span>
+<span class="w">        </span><span class="n">payload_dir</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="na">a</span><span class="w"> </span><span class="nc">Path</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="na">a</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
 <span class="p">}</span>
 
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">input</span><span class="p">:</span><span class="w"> </span><span class="nc">PredictInput</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict_batch</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict_batch</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
 <span class="p">}</span>
 </code></pre></div>
-<p>Flavors where <code>executes_code()</code> is <code>true</code> are rejected by <code>mallops serve</code> unless <code>--trust-unsafe-flavors</code> is explicitly enabled.</p>
+<p>Consumers resolve a predictor through <code>PredictorRegistry</code>, which registers predictors by flavor atomically and enforces trust policy: flavors where <code>executes_code()</code> is <code>true</code> (such as <code>sklearn-pickle</code>) are rejected by <code>PredictorRegistry::get</code> with <code>Error::Config</code> unless <code>trust_unsafe_flavors</code> is explicitly passed (CLI: <code>--trust-unsafe-flavors</code>). See the full <a href="../reference/predictor/">Predictor contract reference</a>.</p>
 <h2 id="8-edge-and-federated-learning-v04">8. Edge and federated learning (v0.4)<a class="headerlink" href="#8-edge-and-federated-learning-v04" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>flowchart TB
     subgraph Cloud

@@ -1,0 +1,2189 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Modular MLOps in Rust — from data ingestion to edge devices, one block at a time.">
+      
+      
+      
+        <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/reference/predictor/">
+      
+      
+        <link rel="prev" href="../train-smartcore/">
+      
+      
+        <link rel="next" href="../../contributing/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/mallops-logo.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
+    
+    
+      
+        <title>Predictor contract - mallops</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <script>
+    // Material renders Mermaid inside a *closed* shadow root. Force it open so
+    // docs/javascripts/mermaid-zoom.js can copy the rendered diagram.
+    (() => {
+      const attach = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function (init) {
+        return attach.call(this, { ...init, mode: "open" });
+      };
+    })();
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="brown" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#predictor-contract" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="mallops" class="md-header__button md-logo" aria-label="mallops" data-md-component="logo">
+      
+  <img src="../../assets/mallops-logo-dark.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mallops
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Predictor contract
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="brown" data-md-color-accent="deep-orange"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="brown" data-md-color-accent="deep-orange"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/bighands2304/mallops" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    bighands2304/mallops
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="mallops" class="md-nav__button md-logo" aria-label="mallops" data-md-component="logo">
+      
+  <img src="../../assets/mallops-logo-dark.svg" alt="logo">
+
+    </a>
+    mallops
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/bighands2304/mallops" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    bighands2304/mallops
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../SPEC/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Specification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decisions (ADR)
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Decisions (ADR)
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Decision Records
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0001-modular-workspace/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0001 — Modular Cargo workspace
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0002-arrow-default-interchange/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0002 — Arrow/Parquet as default (not mandatory) data interchange
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0003-plugins-wasm-and-grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0003 — Plugins via WASM components and external processes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0004-agnostic-artifacts-and-flavors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0004 — Format-agnostic artifacts with flavors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0005-gitflow-and-release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0005 — GitFlow branching and automated releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0006-store-and-lineage-contracts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0006 — Artifact store and lineage: contracts in the core, implementations pluggable
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0007-core-contracts-revision/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0007 — Core contracts revision before v0.1 implementation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0008-edge-build-profiles-and-on-device-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0008 — Edge build profiles and on-device online learning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr/0009-mqtt-blocks-and-serve-transport/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    0009 — MQTT blocks and MQTT serving transport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../train-external/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/train.external
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../train-smartcore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/train.smartcore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predictor contract
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predictor contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#cargo-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cargo features
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#core-types-and-traits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core types and traits
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Core types and traits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#predictinput" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PredictInput
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#predictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Predictor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loadedpredictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoadedPredictor
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#predictorregistry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PredictorRegistry
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="PredictorRegistry">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registration-register" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registration: register
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resolution-get" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resolution: get
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#standard-predictors-register_std_predictors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standard predictors: register_std_predictors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#conformance-suite-conformancecheck" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conformance suite (conformance::check)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smartcorepredictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SmartcorePredictor
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SmartcorePredictor">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#load-validation-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Load validation rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#input-and-output-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input and output shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#externalpythonpredictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ExternalPythonPredictor
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ExternalPythonPredictor">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#command-and-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Command and configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#model-file-selection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model file selection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#worker-environment-and-directory-hygiene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker environment and directory hygiene
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ndjson-protocol-v1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NDJSON Protocol v1
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NDJSON Protocol v1">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-handshake" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Handshake
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-single-prediction-predict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Single prediction (predict)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-batch-prediction-predict_batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Batch prediction (predict_batch)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-error-response" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Error response
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#input-output-representations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input &amp; output representations
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lifecycle-failure-recovery-and-process-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lifecycle, failure recovery, and process management
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#errors-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.rs/mallops-core" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#cargo-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cargo features
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#core-types-and-traits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core types and traits
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Core types and traits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#predictinput" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PredictInput
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#predictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Predictor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loadedpredictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoadedPredictor
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#predictorregistry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PredictorRegistry
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="PredictorRegistry">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registration-register" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registration: register
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resolution-get" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resolution: get
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#standard-predictors-register_std_predictors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standard predictors: register_std_predictors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#conformance-suite-conformancecheck" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conformance suite (conformance::check)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smartcorepredictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SmartcorePredictor
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SmartcorePredictor">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#load-validation-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Load validation rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#input-and-output-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input and output shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#externalpythonpredictor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ExternalPythonPredictor
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ExternalPythonPredictor">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#command-and-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Command and configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#model-file-selection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model file selection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#worker-environment-and-directory-hygiene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker environment and directory hygiene
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ndjson-protocol-v1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NDJSON Protocol v1
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NDJSON Protocol v1">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-handshake" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Handshake
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-single-prediction-predict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Single prediction (predict)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-batch-prediction-predict_batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Batch prediction (predict_batch)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-error-response" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Error response
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#input-output-representations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input &amp; output representations
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lifecycle-failure-recovery-and-process-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lifecycle, failure recovery, and process management
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#errors-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/bighands2304/mallops/edit/dev/docs/reference/predictor.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="predictor-contract">Predictor contract<a class="headerlink" href="#predictor-contract" title="Permanent link">&para;</a></h1>
+<p>The <code>Predictor</code> contract (<a href="../../adr/0007-core-contracts-revision/">ADR-0007 D6/D7</a>) turns a model
+artifact into an active inference component that answers prediction requests. <code>mallops-core</code> remains
+strictly model-agnostic and free of machine learning dependencies; consumers pick a <code>Predictor</code> by
+the artifact's <code>flavor</code> via a local <code>PredictorRegistry</code>.</p>
+<p>In v0.1, the minimal contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) before its
+promotion to <code>mallops-core</code> ahead of 1.0.</p>
+<p>See <a href="../../SPEC/#310-model-serving">SPEC FR-SRV-3</a> and <a href="../../ARCHITECTURE/#7-serving">ARCHITECTURE §7 Serving</a>.</p>
+<h2 id="cargo-features">Cargo features<a class="headerlink" href="#cargo-features" title="Permanent link">&para;</a></h2>
+<p>All predictor components in <code>mallops-std</code> are opt-in (not in <code>default</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Dependencies</th>
+<th>What it enables</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>predictor</code></td>
+<td><code>mallops-core</code>, <code>serde</code>, <code>serde_json</code>, <code>tokio</code></td>
+<td>Base types (<code>PredictInput</code>, <code>Predictor</code>, <code>LoadedPredictor</code>), <code>PredictorRegistry</code>, <code>register_std_predictors</code>, and the conformance suite <code>conformance::check</code>.</td>
+</tr>
+<tr>
+<td><code>predict-smartcore</code></td>
+<td><code>predictor</code></td>
+<td><code>SmartcorePredictor</code> for <code>smartcore-logistic</code> and <code>smartcore-linear</code>. Evaluates models in-process without depending on the <code>smartcore</code> crate.</td>
+</tr>
+<tr>
+<td><code>predict-external</code></td>
+<td><code>predictor</code>, <code>tokio/process</code>, <code>tokio/io-util</code>, <code>tokio/time</code></td>
+<td><code>ExternalPythonPredictor</code> for <code>sklearn-pickle</code>. Evaluates models via an external Python worker subprocess communicating over NDJSON v1.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="core-types-and-traits">Core types and traits<a class="headerlink" href="#core-types-and-traits" title="Permanent link">&para;</a></h2>
+<h3 id="predictinput"><code>PredictInput</code><a class="headerlink" href="#predictinput" title="Permanent link">&para;</a></h3>
+<p>Prediction request and response payloads:</p>
+<div class="highlight"><pre><span></span><code><span class="cp">#[derive(Debug, Clone, PartialEq)]</span>
+<span class="cp">#[non_exhaustive]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">PredictInput</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="sd">/// A JSON document.</span>
+<span class="w">    </span><span class="n">Json</span><span class="p">(</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">),</span>
+<span class="w">    </span><span class="sd">/// Opaque bytes with their media type.</span>
+<span class="w">    </span><span class="n">Bytes</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="sd">/// Media type of `data`.</span>
+<span class="w">        </span><span class="n">content_type</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="w">        </span><span class="sd">/// The raw payload.</span>
+<span class="w">        </span><span class="n">data</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>PredictInput::Json</code> wraps any <code>serde_json::Value</code> (objects, numbers, arrays).</li>
+<li><code>PredictInput::Bytes</code> carries unparsed raw payloads with an explicit MIME <code>content_type</code>.</li>
+<li>Marked <code>#[non_exhaustive]</code> to allow future zero-copy buffer variants.</li>
+</ul>
+<h3 id="predictor"><code>Predictor</code><a class="headerlink" href="#predictor" title="Permanent link">&para;</a></h3>
+<p>Factory trait that loads model artifacts for one or more flavor identifiers:</p>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Predictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="sd">/// The artifact `flavor` values this predictor can load (non-empty).</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">flavors</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">];</span>
+
+<span class="w">    </span><span class="sd">/// Whether loading a model runs code shipped in the artifact (pickle, joblib, …).</span>
+<span class="w">    </span><span class="sd">/// Such predictors are refused by [`PredictorRegistry::get`] unless trust is given.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">executes_code</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="p">;</span>
+
+<span class="w">    </span><span class="sd">/// Loads the model whose payload files are in `payload_dir`.</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// # Errors</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// Any [`Error`] if the payload is missing or malformed.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">load</span><span class="o">&lt;'</span><span class="na">a</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;'</span><span class="na">a</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">artifact</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="na">a</span><span class="w"> </span><span class="nc">Artifact</span><span class="p">,</span>
+<span class="w">        </span><span class="n">payload_dir</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="na">a</span><span class="w"> </span><span class="nc">Path</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="na">a</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>flavors()</code>: slice of supported artifact flavor strings (must not be empty).</li>
+<li><code>executes_code()</code>: returns <code>true</code> if loading the model executes code contained in the artifact
+  (e.g., Python <code>pickle</code> / <code>joblib</code>). Governed by the <a href="../../SPEC/#41-trust-model">trust model</a>.</li>
+<li><code>load(&amp;'a self, artifact: &amp;'a Artifact, payload_dir: &amp;'a Path)</code>: loads the model from files
+  in <code>payload_dir</code> against <code>artifact.manifest()</code>. Returns an asynchronous <code>BoxFuture</code> resolving
+  to a trait object <code>Box&lt;dyn LoadedPredictor&gt;</code>.</li>
+</ul>
+<h3 id="loadedpredictor"><code>LoadedPredictor</code><a class="headerlink" href="#loadedpredictor" title="Permanent link">&para;</a></h3>
+<p>A model instantiated in memory, ready to answer inference requests:</p>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">LoadedPredictor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="sd">/// Predicts one input.</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// # Errors</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// Any [`Error`] if the input is malformed or the model fails.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">input</span><span class="p">:</span><span class="w"> </span><span class="nc">PredictInput</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="sd">/// Predicts a batch; outputs are in input order.</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// # Errors</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// Any [`Error`] if any input is malformed or the model fails.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">predict_batch</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">inputs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">BoxFuture</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PredictInput</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>predict</code>: answers a single prediction request.</li>
+<li><code>predict_batch</code>: answers multiple prediction requests. The output vector must strictly match the
+  length and order of <code>inputs</code>. Passing an empty <code>Vec</code> must succeed and return an empty <code>Vec</code>.</li>
+</ul>
+<h2 id="predictorregistry"><code>PredictorRegistry</code><a class="headerlink" href="#predictorregistry" title="Permanent link">&para;</a></h2>
+<p><code>PredictorRegistry</code> resolves predictors by artifact flavor. It is an explicit local instance
+(no global state, no linker magic).</p>
+<div class="highlight"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">registry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PredictorRegistry</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="n">register_std_predictors</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">registry</span><span class="p">)</span><span class="o">?</span><span class="p">;</span>
+
+<span class="c1">// Resolving a predictor:</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">predictor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">registry</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">"smartcore-logistic"</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">)</span><span class="o">?</span><span class="p">;</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">loaded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">predictor</span><span class="p">.</span><span class="n">load</span><span class="p">(</span><span class="o">&amp;</span><span class="n">artifact</span><span class="p">,</span><span class="w"> </span><span class="n">payload_dir</span><span class="p">).</span><span class="k">await</span><span class="o">?</span><span class="p">;</span>
+</code></pre></div>
+<h3 id="registration-register">Registration: <code>register</code><a class="headerlink" href="#registration-register" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">predictor</span><span class="p">:</span><span class="w"> </span><span class="nc">Arc</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">Predictor</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>Registers <code>predictor</code> for all its declared flavors <strong>atomically</strong>.</p>
+<ul>
+<li>If <code>predictor.flavors()</code> is empty, returns <code>Error::Validation</code> (<code>"predictor declares no flavors"</code>).</li>
+<li>If <code>flavors()</code> contains duplicate entries, or if any flavor is already registered, returns
+  <code>Error::Validation</code> (<code>"duplicate predictor flavor &lt;flavor&gt;"</code>).</li>
+<li><strong>Atomic rollback:</strong> if any flavor conflicts, the registry is left completely unmodified.</li>
+</ul>
+<h3 id="resolution-get">Resolution: <code>get</code><a class="headerlink" href="#resolution-get" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">flavor</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span><span class="w"> </span><span class="n">trust_unsafe_flavors</span><span class="p">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">Arc</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">Predictor</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>Retrieves the predictor registered for <code>flavor</code>, enforcing the code-execution trust policy:</p>
+<ul>
+<li>If no predictor handles <code>flavor</code>: returns <code>Error::Config("no predictor for flavor</code><flavor><code>")</code>.</li>
+<li>If <code>predictor.executes_code()</code> is <code>true</code> and <code>trust_unsafe_flavors</code> is <code>false</code>: returns
+  <code>Error::Config("flavor</code><flavor><code>executes code from the artifact; pass --trust-unsafe-flavors to serve it")</code>.</li>
+</ul>
+<h3 id="standard-predictors-register_std_predictors">Standard predictors: <code>register_std_predictors</code><a class="headerlink" href="#standard-predictors-register_std_predictors" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">register_std_predictors</span><span class="p">(</span><span class="n">registry</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">PredictorRegistry</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Error</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>Registers all standard predictors enabled by active Cargo feature flags:</p>
+<ul>
+<li><code>SmartcorePredictor</code> when <code>predict-smartcore</code> is enabled (<code>smartcore-logistic</code>, <code>smartcore-linear</code>).</li>
+<li><code>ExternalPythonPredictor</code> when <code>predict-external</code> is enabled (<code>sklearn-pickle</code>).</li>
+</ul>
+<p>Fails with <code>Error::Validation</code> if a standard flavor is already present in <code>registry</code>.</p>
+<h2 id="conformance-suite-conformancecheck">Conformance suite (<code>conformance::check</code>)<a class="headerlink" href="#conformance-suite-conformancecheck" title="Permanent link">&para;</a></h2>
+<p><code>mallops_std::predictor::conformance::check</code> is a reusable compliance test suite for any <code>Predictor</code>
+implementation:</p>
+<div class="highlight"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span>
+<span class="w">    </span><span class="n">predictor</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">dyn</span><span class="w"> </span><span class="n">Predictor</span><span class="p">,</span>
+<span class="w">    </span><span class="n">artifact</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Artifact</span><span class="p">,</span>
+<span class="w">    </span><span class="n">payload_dir</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Path</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cases</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[(</span><span class="n">PredictInput</span><span class="p">,</span><span class="w"> </span><span class="n">PredictInput</span><span class="p">)],</span>
+<span class="w">    </span><span class="n">malformed</span><span class="p">:</span><span class="w"> </span><span class="nc">PredictInput</span><span class="p">,</span>
+<span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="nb">String</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>It validates compliance without panicking, returning <code>Err(String)</code> on the first rule violation:</p>
+<ol>
+<li><strong>Flavor advertisement:</strong> if <code>artifact.manifest().flavor</code> is <code>Some(flavor)</code>, checks that
+   <code>predictor.flavors()</code> contains <code>flavor</code>.</li>
+<li><strong>Model loading:</strong> calls <code>predictor.load(artifact, payload_dir).await</code> and verifies success.</li>
+<li><strong>Single prediction correctness:</strong> evaluates each <code>(input, expected)</code> pair in <code>cases</code> via
+   <code>loaded.predict(input)</code> and confirms <code>got == expected</code>.</li>
+<li><strong>Batch prediction preservation:</strong> evaluates <code>loaded.predict_batch(cases.inputs)</code> and verifies
+   that outputs match <code>expected</code> in exact input order.</li>
+<li><strong>Empty batch handling:</strong> evaluates <code>loaded.predict_batch(vec![])</code> and verifies that it returns
+   an empty <code>Vec</code>.</li>
+<li><strong>Error handling:</strong> verifies that <code>loaded.predict(malformed)</code> returns an <code>Err</code>.</li>
+</ol>
+<hr />
+<h2 id="smartcorepredictor"><code>SmartcorePredictor</code><a class="headerlink" href="#smartcorepredictor" title="Permanent link">&para;</a></h2>
+<p>Feature: <code>predict-smartcore</code>. Serves models trained by
+<a href="../train-smartcore/"><code>std/train.smartcore</code></a> in-process without linking to <code>smartcore</code> (pure Rust, no BLAS,
+zero unsafe code).</p>
+<ul>
+<li><strong>Flavors:</strong> <code>smartcore-logistic</code>, <code>smartcore-linear</code></li>
+<li><strong><code>executes_code()</code>:</strong> <code>false</code> (safe data format, permitted by default without <code>--trust-unsafe-flavors</code>)</li>
+</ul>
+<h3 id="load-validation-rules">Load validation rules<a class="headerlink" href="#load-validation-rules" title="Permanent link">&para;</a></h3>
+<p>During <code>load(artifact, payload_dir)</code>, <code>SmartcorePredictor</code> performs exhaustive validation:</p>
+<ol>
+<li><strong>Artifact kind:</strong> <code>artifact.manifest().kind</code> must be <code>ArtifactKind::Model</code>.</li>
+<li><strong>Artifact format:</strong> <code>artifact.manifest().format</code> must be <code>"json"</code>.</li>
+<li><strong>Artifact flavor:</strong> <code>artifact.manifest().flavor</code> must be present and match one of <code>smartcore-logistic</code>
+   or <code>smartcore-linear</code>.</li>
+<li><strong>Payload file:</strong> <code>payload_dir/model.json</code> must exist, be valid JSON, and reject unknown fields
+   (<code>deny_unknown_fields</code>).</li>
+<li><strong>Schema version:</strong> <code>v</code> must equal <code>1</code> (<code>MODEL_SCHEMA_VERSION</code>).</li>
+<li><strong>Flavor &amp; algorithm alignment:</strong></li>
+<li><code>smartcore-logistic</code> requires <code>algorithm: "logistic_regression"</code>.</li>
+<li><code>smartcore-linear</code> requires <code>algorithm: "linear_regression"</code>.</li>
+<li>Any mismatch fails with an error.</li>
+<li><strong>Features:</strong> <code>features</code> list must be non-empty and must not contain duplicate feature names.</li>
+<li><strong>Target:</strong> <code>target</code> column name must not be empty.</li>
+<li><strong>Coefficients:</strong> <code>coefficients.len()</code> must equal <code>features.len()</code>, and all coefficients must be finite
+   floating-point numbers.</li>
+<li><strong>Intercept:</strong> <code>intercept</code> must be a finite floating-point number.</li>
+<li><strong>Algorithm-specific fields:</strong><ul>
+<li>For <code>logistic_regression</code>:</li>
+<li><code>classes</code> is required and must contain exactly <strong>2</strong> distinct classes (<code>int64</code>, <code>bool</code>, or <code>string</code>).</li>
+<li><code>threshold</code> is required and must be a finite floating-point number.</li>
+<li>For <code>linear_regression</code>:</li>
+<li><code>classes</code> and <code>threshold</code> must be omitted (<code>null</code> / absent).</li>
+</ul>
+</li>
+</ol>
+<h3 id="input-and-output-shapes">Input and output shapes<a class="headerlink" href="#input-and-output-shapes" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Input:</strong> <code>PredictInput::Json</code> containing a JSON object.</li>
+<li>The object keys must match <code>model.json</code>'s <code>features</code> list <strong>exactly</strong> (missing or extra keys are
+    rejected).</li>
+<li>Each value must be a finite JSON number or a boolean (<code>true</code> maps to <code>1.0</code>, <code>false</code> maps to <code>0.0</code>).</li>
+<li>Non-object JSON and <code>PredictInput::Bytes</code> are rejected with <code>Error::Runtime</code>.</li>
+<li><strong>Output (<code>smartcore-logistic</code>):</strong></li>
+<li>Returns <code>PredictInput::Json</code> with shape:
+    <div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"prediction"</span><span class="p">:</span><span class="w"> </span><span class="err">&lt;class&gt;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"probability"</span><span class="p">:</span><span class="w"> </span><span class="err">&lt;</span><span class="kc">f</span><span class="mi">64</span><span class="err">&gt;</span>
+<span class="p">}</span>
+</code></pre></div></li>
+<li>Probability calculation: <code>p = 1.0 / (1.0 + exp(-(intercept + Σ coefficients[i] * x[i])))</code>.</li>
+<li>Prediction decision: <code>classes[1]</code> when <code>p &gt;= threshold</code>, otherwise <code>classes[0]</code>.</li>
+<li>Preserves the original JSON type of <code>classes</code> (<code>int64</code>, <code>bool</code>, or <code>string</code>).</li>
+<li><strong>Output (<code>smartcore-linear</code>):</strong></li>
+<li>Returns <code>PredictInput::Json</code> with shape:
+    <div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"prediction"</span><span class="p">:</span><span class="w"> </span><span class="err">&lt;</span><span class="kc">f</span><span class="mi">64</span><span class="err">&gt;</span>
+<span class="p">}</span>
+</code></pre></div></li>
+<li>Calculated as: <code>prediction = intercept + Σ coefficients[i] * x[i]</code>.</li>
+</ul>
+<hr />
+<h2 id="externalpythonpredictor"><code>ExternalPythonPredictor</code><a class="headerlink" href="#externalpythonpredictor" title="Permanent link">&para;</a></h2>
+<p>Feature: <code>predict-external</code>. Serves models through an external Python worker process speaking NDJSON
+protocol v1 over stdin/stdout.</p>
+<ul>
+<li><strong>Flavors:</strong> <code>sklearn-pickle</code></li>
+<li><strong><code>executes_code()</code>:</strong> <code>true</code> (unpickling arbitrary models executes arbitrary code; requires
+  explicit <code>--trust-unsafe-flavors</code> opt-in)</li>
+</ul>
+<h3 id="command-and-configuration">Command and configuration<a class="headerlink" href="#command-and-configuration" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Default command:</strong> runs the embedded reference worker (<code>worker.py</code>) directly with Python:</li>
+<li>Unix: <code>["python3", "-c", "&lt;worker.py&gt;"]</code></li>
+<li>Windows: <code>["python", "-c", "&lt;worker.py&gt;"]</code></li>
+<li><strong><code>with_command(Vec&lt;String&gt;)</code>:</strong> overrides worker command arguments (executed directly, never through a shell).</li>
+<li><strong><code>with_timeout(Duration)</code>:</strong> sets per-request and handshake timeout (default: 30 seconds).</li>
+</ul>
+<h3 id="model-file-selection">Model file selection<a class="headerlink" href="#model-file-selection" title="Permanent link">&para;</a></h3>
+<p>During <code>load</code>, <code>ExternalPythonPredictor</code> locates the model file inside <code>payload_dir</code>:</p>
+<ol>
+<li>Uses <code>payload_dir/model.pkl</code> if it exists.</li>
+<li>If <code>model.pkl</code> is absent, searches <code>payload_dir</code> for regular files (subdirectories are ignored).
+   If there is <strong>exactly one</strong> regular file (e.g. <code>model.joblib</code>), it is selected.</li>
+<li>If <code>payload_dir</code> has 0 files or more than 1 file without <code>model.pkl</code>, loading fails with <code>Error::Runtime</code>.</li>
+</ol>
+<h3 id="worker-environment-and-directory-hygiene">Worker environment and directory hygiene<a class="headerlink" href="#worker-environment-and-directory-hygiene" title="Permanent link">&para;</a></h3>
+<p>The worker child process is spawned with an isolated environment and working directory:</p>
+<ul>
+<li><strong>Working directory:</strong> set to <code>payload_dir</code> (resolved via <code>std::path::absolute</code> without UNC <code>\\?\</code> prefix
+  on Windows to avoid Python import path confusion).</li>
+<li><strong>Environment isolation:</strong> host environment is completely cleared (<code>env_clear</code>). The worker inherits only:</li>
+<li><code>PATH</code> (plus <code>SYSTEMROOT</code> on Windows).</li>
+<li><code>MALLOPS_MODEL_FILE</code>: absolute path to the resolved model file.</li>
+<li><code>MALLOPS_FEATURES</code>: JSON array string of feature names extracted in order from
+    <code>artifact.manifest().io_schema.input[*].name</code> (omitted if empty or absent).</li>
+<li><strong><code>sys.path</code> hygiene:</strong> on startup, <code>worker.py</code> purges <code>''</code> (the cwd) and the absolute payload path from
+  <code>sys.path</code> before any other imports. This prevents untrusted payload files from shadowing standard Python
+  modules (such as a malicious <code>json.py</code> or <code>pickle.py</code>).</li>
+<li><strong>Stream separation:</strong> <code>worker.py</code> immediately redirects <code>sys.stdout = sys.stderr</code>. All user/model print
+  statements go to stderr, keeping stdout clean for the NDJSON protocol.</li>
+<li><strong>Stderr ring buffer:</strong> an asynchronous background task drains the worker's stderr, keeping the most recent
+  <strong>4 KiB</strong> (<code>STDERR_TAIL</code>). If the worker crashes or closes its pipes, the task drains stderr for up to
+  1 second (<code>STDERR_DRAIN</code>), and the tail is included in <code>Error::Runtime</code>.</li>
+<li><strong>Protocol line limit:</strong> protocol lines are bounded by <strong>64 MiB</strong> (<code>MAX_LINE = 64 &lt;&lt; 20</code>). Exceeding this
+  limit triggers a protocol violation error.</li>
+</ul>
+<h3 id="ndjson-protocol-v1">NDJSON Protocol v1<a class="headerlink" href="#ndjson-protocol-v1" title="Permanent link">&para;</a></h3>
+<p>Communication occurs over standard streams with one UTF-8 JSON object per line (<code>\n</code> terminated):</p>
+<h4 id="1-handshake">1. Handshake<a class="headerlink" href="#1-handshake" title="Permanent link">&para;</a></h4>
+<p>Upon loading the model into memory, the worker writes:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"v"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ready"</span><span class="p">}</span>
+</code></pre></div>
+<p>The host must receive this within the configured timeout (default 30 s).</p>
+<h4 id="2-single-prediction-predict">2. Single prediction (<code>predict</code>)<a class="headerlink" href="#2-single-prediction-predict" title="Permanent link">&para;</a></h4>
+<p><strong>Host request:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"predict"</span><span class="p">,</span><span class="w"> </span><span class="nt">"input"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"age"</span><span class="p">:</span><span class="w"> </span><span class="mf">42.0</span><span class="p">,</span><span class="w"> </span><span class="nt">"plan_a"</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">}}</span>
+</code></pre></div>
+<p><strong>Worker success response:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"ok"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"output"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"prediction"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"probability"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.875</span><span class="p">}}</span>
+</code></pre></div>
+<h4 id="3-batch-prediction-predict_batch">3. Batch prediction (<code>predict_batch</code>)<a class="headerlink" href="#3-batch-prediction-predict_batch" title="Permanent link">&para;</a></h4>
+<p><strong>Host request:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"predict_batch"</span><span class="p">,</span><span class="w"> </span><span class="nt">"inputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"age"</span><span class="p">:</span><span class="w"> </span><span class="mf">25.0</span><span class="p">,</span><span class="w"> </span><span class="nt">"plan_a"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="nt">"age"</span><span class="p">:</span><span class="w"> </span><span class="mf">50.0</span><span class="p">,</span><span class="w"> </span><span class="nt">"plan_a"</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">}]}</span>
+</code></pre></div>
+<p><strong>Worker success response:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"ok"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"outputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"prediction"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"probability"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.12</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="nt">"prediction"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"probability"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.91</span><span class="p">}]}</span>
+</code></pre></div>
+<h4 id="4-error-response">4. Error response<a class="headerlink" href="#4-error-response" title="Permanent link">&para;</a></h4>
+<p>If a prediction fails (e.g. missing features or invalid input):</p>
+<p><strong>Worker error response:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"ok"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"error"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ValueError: missing features ['plan_a']"</span><span class="p">}</span>
+</code></pre></div>
+<p>The host maps this to <code>Error::Runtime("worker error: ValueError: missing features ['plan_a']")</code>. <strong>A single failed request does not crash or terminate the worker.</strong></p>
+<h4 id="input-output-representations">Input &amp; output representations<a class="headerlink" href="#input-output-representations" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Inputs:</strong> <code>worker.py</code> accepts either an object <code>{"feature": value}</code> (ordered using <code>MALLOPS_FEATURES</code> or
+  the model's <code>feature_names_in_</code>) or a list of values already in column order.</li>
+<li><strong>Outputs:</strong> <code>{"prediction": &lt;val&gt;}</code>. If the model provides <code>predict_proba</code> and has exactly two classes
+  (<code>len(classes_) == 2</code>), <code>"probability": &lt;p&gt;</code> is included (positive class probability).</li>
+<li>NumPy scalars and arrays are automatically converted to standard JSON primitives via <code>.tolist()</code> / <code>.item()</code>.</li>
+</ul>
+<h3 id="lifecycle-failure-recovery-and-process-management">Lifecycle, failure recovery, and process management<a class="headerlink" href="#lifecycle-failure-recovery-and-process-management" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Serialized requests:</strong> inference requests are serialized through an asynchronous <code>Mutex</code>.</li>
+<li><strong>Failure recovery:</strong> if a request times out, receives an invalid reply, finds the worker dead, or if the
+  request future is cancelled/dropped mid-flight, the worker process is killed (<code>kill_on_drop(true)</code>). The
+  worker slot is vacated.</li>
+<li><strong>Automatic restart:</strong> on the subsequent request, a fresh worker child process is spawned automatically. The
+  failed request itself is not retried.</li>
+<li><strong>Drop cleanup:</strong> dropping <code>LoadedPredictor</code> drops the active worker child process, killing it immediately.</li>
+<li><strong>Platform note (Windows):</strong> process termination on drop or crash terminates only the direct child process.
+  There is no process-group kill on Windows, so Python workers must not spawn detached subprocesses.</li>
+</ul>
+<hr />
+<h2 id="errors-reference">Errors reference<a class="headerlink" href="#errors-reference" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Error variant</th>
+<th>Behavior / Message format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Registering predictor declaring no flavors</td>
+<td><code>Error::Validation</code></td>
+<td><code>"predictor declares no flavors"</code> (registry unchanged)</td>
+</tr>
+<tr>
+<td>Duplicate flavor in <code>register</code></td>
+<td><code>Error::Validation</code></td>
+<td><code>"duplicate predictor flavor</code><flavor><code>"</code> (registry unchanged)</td>
+</tr>
+<tr>
+<td>Standard predictor registered twice</td>
+<td><code>Error::Validation</code></td>
+<td><code>"duplicate predictor flavor</code><flavor><code>"</code></td>
+</tr>
+<tr>
+<td>Unknown flavor requested in <code>get</code></td>
+<td><code>Error::Config</code></td>
+<td><code>"no predictor for flavor</code><flavor><code>"</code></td>
+</tr>
+<tr>
+<td>Code-executing flavor without trust opt-in</td>
+<td><code>Error::Config</code></td>
+<td><code>"flavor</code><flavor><code>executes code from the artifact; pass --trust-unsafe-flavors to serve it"</code></td>
+</tr>
+<tr>
+<td>Manifest kind is not <code>model</code></td>
+<td><code>Error::Config</code></td>
+<td><code>"expected a model artifact, got \</code><kind>`"`</td>
+</tr>
+<tr>
+<td>Manifest format is not <code>json</code> (<code>SmartcorePredictor</code>)</td>
+<td><code>Error::Config</code></td>
+<td><code>"expected model format \</code>json`, got `<format>`"`</td>
+</tr>
+<tr>
+<td>Missing manifest flavor (<code>SmartcorePredictor</code>)</td>
+<td><code>Error::Config</code></td>
+<td><code>"model artifact manifest is missing \</code>flavor`"`</td>
+</tr>
+<tr>
+<td>Unsupported manifest flavor</td>
+<td><code>Error::Config</code></td>
+<td><code>"unsupported smartcore flavor \</code><flavor>`"<code>/</code>"unsupported flavor <flavor:?>"<code>(external, missing flavor included:</code>None`)</td>
+</tr>
+<tr>
+<td>Missing or invalid <code>model.json</code> / <code>model.pkl</code></td>
+<td><code>Error::Runtime</code></td>
+<td><code>&lt;path&gt;: &lt;io error&gt;</code> or <code>"invalid model.json: &lt;serde error&gt;"</code></td>
+</tr>
+<tr>
+<td>Unsupported <code>model.json</code> schema version</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"unsupported model schema version &lt;v&gt;, expected 1"</code></td>
+</tr>
+<tr>
+<td>Algorithm / flavor mismatch</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"manifest flavor \</code><flavor>` does not match model algorithm `<alg>`"`</td>
+</tr>
+<tr>
+<td>Empty or duplicate <code>features</code> in <code>model.json</code></td>
+<td><code>Error::Runtime</code></td>
+<td><code>"model \</code>features` list must not be empty"<code>/</code>"duplicate feature `<f>` in model payload"`</td>
+</tr>
+<tr>
+<td>Empty <code>target</code> in <code>model.json</code></td>
+<td><code>Error::Runtime</code></td>
+<td><code>"model \</code>target` must not be empty"`</td>
+</tr>
+<tr>
+<td>Coefficient length mismatch</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"model has &lt;N&gt; coefficients for &lt;M&gt; features"</code></td>
+</tr>
+<tr>
+<td>Non-finite intercept, coefficients, or threshold</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"model \</code>intercept` must be finite"<code>/</code>"model `coefficients` must all be finite"<code>/</code>"logistic_regression `threshold` must be finite"`</td>
+</tr>
+<tr>
+<td>Logistic model with class count != 2, or equal classes</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"logistic_regression model requires exactly 2 classes, got &lt;N&gt;"</code> / <code>"logistic_regression model requires 2 distinct classes"</code></td>
+</tr>
+<tr>
+<td>Linear model specifying classes or threshold</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"linear_regression model must not specify \</code><field>`"`</td>
+</tr>
+<tr>
+<td>Input missing expected features or extra keys</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"missing feature \</code><name>`"<code>/</code>"unexpected feature `<name>`"`</td>
+</tr>
+<tr>
+<td>Input feature value is not finite number or bool</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"feature \</code><name>` must be a finite number or boolean"`</td>
+</tr>
+<tr>
+<td>Non-JSON input passed to smartcore/external</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"smartcore predictor expects a JSON object of feature values"</code> (non-object JSON) / <code>"smartcore predictor expects JSON input"</code> (bytes) / <code>"sklearn-pickle takes JSON input, got bytes"</code></td>
+</tr>
+<tr>
+<td>Ambiguous payload directory in external predictor</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"&lt;dir&gt;: expected model.pkl or exactly one file, found &lt;N&gt; files"</code></td>
+</tr>
+<tr>
+<td>Worker handshake timed out</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"worker handshake timed out after &lt;duration&gt;"</code></td>
+</tr>
+<tr>
+<td>Request timed out</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"timed out after &lt;duration&gt;"</code> (worker killed, restarts on next request)</td>
+</tr>
+<tr>
+<td>Worker crashed or closed pipes</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"worker exited unexpectedly; stderr: &lt;tail&gt;"</code></td>
+</tr>
+<tr>
+<td>Worker returned error reply (<code>ok: false</code>)</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"worker error: &lt;error message&gt;"</code> (worker stays alive)</td>
+</tr>
+<tr>
+<td>Protocol line exceeds 64 MiB limit</td>
+<td><code>Error::Runtime</code></td>
+<td><code>"worker line longer than 67108864 bytes"</code></td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../train-smartcore/" class="md-footer__link md-footer__link--prev" aria-label="Previous: std/train.smartcore">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                std/train.smartcore
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../../contributing/" class="md-footer__link md-footer__link--next" aria-label="Next: Contributing">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Contributing
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 The mallops contributors — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "search.suggest", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.2/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

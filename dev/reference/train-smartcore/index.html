@@ -16,7 +16,7 @@
         <link rel="prev" href="../train-external/">
       
       
-        <link rel="next" href="../../contributing/">
+        <link rel="next" href="../predictor/">
       
       
         
@@ -980,6 +980,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../predictor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predictor contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1385,6 +1413,7 @@ field order (no <code>HashMap</code>) and <code>serde_json</code> float formatti
   or <code>["no", "yes"]</code> (<code>string</code>), sorted ascending.</li>
 </ul>
 <h3 id="prediction-rule">Prediction rule<a class="headerlink" href="#prediction-rule" title="Permanent link">&para;</a></h3>
+<p>Implemented in-process by <a href="../predictor/#smartcorepredictor"><code>SmartcorePredictor</code></a> without depending on <code>smartcore</code>:</p>
 <ul>
 <li><strong><code>logistic_regression</code>:</strong> compute <code>p = 1 / (1 + exp(-(intercept + Σ coefficients[i] * x[i])))</code>;
   predict <code>classes[1]</code> when <code>p &gt;= threshold</code>, otherwise <code>classes[0]</code>.</li>
@@ -1561,13 +1590,13 @@ field order (no <code>HashMap</code>) and <code>serde_json</code> float formatti
         
         
           
-          <a href="../../contributing/" class="md-footer__link md-footer__link--next" aria-label="Next: Contributing">
+          <a href="../predictor/" class="md-footer__link md-footer__link--next" aria-label="Next: Predictor contract">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Contributing
+                Predictor contract
               </div>
             </div>
             <div class="md-footer__button md-icon">

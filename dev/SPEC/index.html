@@ -1155,6 +1155,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/predictor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predictor contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1760,7 +1788,7 @@
 <li>FR-SRV-1: HTTP/JSON inference server (<code>mallops serve [package-id]</code>) running outside the batch DAG, consuming a <code>package</code> artifact produced by <code>mallops run</code> — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
 <li>FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.</li>
 <li>FR-SRV-4: MQTT transport (<code>serve.transport: mqtt</code>): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</li>
-<li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (smartcore, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…). In v0.1 the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) and is promoted to <code>mallops-core</code> before 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
+<li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (smartcore, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…) via <code>PredictorRegistry::get</code>. In v0.1 the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) and is promoted to <code>mallops-core</code> before 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). See the <a href="../reference/predictor/">Predictor contract reference</a>.</li>
 </ul>
 <h3 id="311-monitoring-and-logging">3.11 Monitoring and logging<a class="headerlink" href="#311-monitoring-and-logging" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1833,7 +1861,7 @@
 <ul>
 <li><strong>Pipeline definitions (<code>mallops.yaml</code>) are trusted code.</strong> Running <code>mallops run</code> is equivalent to executing a build script: native blocks run in-process, external blocks run arbitrary configured commands (<code>command:</code>), and <code>mallops run</code> spawns <code>git rev-parse HEAD</code> (best-effort, in the directory of <code>mallops.yaml</code>, stderr discarded; failure yields <code>None</code>) to record <code>RunStarted.git_commit</code>. By contrast, <code>mallops validate</code> and <code>mallops graph</code> <strong>never</strong> execute user code, spawn external processes (not even <code>git</code>), or create the artifact store directory. <code>mallops store verify</code> likewise never runs blocks or spawns external processes.</li>
 <li><strong>Plugin isolation boundaries.</strong> Only WASM component plugins (post-v0.1) execute inside a capability-restricted sandbox. Native Rust blocks have no isolation; external CLI and gRPC blocks run as host processes. In v0.1, external CLI blocks execute via <code>argv</code> (never through a shell), with an explicit allowlisted environment and an isolated workdir, but this is process hygiene rather than a security sandbox.</li>
-<li><strong>Model flavor deserialization.</strong> Formats such as <code>pickle</code>, <code>joblib</code>, <code>sklearn-pickle</code>, and <code>torchscript</code> execute arbitrary code when loaded. <code>Predictor</code> implementations declare <code>executes_code(&amp;self) -&gt; bool</code>, and <code>mallops serve</code> refuses to load code-executing flavors unless <code>--trust-unsafe-flavors</code> is explicitly passed. Prefer non-executing formats (<code>onnx</code>, <code>safetensors</code>, <code>skops</code>) and, from v0.3, cryptographically signed packages.</li>
+<li><strong>Model flavor deserialization.</strong> Formats such as <code>pickle</code>, <code>joblib</code>, <code>sklearn-pickle</code>, and <code>torchscript</code> execute arbitrary code when loaded. <code>Predictor</code> implementations declare <code>executes_code(&amp;self) -&gt; bool</code>, and <code>PredictorRegistry::get</code> (used by <code>mallops serve</code>) refuses to load code-executing flavors (<code>Error::Config</code>) unless <code>--trust-unsafe-flavors</code> is explicitly passed. Prefer non-executing formats (<code>onnx</code>, <code>safetensors</code>, <code>skops</code>) and, from v0.3, cryptographically signed packages. See the <a href="../reference/predictor/">Predictor contract reference</a>.</li>
 <li><strong>Secrets.</strong> <code>${secret:NAME}</code> references are resolved on demand through a <code>SecretProvider</code> (<code>MALLOPS_SECRET_&lt;NAME&gt;</code> environment variable in v0.1) into an opaque <code>Secret</code> newtype whose <code>Debug</code>/<code>Display</code> output is redacted (<code>"***"</code>) and which does not implement <code>Serialize</code>. Secrets never enter <code>Context.config</code>, <code>config.json</code>, cache keys, <code>config_hash</code>, logs, or lineage sinks.</li>
 <li><strong>Store integrity.</strong> <code>ArtifactId</code> (strict 64 lowercase hex chars) and <code>RelPath</code> (relative POSIX UTF-8 path with no <code>..</code> or root prefixes) are strictly validated. <code>ArtifactStore</code> rejects symlinks and special files, stores payloads read-only on <code>LocalStore</code>, and materializes copies on <code>fetch</code> so blocks can never mutate stored artifacts in place.</li>
 </ul>
@@ -1958,7 +1986,7 @@
 <span class="w">  </span><span class="nt">"kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"model"</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pickle"</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"flavor"</span><span class="p">:</span><span class="w"> </span><span class="s2">"sklearn-pickle"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"io_schema"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"inputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"age"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}],</span><span class="w"> </span><span class="nt">"outputs"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"churned"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"io_schema"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"input"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"age"</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}],</span><span class="w"> </span><span class="nt">"output"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"churned"</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f64"</span><span class="p">}]</span><span class="w"> </span><span class="p">},</span>
 <span class="w">  </span><span class="nt">"metadata"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"framework"</span><span class="p">:</span><span class="w"> </span><span class="s2">"scikit-learn"</span><span class="p">,</span><span class="w"> </span><span class="nt">"framework_version"</span><span class="p">:</span><span class="w"> </span><span class="s2">"1.6.0"</span><span class="w"> </span><span class="p">},</span>
 <span class="w">  </span><span class="nt">"parents"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"&lt;hash&gt;"</span><span class="p">,</span><span class="w"> </span><span class="s2">"&lt;hash&gt;"</span><span class="p">]</span>
 <span class="p">}</span>

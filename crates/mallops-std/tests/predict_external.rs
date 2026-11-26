@@ -396,8 +396,9 @@ fn external_predictor_protocol_worker_env() {
         let PredictInput::Json(env) = loaded.predict(j(json!("env"))).await.unwrap() else {
             panic!("expected JSON")
         };
-        // No host variable leaks except the allowlisted ones (the OS may add its own, such as
-        // macOS `__CF_USER_TEXT_ENCODING`, so the child's list is not checked exhaustively).
+        // No host variable leaks except the allowlisted ones. `__*` vars are set by the child's
+        // own OS/runtime (macOS `__CF_USER_TEXT_ENCODING`, LLVM coverage
+        // `__LLVM_PROFILE_RT_INIT_ONCE`), so the child's list is not checked exhaustively.
         let allowed = ["PATH", "SYSTEMROOT"];
         let vars = env["vars"].as_array().unwrap();
         assert!(
@@ -405,7 +406,7 @@ fn external_predictor_protocol_worker_env() {
             "run through cargo"
         );
         for (host, _) in std::env::vars() {
-            if !allowed.iter().any(|a| a.eq_ignore_ascii_case(&host)) && !host.starts_with("__CF") {
+            if !allowed.iter().any(|a| a.eq_ignore_ascii_case(&host)) && !host.starts_with("__") {
                 assert!(!vars.contains(&json!(host)), "{host} leaked into {env}");
             }
         }

@@ -86,9 +86,12 @@ fn mock_worker(args: &[String]) {
         && flag == "--heartbeat"
     {
         let path = path.clone();
+        let tmp = format!("{path}.tmp");
         std::thread::spawn(move || {
             for n in 0u64..=u64::MAX {
-                let _ = std::fs::write(&path, n.to_string());
+                // Atomic rewrite: a kill mid-write must never leave the file empty for good.
+                let _ =
+                    std::fs::write(&tmp, n.to_string()).and_then(|()| std::fs::rename(&tmp, &path));
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
@@ -515,9 +518,13 @@ fn external_predictor_protocol_dropped_request_restarts() {
         );
         // The worker that had the request in flight is dead (its heartbeat stops)...
         std::thread::sleep(Duration::from_millis(300));
-        let settled = changed(&beat, Some("")); // any non-empty read (a rewrite may be mid-way)
+        let settled = std::fs::read_to_string(&beat).unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(changed(&beat, Some("")), settled, "worker still running");
+        assert_eq!(
+            std::fs::read_to_string(&beat).unwrap(),
+            settled,
+            "worker still running"
+        );
         // ...and no stale reply can reach the next request.
         assert_eq!(
             loaded.predict(j(json!(9))).await.unwrap(),

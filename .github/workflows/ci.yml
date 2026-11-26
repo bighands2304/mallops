@@ -49,7 +49,7 @@ jobs:
       # mallops-std single-block builds: --all-features never compiles them.
       - name: mallops-std per-feature lint and test
         run: |
-          for f in "" ingest-csv ingest-parquet preprocess-tabular train-external train-smartcore; do
+          for f in "" ingest-csv ingest-parquet preprocess-tabular train-external train-smartcore predictor predict-smartcore predict-external; do
             cargo clippy -p mallops-std --all-targets --no-default-features --features "$f" -- -D warnings
             cargo test -p mallops-std --no-default-features --features "$f"
           done

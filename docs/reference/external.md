@@ -1,24 +1,48 @@
-# `std/train.external`
+# `std/external`
 
-Runs any command (Python, R, Julia, a container…) as a training step. mallops materializes the
-input artifacts into a working directory, writes `inputs.json` and `config.json`, runs the
-command, and commits what the command declares in `outputs.json`. No Rust bindings are needed.
-See SPEC FR-TRN-3 and [ADR-0003](../adr/0003-plugins-wasm-and-grpc.md).
+Runs any command (Python, R, Julia, a container…) as a pipeline step — custom preprocessing,
+feature engineering, model training, custom evaluation metrics, report generation, or anything
+else. Behind the optional `external` Cargo feature of `mallops-std` (`Stage::Custom`, version
+`0.1.0`).
+
+mallops materializes the input artifacts into a working directory, writes `inputs.json` and
+`config.json`, runs the command, and commits what the command declares in `outputs.json`. No Rust
+bindings are needed. See [SPEC FR-PRE-2](../SPEC.md#33-preprocessing-data-features),
+[FR-TRN-3](../SPEC.md#34-training), [FR-EVL-3](../SPEC.md#36-model-evaluation) and
+[ADR-0003](../adr/0003-plugins-wasm-and-grpc.md).
+
+Generic example (custom feature engineering emitting features and metrics):
+
+```yaml
+blocks:
+  custom_features:
+    use: std/external
+    in: { dataset: raw.dataset }
+    with:
+      command: ["python", "./featurize.py"]
+      inputs: { dataset: dataset }
+      outputs: { features: features, metrics: metrics }
+      params: { window: 7 }
+```
+
+Training example (emitting a `model` artifact with a `flavor`):
 
 ```yaml
 blocks:
   model:
-    use: std/train.external
-    in: { train: features.train, val: features.validation }
+    use: std/external
+    in: { train: features.train }
     with:
       command: ["python", "./train.py"]
+      inputs: { train: features }
+      outputs: { model: model }
       flavor: sklearn-pickle
       params: { n_estimators: 200 }
       secrets: [MLFLOW_TOKEN]
       timeout_secs: 3600
 ```
 
-A runnable reference script is in `examples/train-external/train.py`.
+A runnable reference script is in `examples/external/train.py`.
 
 ## Configuration (`with:`)
 
@@ -27,30 +51,38 @@ Unknown fields are rejected.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `command` | list of strings | required | argv, executed directly (never through a shell). Not empty; `command[0]` not empty. |
-| `flavor` | string | none | Flavor of every port of kind `model` (inputs and outputs); fills model outputs that do not set their own. |
+| `inputs` | map port → kind | required | Declared input ports (may be `{}`). Every declared port is required. |
+| `outputs` | map port → kind | required | Declared output ports (must be non-empty). Every declared port is required. |
+| `flavor` | string | none | Allowed only when at least one declared port has kind `model`. Sets the flavor of every port of kind `model` (inputs and outputs); fills model outputs that do not set their own. |
 | `params` | object | `{}` | Free-form, written to `config.json`. |
 | `env` | list of names | `[]` | Host environment variables passed to the child; names unset on the host are skipped. |
 | `secrets` | list of names | `[]` | Resolved with `ctx.secret(name)` and passed as env vars of the same name. |
 | `timeout_secs` | integer > 0 | none (no timeout) | Kill the process group after this many seconds. |
 | `log_cap_bytes` | integer > 0 | 1 MiB | Max bytes kept per stream (stdout, stderr); the rest is drained and dropped. |
 | `watch_files` | list of paths | `[]` | Files that make the block cacheable (see [Cache](#cache)). |
-| `inputs` | map port → kind | `train` (required) + `val` (optional), kind `features` | **Replaces** the default input ports. |
-| `outputs` | map port → kind | `model`, kind `model` | **Replaces** the default output port. |
 
 Validation (`mallops validate`, which never runs the command):
 
-- `env` / `secrets` names match `[A-Za-z_][A-Za-z0-9_]*`, are disjoint from each other and differ
-  from `PATH`, `SYSTEMROOT` and `MALLOPS_*`.
+- `inputs` and `outputs` are required; `outputs` must declare at least one port (`inputs` may be
+  empty `{}`).
 - Port names match `[a-z][a-z0-9_]*` (also re-checked at run time for input names given through
   the library API).
+- `flavor` is rejected unless at least one declared input or output port has kind `model`.
+- `env` / `secrets` names match `[A-Za-z_][A-Za-z0-9_]*`, are disjoint from each other and differ
+  from `PATH`, `SYSTEMROOT` and `MALLOPS_*`.
 - Strings containing `${secret:` in `command`, `flavor`, `params`, `env`, `secrets` or
   `watch_files` are rejected: use `secrets:`.
 
 ## Ports
 
-Default inputs: `train` (required) and `val` (optional), kind `features`. Default output: `model`,
-kind `model`. Custom `inputs` / `outputs` replace these entirely. Unknown ports, kind mismatches and
-missing required outputs are checked by the runtime when it commits the outputs.
+`std/external` has **no default ports**: `inputs` and `outputs` must always be declared explicitly
+in `with:` (and are resolved dynamically via `Block::resolve_ports`).
+
+- `outputs` must contain at least one port; `inputs` may be empty.
+- Every declared input and output port is **required** (there are no optional ports).
+- When `flavor` is set, it applies to every declared port of kind `model` (inputs and outputs).
+- Unknown ports, kind mismatches and missing required outputs are checked by the runtime when it
+  commits the outputs.
 
 ## Contract v1
 
@@ -92,8 +124,8 @@ All paths in the contract use `/` and are relative to the workdir.
 }
 ```
 
-Optional ports that are not wired are absent from `inputs`. `manifest` is the artifact manifest;
-`flavor` and `io_schema` appear only when set.
+`inputs` contains an entry for every declared input port (or `{}` when `with.inputs` is empty).
+`manifest` is the artifact manifest; `flavor` and `io_schema` appear only when set.
 
 ```json
 {
@@ -235,8 +267,9 @@ unchanged and looked up through `PATH`. Hence `["python", "./train.py"]`, not `[
 ## Cache
 
 - Without `watch_files` the block is **uncacheable**: it runs every time.
-- With `watch_files` it is cacheable: the key adds a BLAKE3 hash of every watched file's path and
-  content, in a fixed order. A missing file or a directory is an error.
+- With `watch_files` it is cacheable: the key adds a domain-separated BLAKE3 hash
+  (`mallops/external/watch_files/v1`) of every watched file's path and content, in a fixed order.
+  A missing file or a directory is an error.
 
 Not part of the key: values of host environment variables, the binary or interpreter, and the
 Python (or other) dependencies. Add the script and a lock file to `watch_files`, and change `params`
@@ -246,6 +279,7 @@ when you bump the environment.
 
 | Situation | Error |
 |---|---|
+| Missing `inputs` or `outputs`, empty `outputs`, `flavor` without any `model` port, invalid port / `env` / `secrets` name, `${secret:` in config, unknown field | `Error::Config` (reported under `blocks.<id>.with` by `mallops validate`) |
 | Timeout | `Error::Runtime("timed out after Ns")`, process group killed |
 | Cancellation | `Error::Cancelled`, process group killed |
 | Non-zero exit or killed by signal | `Error::Runtime` with the tail of stderr (secrets redacted) |
@@ -266,7 +300,7 @@ Python itself, interpreter versions, virtualenvs, dependencies and containers ar
 `command` at the interpreter you want (`["./.venv/bin/python", "./train.py"]`), or use a container:
 
 ```yaml
-command: ["docker", "run", "--rm", "-e", "MLFLOW_TOKEN", "my-trainer:1.2"]
+command: ["docker", "run", "--rm", "-e", "MLFLOW_TOKEN", "my-runner:1.2"]
 secrets: [MLFLOW_TOKEN]
 ```
 

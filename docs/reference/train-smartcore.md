@@ -51,7 +51,7 @@ Validation rules:
 - Unknown `algorithm` or `solver` values, negative or non-finite `alpha`, and empty `target` are
   rejected.
 - Strings containing `${secret:` anywhere in the config are rejected (as in
-  [`std/train.external`](train-external.md)).
+  [`std/external`](external.md)).
 
 ## Ports
 

@@ -356,7 +356,7 @@ blocks:
       steps:
         - impute: { strategy: median }
   model:
-    use: std/train.external
+    use: std/external
     in: { train: features.train }
     cache: false
 serve:
@@ -529,7 +529,7 @@ blocks:
         - scale: { method: standard }
         - split: { test: 0.2, seed: 42 }
   model:
-    use: std/train.external
+    use: std/external
     in: { train: features.train }
     with:
       command: ["python", "train.py"]

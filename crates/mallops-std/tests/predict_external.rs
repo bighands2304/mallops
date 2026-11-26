@@ -557,27 +557,19 @@ fn external_predictor_protocol_worker_py_compiles() {
     );
 }
 
-/// The real `worker.py` on a pickled stdlib-only model (the payload dir is on `sys.path`).
+/// The real `worker.py` on a pickled builtins-only model (`predict` and `predict_proba` are
+/// `list`, so a row comes back as the prediction and its second value as the probability), with
+/// a payload `json.py` that must not shadow the stdlib module.
 fn external_predictor_protocol_worker_py_end_to_end() {
     if !python_available() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("fakemodel.py"),
-        "class Model:\n\
-         \x20   classes_ = [0, 1]\n\
-         \x20   def predict(self, X):\n\
-         \x20       print('stray print')\n\
-         \x20       return [int(r[0] + r[1] > 1) for r in X]\n\
-         \x20   def predict_proba(self, X):\n\
-         \x20       return [[0.25, 0.75] for _ in X]\n",
-    )
-    .unwrap();
     let out = std::process::Command::new(PYTHON)
         .args([
             "-c",
-            "import pickle, fakemodel; pickle.dump(fakemodel.Model(), open('model.pkl', 'wb'))",
+            "import pickle, types; pickle.dump(types.SimpleNamespace(predict=list, \
+             predict_proba=list, classes_=[0, 1]), open('model.pkl', 'wb'))",
         ])
         .current_dir(dir.path())
         .output()
@@ -587,15 +579,20 @@ fn external_predictor_protocol_worker_py_end_to_end() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    std::fs::write(
+        dir.path().join("json.py"),
+        "raise ImportError('payload json.py shadowed the stdlib')\n",
+    )
+    .unwrap();
     block_on(async {
         let cases = [
             (
-                j(json!({"b": 1, "a": 1})),
-                j(json!({"prediction": 1, "probability": 0.75})),
+                j(json!({"b": 1, "a": 2})),
+                j(json!({"prediction": [2, 1], "probability": 1})),
             ),
             (
-                j(json!([0, 0])),
-                j(json!({"prediction": 0, "probability": 0.75})),
+                j(json!([3, 4])),
+                j(json!({"prediction": [3, 4], "probability": 4})),
             ),
         ];
         let artifact = model(ArtifactKind::Model, "sklearn-pickle");

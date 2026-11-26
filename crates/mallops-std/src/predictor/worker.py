@@ -1,7 +1,7 @@
 """Reference mallops prediction worker for `sklearn-pickle` models (NDJSON protocol v1).
 
 Started by mallops' ExternalPythonPredictor as `python3 -c <this file>` with the payload
-directory as cwd and a cleared environment plus:
+directory as cwd (removed from sys.path) and a cleared environment plus:
 
     MALLOPS_MODEL_FILE  absolute path of the pickled model (unpickling runs its code: trusted)
     MALLOPS_FEATURES    optional JSON array of feature names, the model's column order
@@ -25,10 +25,17 @@ exactly two classes. NumPy values are converted to plain JSON types. Only the st
 is imported here; scikit-learn is needed at runtime by the pickle itself.
 """
 
-import json
 import os
-import pickle
 import sys
+
+# `python -c` puts '' (the cwd, which is the payload dir) first on sys.path, so a payload file
+# named like a module (json.py, pickle.py, numpy.py...) would shadow the real one on import.
+# Drop it, and the cwd itself, before any other import.
+_cwd = os.getcwd()
+sys.path[:] = [p for p in sys.path if p and os.path.abspath(p) != _cwd]
+
+import json  # noqa: E402
+import pickle  # noqa: E402
 
 
 def to_json(x):

@@ -23,29 +23,20 @@ use serde_json::json;
 
 use super::has_secret_ref;
 use crate::ingest::{Column, ColumnType, DATA_FILE, blocking, parse_config, read_parquet_batch};
+use crate::smartcore_model::{
+    Algorithm, FLAVOR_LINEAR, FLAVOR_LOGISTIC, MODEL_FILE, MODEL_SCHEMA_VERSION, ModelClasses,
+    ModelPayload,
+};
 
 /// Required input port: training features Parquet.
 pub(crate) const TRAIN: &str = "train";
 /// Output port: trained JSON model.
 pub(crate) const MODEL: &str = "model";
-/// File name of the JSON model payload inside the output artifact.
-pub(crate) const MODEL_FILE: &str = "model.json";
 
-const FLAVOR_LOGISTIC: &str = "smartcore-logistic";
-const FLAVOR_LINEAR: &str = "smartcore-linear";
 const FRAMEWORK: &str = "smartcore";
 const FRAMEWORK_VERSION: &str = "0.7";
-const MODEL_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_ALPHA: f64 = 1.0;
 const DEFAULT_THRESHOLD: f64 = 0.5;
-
-/// Algorithm supported by `std/train.smartcore`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Algorithm {
-    LogisticRegression,
-    LinearRegression,
-}
 
 /// Solver for linear regression.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,30 +167,6 @@ impl TrainSmartcoreConfig {
         }
         .map_err(|e| Error::Runtime(format!("failed to serialize hyperparameters: {e}")))
     }
-}
-
-/// Typed binary classes serialized into `model.json` for logistic regression.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
-enum ModelClasses {
-    Int64(Vec<i64>),
-    Bool(Vec<bool>),
-    String(Vec<String>),
-}
-
-/// Serializable payload written to `model.json` (fixed field order).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct ModelPayload {
-    v: u32,
-    algorithm: Algorithm,
-    features: Vec<String>,
-    target: String,
-    intercept: f64,
-    coefficients: Vec<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    classes: Option<ModelClasses>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    threshold: Option<f64>,
 }
 
 /// The `std/train.smartcore` block.
@@ -588,7 +555,7 @@ fn execute_blocking(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use arrow_array::{
@@ -605,7 +572,7 @@ mod tests {
 
     use super::*;
 
-    async fn store_features(
+    pub(crate) async fn store_features(
         store: &Arc<MemoryStore>,
         batch: &RecordBatch,
         meta_target: Option<&str>,
@@ -654,7 +621,7 @@ mod tests {
         ArtifactId::compute(&draft.manifest, &[PayloadFile::from_bytes(rel, &bytes)]).unwrap()
     }
 
-    fn read_model_json(draft: &OutputDraft) -> serde_json::Value {
+    pub(crate) fn read_model_json(draft: &OutputDraft) -> serde_json::Value {
         let DraftPayload::File(path) = &draft.payload else {
             panic!("expected DraftPayload::File");
         };
@@ -662,7 +629,7 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    async fn run_block(
+    pub(crate) async fn run_block(
         store: &Arc<MemoryStore>,
         inputs: &Inputs,
         config: serde_json::Value,
@@ -677,7 +644,7 @@ mod tests {
         Ok((workdir, drafts))
     }
 
-    fn separable_logistic_batch_int64() -> RecordBatch {
+    pub(crate) fn separable_logistic_batch_int64() -> RecordBatch {
         let x1: Vec<f64> = vec![
             -5.0, -4.5, -4.0, -3.5, -3.0, -2.5, -2.0, -1.5, -1.0, -0.5, 0.5, 1.0, 1.5, 2.0, 2.5,
             3.0, 3.5, 4.0, 4.5, 5.0,

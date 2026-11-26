@@ -1,10 +1,10 @@
-//! Acceptance tests of `std/train.external` through the public API (issue #13).
+//! Acceptance tests of `std/external` through the public API (issue #13).
 //!
 //! The fake trainer is this test binary, re-executed on the ignored [`child_entry`] test: it
 //! reads its mode from `params.mode` in `config.json` (its cwd). No shell, no Python, so the
 //! tests run on Linux, macOS and Windows.
 
-#![cfg(feature = "train-external")]
+#![cfg(feature = "external")]
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -43,7 +43,7 @@ fn trainer(extra: &[&str]) -> Vec<String> {
 /// Number of harness arguments (exe included) before the `extra` of [`trainer`].
 const HARNESS_ARGS: usize = 6;
 
-/// Entry point of the fake trainer; a no-op unless run by `std/train.external`.
+/// Entry point of the fake trainer; a no-op unless run by `std/external`.
 #[test]
 #[ignore]
 fn child_entry() {
@@ -97,6 +97,26 @@ fn child_entry() {
                 "echo": echo(json!({ "args": args, "env": env, "config": config })),
             }));
         }
+        // Reads the `dataset` input, writes a `features` and a `metrics` output.
+        "analyze" => {
+            let inputs: Value =
+                serde_json::from_str(&std::fs::read_to_string("inputs.json").unwrap()).unwrap();
+            let entry = &inputs["inputs"]["dataset"];
+            assert_eq!(entry["manifest"]["kind"], "dataset");
+            let rows = std::fs::read_to_string(format!("{}/out", entry["path"].as_str().unwrap()))
+                .or_else(|_| {
+                    let dir = entry["path"].as_str().unwrap();
+                    let f = std::fs::read_dir(dir).unwrap().next().unwrap().unwrap();
+                    std::fs::read_to_string(f.path())
+                })
+                .unwrap();
+            std::fs::write("feat.csv", rows).unwrap();
+            std::fs::write("m.json", "{}").unwrap();
+            produced(json!({
+                "features": { "path": "feat.csv", "kind": "features", "format": "csv" },
+                "metrics": { "path": "m.json", "kind": "metrics", "format": "json" },
+            }));
+        }
         "leak" => {
             eprint!("token={}", std::env::var("TRAIN_TOKEN").unwrap_or_default());
             std::process::exit(3);
@@ -134,10 +154,10 @@ fn child_entry() {
 // Harness (test side)
 // ---------------------------------------------------------------------------------------------
 
-/// Produces the `features` artifact fed to the trainer.
-struct Features(BlockSpec);
+/// Produces an artifact of the kind declared by its `out` port, fed to the external block.
+struct Source(BlockSpec);
 
-impl Block for Features {
+impl Block for Source {
     fn spec(&self) -> &BlockSpec {
         &self.0
     }
@@ -148,8 +168,9 @@ impl Block for Features {
         _inputs: Inputs,
     ) -> BoxFuture<'a, Result<BlockOutcome, Error>> {
         Box::pin(async {
+            let kind = self.0.outputs[0].kind;
             let draft = OutputDraft::new(
-                Manifest::new(ArtifactKind::Features, "csv"),
+                Manifest::new(kind, "csv"),
                 DraftPayload::Bytes(b"x,y\n1,2\n".to_vec()),
             );
             Ok(BlockOutcome::Produced(
@@ -159,19 +180,32 @@ impl Block for Features {
     }
 }
 
-/// `features` → `train` (`std/train.external` configured with `with`).
-fn pipeline(with: Value) -> ValidatedPipeline {
+/// `source` (artifact of `kind`) → `train` (`std/external`, input port `port`). The default
+/// ports are `inputs: {train: features}` and `outputs: {model: model}`; `with` overrides them.
+fn pipeline_from(
+    source: &'static str,
+    kind: ArtifactKind,
+    port: &str,
+    with: Value,
+) -> ValidatedPipeline {
     let mut registry = BlockRegistry::new();
     mallops_std::register_std(&mut registry).unwrap();
-    let spec = BlockSpec::new("test/features", "1", Stage::Preprocess)
-        .with_output(Port::new("out", ArtifactKind::Features));
-    registry.register(Arc::new(Features(spec))).unwrap();
-    let mut b = PipelineBuilder::new("train-external");
-    b.block("features", "test/features".parse().unwrap());
-    b.block("train", "std/train.external".parse().unwrap())
-        .input("train", "features.out")
-        .with(with);
+    let spec = BlockSpec::new(source, "1", Stage::Preprocess).with_output(Port::new("out", kind));
+    registry.register(Arc::new(Source(spec))).unwrap();
+    let mut cfg = json!({ "inputs": { "train": "features" }, "outputs": { "model": "model" } });
+    cfg.as_object_mut()
+        .unwrap()
+        .extend(with.as_object().unwrap().clone());
+    let mut b = PipelineBuilder::new("external");
+    b.block("features", source.parse().unwrap());
+    b.block("train", "std/external".parse().unwrap())
+        .input(port, "features.out")
+        .with(cfg);
     b.build(&registry).unwrap()
+}
+
+fn pipeline(with: Value) -> ValidatedPipeline {
+    pipeline_from("test/features", ArtifactKind::Features, "train", with)
 }
 
 /// `with:` running the fake trainer in `mode`, plus the `extra` top-level fields.
@@ -236,7 +270,10 @@ impl Env {
 }
 
 async fn run_with(cfg: RuntimeConfig, with: Value) -> RunSummary {
-    let pipeline = pipeline(with);
+    run_pipeline(cfg, pipeline(with)).await
+}
+
+async fn run_pipeline(cfg: RuntimeConfig, pipeline: ValidatedPipeline) -> RunSummary {
     tokio::time::timeout(LIMIT, Runtime::new(cfg).run(&pipeline))
         .await
         .expect("run timed out")
@@ -273,11 +310,11 @@ async fn wait_for_file(path: &Path) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// train_external_contract_v1
+// external_contract_v1
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn train_external_contract_v1_files_inputs_and_manifest() {
+async fn external_contract_v1_files_inputs_and_manifest() {
     let env = Env::new();
     let summary = env
         .run(with_mode(
@@ -332,7 +369,7 @@ async fn train_external_contract_v1_files_inputs_and_manifest() {
 }
 
 #[tokio::test]
-async fn train_external_contract_v1_skipped_status() {
+async fn external_contract_v1_skipped_status() {
     let env = Env::new();
     let outputs =
         json!({ "protocol_version": 1, "status": "skipped", "skip_reason": "nothing new" });
@@ -349,7 +386,7 @@ async fn train_external_contract_v1_skipped_status() {
 }
 
 #[tokio::test]
-async fn train_external_contract_v1_rejects_wrong_outputs_version() {
+async fn external_contract_v1_rejects_wrong_outputs_version() {
     let env = Env::new();
     let outputs = json!({ "protocol_version": 2, "status": "produced" });
     let summary = env
@@ -363,11 +400,11 @@ async fn train_external_contract_v1_rejects_wrong_outputs_version() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// train_external_security
+// external_security
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn train_external_security_argv_is_literal() {
+async fn external_security_argv_is_literal() {
     let env = Env::new();
     let meta = ["$HOME;echo x", "|", "`id`"];
     let mut with = with_mode("echo", json!({ "outputs": echo_outputs() }));
@@ -377,7 +414,7 @@ async fn train_external_security_argv_is_literal() {
 }
 
 #[tokio::test]
-async fn train_external_security_env_and_secrets() {
+async fn external_security_env_and_secrets() {
     // Both are set by cargo in this process; only the listed one reaches the child.
     let pkg = std::env::var("CARGO_PKG_NAME").expect("CARGO_PKG_NAME set by cargo");
     assert!(std::env::var("CARGO_MANIFEST_DIR").is_ok());
@@ -398,7 +435,7 @@ async fn train_external_security_env_and_secrets() {
 }
 
 #[tokio::test]
-async fn train_external_security_secret_redacted_from_logs() {
+async fn external_security_secret_redacted_from_logs() {
     let env = Env::new();
     let summary = env
         .run(with_mode("leak", json!({ "secrets": ["TRAIN_TOKEN"] })))
@@ -409,7 +446,7 @@ async fn train_external_security_secret_redacted_from_logs() {
 }
 
 #[tokio::test]
-async fn train_external_security_rejects_escaping_output_paths() {
+async fn external_security_rejects_escaping_output_paths() {
     let absolute = std::env::temp_dir().join("model.bin");
     let mut paths = vec![
         "..".to_owned(),
@@ -431,11 +468,11 @@ async fn train_external_security_rejects_escaping_output_paths() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// train_external_timeout_and_cancel
+// external_timeout_and_cancel
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn train_external_timeout_and_cancel_timeout_fails_node() {
+async fn external_block_timeout_and_cancel_timeout_fails_node() {
     let env = Env::new();
     let ready = env.root.path().join("ready");
     let started = Instant::now();
@@ -455,7 +492,7 @@ async fn train_external_timeout_and_cancel_timeout_fails_node() {
 }
 
 #[tokio::test]
-async fn train_external_timeout_and_cancel_cancel_marks_node_cancelled() {
+async fn external_block_timeout_and_cancel_cancel_marks_node_cancelled() {
     let env = Env::new();
     let dir = tempfile::tempdir().unwrap();
     let ready = dir.path().join("ready");
@@ -480,7 +517,7 @@ async fn train_external_timeout_and_cancel_cancel_marks_node_cancelled() {
 }
 
 #[tokio::test]
-async fn train_external_timeout_and_cancel_stderr_capped_in_error() {
+async fn external_block_timeout_and_cancel_stderr_capped_in_error() {
     let env = Env::new();
     let summary = env
         .run(with_mode("noisy", json!({ "log_cap_bytes": 64 })))
@@ -493,11 +530,11 @@ async fn train_external_timeout_and_cancel_stderr_capped_in_error() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// train_external_ports_and_cache
+// external_ports_and_cache
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn train_external_ports_and_cache_flavor_on_model_port() {
+fn external_ports_and_cache_flavor_on_model_port() {
     let pipeline = pipeline(with_mode("count", json!({ "flavor": "onnx" })));
     let node = pipeline.nodes().iter().find(|n| n.id == "train").unwrap();
     let model = &node.ports.outputs[0];
@@ -511,7 +548,7 @@ fn runs(counter: &Path) -> usize {
 }
 
 #[tokio::test]
-async fn train_external_ports_and_cache_reruns_without_watch_files() {
+async fn external_ports_and_cache_reruns_without_watch_files() {
     let env = Env::new();
     let dir = tempfile::tempdir().unwrap();
     let counter = dir.path().join("count");
@@ -526,7 +563,7 @@ async fn train_external_ports_and_cache_reruns_without_watch_files() {
 }
 
 #[tokio::test]
-async fn train_external_ports_and_cache_watch_files_enable_cache() {
+async fn external_ports_and_cache_watch_files_enable_cache() {
     let env = Env::new();
     let dir = tempfile::tempdir().unwrap();
     let counter = dir.path().join("count");
@@ -548,4 +585,85 @@ async fn train_external_ports_and_cache_watch_files_enable_cache() {
     let summary = env.run(with).await;
     assert!(!train(&summary).cached);
     assert_eq!(runs(&counter), 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// external_block: generic ports (issue #52)
+// ---------------------------------------------------------------------------------------------
+
+/// A non-training step: `dataset` in, `features` + `metrics` out, committed by the runtime.
+#[tokio::test]
+async fn external_block_custom_ports_dataset_to_features_and_metrics() {
+    let env = Env::new();
+    let with = with_mode(
+        "analyze",
+        json!({
+            "inputs": { "dataset": "dataset" },
+            "outputs": { "features": "features", "metrics": "metrics" },
+        }),
+    );
+    let pipeline = pipeline_from("test/dataset", ArtifactKind::Dataset, "dataset", with);
+    let summary = run_pipeline(env.config(), pipeline).await;
+    let node = train(&summary);
+    assert_eq!(node.status, Status::Succeeded, "{node:?}");
+    assert_eq!(node.outputs.len(), 2);
+    assert_eq!(env.payload(&node.outputs["features"]).await, "x,y\n1,2\n");
+    assert_eq!(env.payload(&node.outputs["metrics"]).await, "{}");
+}
+
+/// A training-shaped config: `train: features` → `model: model` + `flavor`.
+#[tokio::test]
+async fn external_block_training_shaped_config_sets_flavor() {
+    let env = Env::new();
+    let summary = env
+        .run(with_mode(
+            "contract",
+            json!({
+                "flavor": "onnx",
+                "inputs": { "train": "features" },
+                "outputs": { "model": "model", "echo": "metrics" },
+            }),
+        ))
+        .await;
+    let node = train(&summary);
+    assert_eq!(node.status, Status::Succeeded, "{node:?}");
+    let model = env
+        .store
+        .get(&node.outputs["model"])
+        .await
+        .unwrap()
+        .expect("model committed");
+    assert_eq!(model.manifest().flavor.as_deref(), Some("onnx"));
+}
+
+#[test]
+fn external_block_validate_config_rejects_bad_ports() {
+    let mut registry = BlockRegistry::new();
+    mallops_std::register_std(&mut registry).unwrap();
+    let block = registry.get(&"std/external".parse().unwrap()).unwrap();
+    let ok = json!({
+        "command": ["x"], "inputs": { "d": "dataset" }, "outputs": { "m": "metrics" },
+    });
+    block.validate_config(&ok).unwrap();
+    let without = |key: &str| {
+        let mut c = ok.clone();
+        c.as_object_mut().unwrap().remove(key);
+        c
+    };
+    let mut flavor_no_model = ok.clone();
+    flavor_no_model["flavor"] = json!("onnx");
+    for bad in [without("inputs"), without("outputs"), flavor_no_model] {
+        assert!(
+            matches!(block.validate_config(&bad), Err(Error::Config(_))),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn external_block_nonzero_exit_fails_node() {
+    let env = Env::new();
+    let summary = env.run(with_mode("noisy", json!({}))).await;
+    let msg = runtime_error(&summary);
+    assert!(msg.contains("failed"), "{msg}");
 }

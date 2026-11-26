@@ -1,5 +1,5 @@
-//! `std/train.external`: runs any external command as a training step through the versioned
-//! file contract v1 (see [`contract`]), without Rust bindings (SPEC FR-TRN-3, ADR-0003).
+//! `std/external`: runs any external command as a block with user-declared ports through the
+//! versioned file contract v1 (see [`contract`]), without Rust bindings (ADR-0003).
 
 pub(crate) mod contract;
 pub(crate) mod process;
@@ -14,23 +14,17 @@ use mallops_core::{
 };
 use serde::Deserialize;
 
-use super::has_secret_ref;
+use crate::has_secret_ref;
 use contract::{CONFIG_FILE, ConfigFile, INPUTS_FILE, InputEntry, InputsFile, PROTOCOL_VERSION};
 use process::{ChildSpec, run_child};
 
-/// Default required input port.
-pub(crate) const TRAIN: &str = "train";
-/// Default optional input port.
-pub(crate) const VAL: &str = "val";
-/// Default output port.
-pub(crate) const MODEL: &str = "model";
 /// Default `log_cap_bytes` (per stream).
 pub(crate) const DEFAULT_LOG_CAP: usize = 1024 * 1024;
 
-/// `with:` of `std/train.external`.
+/// `with:` of `std/external`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TrainExternalConfig {
+pub(crate) struct ExternalConfig {
     /// argv; elements starting with `./` or `../` are made absolute against mallops' cwd.
     pub(crate) command: Vec<String>,
     #[serde(default)]
@@ -51,15 +45,13 @@ pub(crate) struct TrainExternalConfig {
     /// Files (relative to mallops' cwd) whose path+content make the block cacheable.
     #[serde(default)]
     pub(crate) watch_files: Vec<PathBuf>,
-    /// Input ports (name → kind); replaces the defaults `train` + optional `val`.
-    #[serde(default)]
-    pub(crate) inputs: Option<BTreeMap<String, ArtifactKind>>,
-    /// Output ports (name → kind); replaces the default `model`.
-    #[serde(default)]
-    pub(crate) outputs: Option<BTreeMap<String, ArtifactKind>>,
+    /// Input ports (name → kind), all required; may be empty.
+    pub(crate) inputs: BTreeMap<String, ArtifactKind>,
+    /// Output ports (name → kind), all required; at least one.
+    pub(crate) outputs: BTreeMap<String, ArtifactKind>,
 }
 
-impl TrainExternalConfig {
+impl ExternalConfig {
     /// Deserializes and checks `with:` (D13-9); every error is an [`Error::Config`].
     pub(crate) fn parse(config: &serde_json::Value) -> Result<Self, Error> {
         let cfg = Self::deserialize(config).map_err(|e| Error::Config(e.to_string()))?;
@@ -119,45 +111,41 @@ impl TrainExternalConfig {
             return err("log_cap_bytes must be greater than 0".into());
         }
         for (field, ports) in [("inputs", &self.inputs), ("outputs", &self.outputs)] {
-            for name in ports.iter().flat_map(BTreeMap::keys) {
+            for name in ports.keys() {
                 if !is_port_name(name) {
                     return err(format!("{field}: port `{name}` must match [a-z][a-z0-9_]*"));
                 }
             }
         }
+        if self.outputs.is_empty() {
+            return err("outputs must declare at least one port".into());
+        }
+        if self.flavor.is_some()
+            && !self
+                .inputs
+                .values()
+                .chain(self.outputs.values())
+                .any(|k| *k == ArtifactKind::Model)
+        {
+            return err("flavor requires at least one port of kind `model`".into());
+        }
         Ok(())
     }
 
-    /// Input and output ports: `inputs`/`outputs` replace the defaults; `flavor` is set on
-    /// every `model` port.
-    fn ports(&self, spec: &BlockSpec) -> ResolvedPorts {
-        let custom = |ports: &BTreeMap<String, ArtifactKind>| {
+    /// Declared ports, all required; `flavor` is set on every `model` port.
+    fn ports(&self) -> ResolvedPorts {
+        let ports = |ports: &BTreeMap<String, ArtifactKind>| {
             ports
                 .iter()
-                .map(|(name, kind)| Port::new(name.clone(), *kind))
+                .map(|(name, kind)| match &self.flavor {
+                    Some(f) if *kind == ArtifactKind::Model => {
+                        Port::new(name.clone(), *kind).with_flavor(f.clone())
+                    }
+                    _ => Port::new(name.clone(), *kind),
+                })
                 .collect::<Vec<_>>()
         };
-        let flavored = |ports: Vec<Port>| {
-            ports
-                .into_iter()
-                .map(|p| match &self.flavor {
-                    Some(f) if p.kind == ArtifactKind::Model => p.with_flavor(f.clone()),
-                    _ => p,
-                })
-                .collect()
-        };
-        ResolvedPorts::new(
-            flavored(
-                self.inputs
-                    .as_ref()
-                    .map_or_else(|| spec.inputs.clone(), custom),
-            ),
-            flavored(
-                self.outputs
-                    .as_ref()
-                    .map_or_else(|| spec.outputs.clone(), custom),
-            ),
-        )
+        ResolvedPorts::new(ports(&self.inputs), ports(&self.outputs))
     }
 
     /// argv with `./` and `../` arguments made absolute against `pipeline_dir` (D13-8), rebuilt
@@ -230,7 +218,7 @@ fn io_err(path: &Path) -> impl Fn(std::io::Error) -> Error + '_ {
 /// BLAKE3 of each watched file's path and content, in path order (D13-10).
 fn hash_watch_files(files: &[PathBuf]) -> Result<Digest, Error> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mallops/train.external/watch_files/v1");
+    hasher.update(b"mallops/external/watch_files/v1");
     for path in files.iter().collect::<BTreeSet<_>>() {
         let meta = std::fs::metadata(path).map_err(io_err(path))?;
         if !meta.is_file() {
@@ -288,36 +276,34 @@ fn tail(s: &str, max: usize) -> &str {
 /// Bytes of stderr quoted in the error of a failed command.
 const STDERR_TAIL: usize = 4096;
 
-/// The `std/train.external` block.
-pub(crate) struct TrainExternal(BlockSpec);
+/// The `std/external` block.
+pub(crate) struct External(BlockSpec);
 
-impl TrainExternal {
+impl External {
     pub(crate) fn new() -> Self {
         Self(
-            BlockSpec::new("std/train.external", "0.1.0", Stage::Train)
-                .with_input(Port::new(TRAIN, ArtifactKind::Features))
-                .with_input(Port::new(VAL, ArtifactKind::Features).optional())
-                .with_output(Port::new(MODEL, ArtifactKind::Model)),
+            // No static ports: they come from `with.inputs` / `with.outputs`.
+            BlockSpec::new("std/external", "0.1.0", Stage::Custom),
         )
     }
 }
 
-impl Block for TrainExternal {
+impl Block for External {
     fn spec(&self) -> &BlockSpec {
         &self.0
     }
 
     fn validate_config(&self, config: &serde_json::Value) -> Result<(), Error> {
-        TrainExternalConfig::parse(config).map(|_| ())
+        ExternalConfig::parse(config).map(|_| ())
     }
 
     fn resolve_ports(&self, config: &serde_json::Value) -> Result<ResolvedPorts, Error> {
-        Ok(TrainExternalConfig::parse(config)?.ports(&self.0))
+        Ok(ExternalConfig::parse(config)?.ports())
     }
 
     fn cache_policy<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<CachePolicy, Error>> {
         Box::pin(async move {
-            let cfg = TrainExternalConfig::parse(ctx.config())?;
+            let cfg = ExternalConfig::parse(ctx.config())?;
             if cfg.watch_files.is_empty() {
                 return Ok(CachePolicy::Uncacheable);
             }
@@ -337,7 +323,7 @@ impl Block for TrainExternal {
             if ctx.cancel().is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let cfg: TrainExternalConfig = ctx.config_as()?;
+            let cfg: ExternalConfig = ctx.config_as()?;
             cfg.check()?;
             // ponytail: sync fs calls on the async thread, a handful of small files and dirs.
             let workdir = ctx.workdir();
@@ -441,14 +427,18 @@ mod tests {
     use super::*;
 
     fn config_err(config: serde_json::Value) -> String {
-        match TrainExternal::new().validate_config(&config) {
+        match External::new().validate_config(&config) {
             Err(Error::Config(m)) => m,
             other => panic!("expected Error::Config for {config}, got {other:?}"),
         }
     }
 
     fn with(extra: serde_json::Value) -> serde_json::Value {
-        let mut cfg = json!({ "command": ["python", "./train.py"] });
+        let mut cfg = json!({
+            "command": ["python", "./train.py"],
+            "inputs": { "train": "features" },
+            "outputs": { "model": "model" },
+        });
         cfg.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
@@ -456,32 +446,34 @@ mod tests {
     }
 
     #[test]
-    fn train_external_validate_config_accepts_full_config() {
+    fn external_validate_config_accepts_full_config() {
         let cfg = with(json!({
             "flavor": "onnx", "params": { "lr": 0.1 }, "env": ["HOME", "CUDA_VISIBLE_DEVICES"],
             "secrets": ["HF_TOKEN"], "timeout_secs": 60, "log_cap_bytes": 10,
             "watch_files": ["train.py"], "inputs": { "data": "dataset" },
             "outputs": { "model": "model", "report_1": "metrics" },
         }));
-        TrainExternal::new().validate_config(&cfg).unwrap();
+        External::new().validate_config(&cfg).unwrap();
     }
 
     #[test]
-    fn train_external_validate_config_command() {
+    fn external_validate_config_command() {
         assert!(config_err(json!({})).contains("command"));
-        assert!(config_err(json!({ "command": [] })).contains("must not be empty"));
-        assert!(config_err(json!({ "command": [""] })).contains("command[0]"));
-        assert!(config_err(json!({ "command": ["a"], "bogus": 1 })).contains("unknown field"));
+        assert!(config_err(with(json!({ "command": [] }))).contains("must not be empty"));
+        assert!(config_err(with(json!({ "command": [""] }))).contains("command[0]"));
+        assert!(
+            config_err(with(json!({ "command": ["a"], "bogus": 1 }))).contains("unknown field")
+        );
         // An empty argument after the program is legitimate.
-        TrainExternal::new()
-            .validate_config(&json!({ "command": ["a", ""] }))
+        External::new()
+            .validate_config(&with(json!({ "command": ["a", ""] })))
             .unwrap();
     }
 
     #[test]
-    fn train_external_validate_config_rejects_secret_refs() {
+    fn external_validate_config_rejects_secret_refs() {
         for cfg in [
-            json!({ "command": ["a", "--token=${secret:T}"] }),
+            with(json!({ "command": ["a", "--token=${secret:T}"] })),
             with(json!({ "params": { "nested": ["${secret:T}"] } })),
             with(json!({ "params": { "${secret:T}": 1 } })),
             with(json!({ "env": ["${secret:T}"] })),
@@ -494,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_validate_config_env_and_secret_names() {
+    fn external_validate_config_env_and_secret_names() {
         for bad in ["1A", "A-B", "", "A B"] {
             assert!(config_err(with(json!({ "env": [bad] }))).contains("valid variable name"));
             assert!(config_err(with(json!({ "secrets": [bad] }))).contains("valid variable name"));
@@ -517,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_validate_config_ports_limits_and_params() {
+    fn external_validate_config_ports_limits_and_params() {
         for bad in ["Train", "1x", "a-b", ""] {
             assert!(config_err(with(json!({ "inputs": { bad: "features" } }))).contains("port"));
             assert!(config_err(with(json!({ "outputs": { bad: "model" } }))).contains("port"));
@@ -531,38 +523,67 @@ mod tests {
     }
 
     #[test]
-    fn train_external_ports_and_cache_default_ports() {
-        let block = TrainExternal::new();
-        let ports = block.resolve_ports(&with(json!({}))).unwrap();
-        assert_eq!(ports, ResolvedPorts::from(block.spec()));
-        let train = &ports.inputs[0];
-        assert_eq!(
-            (train.name.as_ref(), train.kind, train.required),
-            (TRAIN, ArtifactKind::Features, true)
+    fn external_validate_config_requires_ports() {
+        let base = json!({ "command": ["a"] });
+        let cmd = |extra: serde_json::Value| {
+            let mut c = base.clone();
+            c.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            c
+        };
+        assert!(config_err(base.clone()).contains("inputs"));
+        assert!(config_err(cmd(json!({ "inputs": {} }))).contains("outputs"));
+        assert!(config_err(cmd(json!({ "outputs": { "m": "model" } }))).contains("inputs"));
+        assert!(
+            config_err(cmd(json!({ "inputs": {}, "outputs": {} }))).contains("at least one port")
         );
-        let val = &ports.inputs[1];
-        assert_eq!(
-            (val.name.as_ref(), val.kind, val.required),
-            (VAL, ArtifactKind::Features, false)
-        );
-        assert_eq!(ports.outputs[0].name, MODEL);
-        assert!(ports.outputs[0].flavors.is_empty());
-
-        let ports = block
-            .resolve_ports(&with(json!({ "flavor": "onnx" })))
+        // No inputs is fine.
+        External::new()
+            .validate_config(&cmd(json!({ "inputs": {}, "outputs": { "m": "metrics" } })))
             .unwrap();
-        assert_eq!(ports.outputs[0].flavors, ["onnx"]);
-        assert!(ports.inputs.iter().all(|p| p.flavors.is_empty()));
     }
 
     #[test]
-    fn train_external_ports_and_cache_override_ports() {
+    fn external_validate_config_flavor_needs_model_port() {
+        let msg = config_err(with(json!({
+            "flavor": "onnx", "inputs": { "d": "dataset" }, "outputs": { "r": "metrics" },
+        })));
+        assert!(msg.contains("flavor") && msg.contains("model"), "{msg}");
+        // A model port on the input side is enough.
+        External::new()
+            .validate_config(&with(json!({
+                "flavor": "onnx", "inputs": { "m": "model" }, "outputs": { "r": "metrics" },
+            })))
+            .unwrap();
+        // The secret check still comes first.
+        assert!(
+            config_err(with(json!({
+                "flavor": "${secret:T}", "inputs": {}, "outputs": { "r": "metrics" },
+            })))
+            .contains("use `secrets:`")
+        );
+    }
+
+    #[test]
+    fn external_ports_and_cache_flavor_on_model_ports_only() {
+        let ports = External::new()
+            .resolve_ports(&with(json!({ "flavor": "onnx" })))
+            .unwrap();
+        assert_eq!(ports.inputs[0].name, "train");
+        assert!(ports.inputs[0].required && ports.inputs[0].flavors.is_empty());
+        assert_eq!(ports.outputs[0].name, "model");
+        assert_eq!(ports.outputs[0].flavors, ["onnx"]);
+    }
+
+    #[test]
+    fn external_ports_and_cache_override_ports() {
         let cfg = with(json!({
             "flavor": "xgb",
             "inputs": { "data": "dataset", "base": "model" },
             "outputs": { "booster": "model", "report": "metrics" },
         }));
-        let ports = TrainExternal::new().resolve_ports(&cfg).unwrap();
+        let ports = External::new().resolve_ports(&cfg).unwrap();
         let summary = |ps: &[Port]| {
             ps.iter()
                 .map(|p| (p.name.to_string(), p.kind, p.required, p.flavors.clone()))
@@ -609,21 +630,21 @@ mod tests {
             RunId::new(),
             workdir.to_path_buf(),
             store,
-            json!({ "command": [missing] }),
+            with(json!({ "command": [missing] })),
             CancelSource::new().token(),
             Arc::new(MemorySecretProvider::default()),
         );
         let inputs = Inputs::new().with(port, Artifact::new(id, manifest));
-        TrainExternal::new().run(&ctx, inputs).await
+        External::new().run(&ctx, inputs).await
     }
 
     #[tokio::test]
-    async fn train_external_contract_v1_inputs_writable_after_run() {
+    async fn external_contract_v1_inputs_writable_after_run() {
         // Not unix-only: on Windows read-only inputs would make the cleanup fail.
         let dir = tempfile::tempdir().unwrap();
         let workdir = dir.path().join("w");
         std::fs::create_dir(&workdir).unwrap();
-        let err = run_one_input(TRAIN, &workdir).await.unwrap_err();
+        let err = run_one_input("train", &workdir).await.unwrap_err();
         assert!(
             matches!(&err, Error::Runtime(m) if m.contains("failed to spawn")),
             "{err:?}"
@@ -633,7 +654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_security_rejects_bad_input_port_names() {
+    async fn external_security_rejects_bad_input_port_names() {
         for port in ["../x", "/abs"] {
             let dir = tempfile::tempdir().unwrap();
             let err = run_one_input(port, dir.path()).await.unwrap_err();
@@ -645,24 +666,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_ports_and_cache_uncacheable_by_default() {
+    async fn external_ports_and_cache_uncacheable_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_with(with(json!({})), dir.path());
         assert_eq!(
-            TrainExternal::new().cache_policy(&ctx).await.unwrap(),
+            External::new().cache_policy(&ctx).await.unwrap(),
             CachePolicy::Uncacheable
         );
     }
 
     #[tokio::test]
-    async fn train_external_ports_and_cache_watch_files() {
+    async fn external_ports_and_cache_watch_files() {
         // Absolute paths: the test must not depend on (or change) the process cwd.
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("train.py");
         let b = dir.path().join("lib.py");
         std::fs::write(&a, "v1").unwrap();
         std::fs::write(&b, "x").unwrap();
-        let block = TrainExternal::new();
+        let block = External::new();
         let policy = |files: serde_json::Value| {
             let ctx = ctx_with(with(json!({ "watch_files": files })), dir.path());
             let block = &block;
@@ -685,10 +706,10 @@ mod tests {
     }
 
     #[test]
-    fn train_external_argv_resolves_relative_paths() {
-        let cfg = TrainExternalConfig::parse(&json!({
+    fn external_argv_resolves_relative_paths() {
+        let cfg = ExternalConfig::parse(&with(json!({
             "command": ["./a/b.py", "../x", "python", "data/x", "--out=./m"],
-        }))
+        })))
         .unwrap();
         let base = Path::new("/pipe/line");
         let argv = cfg.argv(base).unwrap();
@@ -699,8 +720,8 @@ mod tests {
     }
 
     #[test]
-    fn train_external_child_env_from_lookup() {
-        let cfg = TrainExternalConfig::parse(&with(json!({
+    fn external_child_env_from_lookup() {
+        let cfg = ExternalConfig::parse(&with(json!({
             "env": ["HOME", "UNSET"], "secrets": ["TOKEN"],
         })))
         .unwrap();
@@ -718,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_stderr_tail_respects_char_boundaries() {
+    fn external_stderr_tail_respects_char_boundaries() {
         assert_eq!(tail("abcdef", 3), "def");
         assert_eq!(tail("ab", 10), "ab");
         assert_eq!(tail("aé", 1), "");
@@ -726,7 +747,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn train_external_security_inputs_files_readonly_dirs_writable() {
+    fn external_security_inputs_files_readonly_dirs_writable() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/f"), "x").unwrap();

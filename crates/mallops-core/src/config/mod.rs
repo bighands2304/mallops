@@ -532,7 +532,9 @@ blocks:
     use: std/external
     in: { train: features.train }
     with:
-      command: ["python", "train.py"]
+      command: ["python", "./train.py"]
+      inputs: { train: features }
+      outputs: { model: model }
       flavor: sklearn-pickle
       params: { n_estimators: 200 }
   eval:

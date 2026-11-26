@@ -323,8 +323,7 @@ impl Block for External {
             if ctx.cancel().is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let cfg: ExternalConfig = ctx.config_as()?;
-            cfg.check()?;
+            let cfg = ExternalConfig::parse(ctx.config())?;
             // ponytail: sync fs calls on the async thread, a handful of small files and dirs.
             let workdir = ctx.workdir();
             #[cfg(unix)]
@@ -443,6 +442,38 @@ mod tests {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         cfg
+    }
+
+    #[test]
+    fn external_spec_is_static_and_portless() {
+        let block = External::new();
+        let spec = block.spec();
+        assert_eq!(spec.id, "std/external");
+        assert_eq!(spec.version, "0.1.0");
+        assert_eq!(spec.stage, Stage::Custom);
+        assert!(spec.inputs.is_empty() && spec.outputs.is_empty());
+    }
+
+    #[test]
+    fn external_hash_watch_files_golden() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, b"alpha").unwrap();
+        std::fs::write(&b, b"beta").unwrap();
+        let mut h = blake3::Hasher::new();
+        h.update(b"mallops/external/watch_files/v1");
+        for (path, content) in [(&a, &b"alpha"[..]), (&b, &b"beta"[..])] {
+            let name = path.to_str().unwrap().as_bytes();
+            h.update(&(name.len() as u64).to_le_bytes());
+            h.update(name);
+            h.update(&(content.len() as u64).to_le_bytes());
+            h.update(content);
+        }
+        let expected = Digest::from_bytes(*h.finalize().as_bytes());
+        // input order must not matter
+        assert_eq!(hash_watch_files(&[b.clone(), a.clone()]).unwrap(), expected);
+        assert_eq!(hash_watch_files(&[a, b]).unwrap(), expected);
     }
 
     #[test]

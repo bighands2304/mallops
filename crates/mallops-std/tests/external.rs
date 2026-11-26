@@ -1,4 +1,4 @@
-//! Acceptance tests of `std/external` through the public API (issue #13).
+//! Acceptance tests of `std/external` through the public API (issues #13 and #52).
 //!
 //! The fake trainer is this test binary, re-executed on the ignored [`child_entry`] test: it
 //! reads its mode from `params.mode` in `config.json` (its cwd). No shell, no Python, so the
@@ -103,13 +103,9 @@ fn child_entry() {
                 serde_json::from_str(&std::fs::read_to_string("inputs.json").unwrap()).unwrap();
             let entry = &inputs["inputs"]["dataset"];
             assert_eq!(entry["manifest"]["kind"], "dataset");
-            let rows = std::fs::read_to_string(format!("{}/out", entry["path"].as_str().unwrap()))
-                .or_else(|_| {
-                    let dir = entry["path"].as_str().unwrap();
-                    let f = std::fs::read_dir(dir).unwrap().next().unwrap().unwrap();
-                    std::fs::read_to_string(f.path())
-                })
-                .unwrap();
+            let dir = entry["path"].as_str().unwrap();
+            let f = std::fs::read_dir(dir).unwrap().next().unwrap().unwrap();
+            let rows = std::fs::read_to_string(f.path()).unwrap();
             std::fs::write("feat.csv", rows).unwrap();
             std::fs::write("m.json", "{}").unwrap();
             produced(json!({
@@ -652,7 +648,17 @@ fn external_block_validate_config_rejects_bad_ports() {
     };
     let mut flavor_no_model = ok.clone();
     flavor_no_model["flavor"] = json!("onnx");
-    for bad in [without("inputs"), without("outputs"), flavor_no_model] {
+    let mut empty_outputs = ok.clone();
+    empty_outputs["outputs"] = json!({});
+    let mut empty_inputs = ok.clone();
+    empty_inputs["inputs"] = json!({});
+    block.validate_config(&empty_inputs).unwrap();
+    for bad in [
+        without("inputs"),
+        without("outputs"),
+        flavor_no_model,
+        empty_outputs,
+    ] {
         assert!(
             matches!(block.validate_config(&bad), Err(Error::Config(_))),
             "{bad}"

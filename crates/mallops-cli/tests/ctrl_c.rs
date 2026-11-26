@@ -40,7 +40,7 @@ fn read_pid(path: &Path) -> Option<String> {
 }
 
 #[test]
-fn ctrl_c_cancels_run_and_kills_trainer_process_group() {
+fn ctrl_c_cancels_run_and_kills_external_process_group() {
     let wd = WorkDir::new();
     let pid_file = wd.path().join("grandchild.pid");
     // The pid file path is `$1` (quoted), written atomically so `read_pid` never sees it partial.

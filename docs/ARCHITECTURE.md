@@ -61,7 +61,7 @@ Crates are created only when implemented. Splitting `mallops-std` into per-stage
 | Crate | Depends on | Dependencies |
 |---|---|---|
 | `mallops-core` | — | Core allowlist: `tokio`, `serde`, `serde_json`, `blake3`, `tracing`, `thiserror`, `ulid`, `tempfile`; optional features: `yaml` (`yaml_serde`, default), `schema` (`schemars`) ([ADR-0007](adr/0007-core-contracts-revision.md)) |
-| `mallops-std` | core | workspace `blake3`, `serde`, `serde_json`, `tokio` (already in the graph via core); optional behind per-block Cargo features (`--no-default-features` pulls in no Arrow or Parquet crate): `ingest-csv` (`arrow-csv` `60`), `ingest-parquet`, meta-feature `ingest = ["ingest-csv", "ingest-parquet"]` (default), `preprocess-tabular` (default; `arrow-cast` `60`, `arrow-ord` `60`, `arrow-select` `60`, internal SplitMix64+Fisher-Yates PRNG with no `rand`), `train-external` (`tracing`, `tokio` features `io-util`, `process`, `time`; Unix only: `nix` `0.32` with `default-features = false, features = ["signal"]` for a safe `killpg`), `train-smartcore` (`smartcore` `0.7` with `default-features = false, features = ["std"]`, plus `arrow-cast` `60` and `arrow-select` `60`), the Arrow blocks all sharing internal `_ingest` (`arrow-array` `60`, `arrow-schema` `60`, `parquet` `60` with `default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]` — codecs are for reading external Parquet files while outputs stay uncompressed); future features: `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
+| `mallops-std` | core | workspace `blake3`, `serde`, `serde_json`, `tokio` (already in the graph via core); optional behind per-block Cargo features (`--no-default-features` pulls in no Arrow or Parquet crate): `ingest-csv` (`arrow-csv` `60`), `ingest-parquet`, meta-feature `ingest = ["ingest-csv", "ingest-parquet"]` (default), `preprocess-tabular` (default; `arrow-cast` `60`, `arrow-ord` `60`, `arrow-select` `60`, internal SplitMix64+Fisher-Yates PRNG with no `rand`), `train-external` (`tracing`, `tokio` features `io-util`, `process`, `time`; Unix only: `nix` `0.32` with `default-features = false, features = ["signal"]` for a safe `killpg`), `predictor` (the `Predictor` contract and registry, no extra dependency), `predict-smartcore` (in-process, no extra dependency), `predict-external` (Python worker over NDJSON; `tokio` features `io-util`, `process`, `time`), `train-smartcore` (`smartcore` `0.7` with `default-features = false, features = ["std"]`, plus `arrow-cast` `60` and `arrow-select` `60`), the Arrow blocks all sharing internal `_ingest` (`arrow-array` `60`, `arrow-schema` `60`, `parquet` `60` with `default-features = false, features = ["arrow", "snap", "lz4", "flate2-zlib-rs", "zstd"]` — codecs are for reading external Parquet files while outputs stay uncompressed); future features: `ort`, `axum`, `object_store` (`store-s3`, `store-gcs`, `store-azure`), `rusqlite` (`lineage-sqlite`), … |
 | `mallops-cli` | core, std (features `train-external`, `train-smartcore`) | `clap` (`derive`), `anyhow`, `serde_json`, `tracing-subscriber` (`fmt`), `tokio` (`rt-multi-thread`, `signal` for Ctrl-C cancellation); dev: `insta`, `tempfile` |
 | `mallops-edge` | core, std (`profile-edge`, ADR-0008) | `tonic`, `rumqttc` (via `serve-mqtt`) |
 
@@ -392,24 +392,33 @@ flowchart LR
 In v0.1, the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) before promotion to `mallops-core` ahead of 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)):
 
 ```rust
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PredictInput {
     Json(serde_json::Value),
     Bytes { content_type: String, data: Vec<u8> },
 }
 
 pub trait Predictor: Send + Sync {
-    fn flavors(&self) -> &[&str];                       // e.g. ["smartcore-logistic", "smartcore-linear"], ["sklearn-pickle"]
-    fn executes_code(&self) -> bool;                    // true for pickle/joblib/torchscript
-    fn load(&self, pkg: &Artifact, workdir: &Path) -> BoxFuture<'_, Result<Box<dyn LoadedPredictor>, Error>>;
+    fn flavors(&self) -> &[&str];
+    fn executes_code(&self) -> bool;
+    fn load<'a>(
+        &'a self,
+        artifact: &'a Artifact,
+        payload_dir: &'a Path,
+    ) -> BoxFuture<'a, Result<Box<dyn LoadedPredictor>, Error>>;
 }
 
 pub trait LoadedPredictor: Send + Sync {
     fn predict(&self, input: PredictInput) -> BoxFuture<'_, Result<PredictInput, Error>>;
-    fn predict_batch(&self, inputs: Vec<PredictInput>) -> BoxFuture<'_, Result<Vec<PredictInput>, Error>>;
+    fn predict_batch(
+        &self,
+        inputs: Vec<PredictInput>,
+    ) -> BoxFuture<'_, Result<Vec<PredictInput>, Error>>;
 }
 ```
 
-Flavors where `executes_code()` is `true` are rejected by `mallops serve` unless `--trust-unsafe-flavors` is explicitly enabled.
+Consumers resolve a predictor through `PredictorRegistry`, which registers predictors by flavor atomically and enforces trust policy: flavors where `executes_code()` is `true` (such as `sklearn-pickle`) are rejected by `PredictorRegistry::get` with `Error::Config` unless `trust_unsafe_flavors` is explicitly passed (CLI: `--trust-unsafe-flavors`). See the full [Predictor contract reference](reference/predictor.md).
 
 ## 8. Edge and federated learning (v0.4)
 

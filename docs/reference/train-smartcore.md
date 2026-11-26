@@ -114,6 +114,8 @@ field order (no `HashMap`) and `serde_json` float formatting:
 
 ### Prediction rule
 
+Implemented in-process by [`SmartcorePredictor`](predictor.md#smartcorepredictor) without depending on `smartcore`:
+
 - **`logistic_regression`:** compute `p = 1 / (1 + exp(-(intercept + Σ coefficients[i] * x[i])))`;
   predict `classes[1]` when `p >= threshold`, otherwise `classes[0]`.
 - **`linear_regression`:** compute `y = intercept + Σ coefficients[i] * x[i]`.

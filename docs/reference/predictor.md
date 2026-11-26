@@ -388,21 +388,22 @@ The host maps this to `Error::Runtime("worker error: ValueError: missing feature
 | Standard predictor registered twice | `Error::Validation` | `"duplicate predictor flavor `<flavor>`"` |
 | Unknown flavor requested in `get` | `Error::Config` | `"no predictor for flavor `<flavor>`"` |
 | Code-executing flavor without trust opt-in | `Error::Config` | `"flavor `<flavor>` executes code from the artifact; pass --trust-unsafe-flavors to serve it"` |
-| Manifest kind is not `model` | `Error::Runtime` (smartcore) / `Error::Config` (external) | `"expected model artifact, got <kind>"` |
-| Manifest format is not `json` (`SmartcorePredictor`) | `Error::Runtime` | `"expected model format \`json\`, got \`<format>\`"` |
-| Missing or unsupported manifest flavor | `Error::Runtime` (smartcore) / `Error::Config` (external) | `"unsupported smartcore flavor \`<flavor>\`"` / `"unsupported flavor \`<flavor>\`"` |
+| Manifest kind is not `model` | `Error::Config` | `"expected a model artifact, got \`<kind>\`"` |
+| Manifest format is not `json` (`SmartcorePredictor`) | `Error::Config` | `"expected model format \`json\`, got \`<format>\`"` |
+| Missing manifest flavor (`SmartcorePredictor`) | `Error::Config` | `"model artifact manifest is missing \`flavor\`"` |
+| Unsupported manifest flavor | `Error::Config` | `"unsupported smartcore flavor \`<flavor>\`"` / `"unsupported flavor <flavor:?>"` (external, missing flavor included: `None`) |
 | Missing or invalid `model.json` / `model.pkl` | `Error::Runtime` | `<path>: <io error>` or `"invalid model.json: <serde error>"` |
 | Unsupported `model.json` schema version | `Error::Runtime` | `"unsupported model schema version <v>, expected 1"` |
 | Algorithm / flavor mismatch | `Error::Runtime` | `"manifest flavor \`<flavor>\` does not match model algorithm \`<alg>\`"` |
 | Empty or duplicate `features` in `model.json` | `Error::Runtime` | `"model \`features\` list must not be empty"` / `"duplicate feature \`<f>\` in model payload"` |
 | Empty `target` in `model.json` | `Error::Runtime` | `"model \`target\` must not be empty"` |
 | Coefficient length mismatch | `Error::Runtime` | `"model has <N> coefficients for <M> features"` |
-| Non-finite intercept, coefficient, or threshold | `Error::Runtime` | `"model \`<field>\` must be finite"` |
-| Logistic model with class count != 2 | `Error::Runtime` | `"logistic_regression model requires exactly 2 classes, got <N>"` |
+| Non-finite intercept, coefficients, or threshold | `Error::Runtime` | `"model \`intercept\` must be finite"` / `"model \`coefficients\` must all be finite"` / `"logistic_regression \`threshold\` must be finite"` |
+| Logistic model with class count != 2, or equal classes | `Error::Runtime` | `"logistic_regression model requires exactly 2 classes, got <N>"` / `"logistic_regression model requires 2 distinct classes"` |
 | Linear model specifying classes or threshold | `Error::Runtime` | `"linear_regression model must not specify \`<field>\`"` |
 | Input missing expected features or extra keys | `Error::Runtime` | `"missing feature \`<name>\`"` / `"unexpected feature \`<name>\`"` |
 | Input feature value is not finite number or bool | `Error::Runtime` | `"feature \`<name>\` must be a finite number or boolean"` |
-| Non-JSON input passed to smartcore/external | `Error::Runtime` | `"smartcore predictor expects a JSON object of feature values"` / `"sklearn-pickle takes JSON input, got \`<type>\` bytes"` |
+| Non-JSON input passed to smartcore/external | `Error::Runtime` | `"smartcore predictor expects a JSON object of feature values"` (non-object JSON) / `"smartcore predictor expects JSON input"` (bytes) / `"sklearn-pickle takes JSON input, got bytes"` |
 | Ambiguous payload directory in external predictor | `Error::Runtime` | `"<dir>: expected model.pkl or exactly one file, found <N> files"` |
 | Worker handshake timed out | `Error::Runtime` | `"worker handshake timed out after <duration>"` |
 | Request timed out | `Error::Runtime` | `"timed out after <duration>"` (worker killed, restarts on next request) |

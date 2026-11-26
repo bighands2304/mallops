@@ -276,7 +276,7 @@ Exit codes: `0` on success, `1` on configuration, validation, runtime, or store 
   "kind": "model",
   "format": "pickle",
   "flavor": "sklearn-pickle",
-  "io_schema": { "inputs": [{"name": "age", "dtype": "f64"}], "outputs": [{"name": "churned", "dtype": "f64"}] },
+  "io_schema": { "input": [{"name": "age", "type": "f64"}], "output": [{"name": "churned", "type": "f64"}] },
   "metadata": { "framework": "scikit-learn", "framework_version": "1.6.0" },
   "parents": ["<hash>", "<hash>"]
 }

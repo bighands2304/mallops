@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use mallops_core::{Artifact, ArtifactId, ArtifactKind, Error, Manifest};
@@ -16,7 +17,6 @@ use mallops_std::predictor::{
 };
 use serde_json::{Value, json};
 
-const WORKER_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/predictor/worker.py");
 const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
 
 macro_rules! tests {
@@ -37,7 +37,6 @@ const TESTS: &[(&str, fn())] = tests![
     external_predictor_protocol_invalid_reply_restarts,
     external_predictor_protocol_dropped_request_restarts,
     external_predictor_protocol_child_killed_on_drop,
-    external_predictor_protocol_worker_py_compiles,
     external_predictor_protocol_worker_py_end_to_end,
 ];
 
@@ -76,7 +75,8 @@ fn main() {
 // Mock worker (child side)
 // ---------------------------------------------------------------------------------------------
 
-/// `args`: the mode (`ok`, `silent`: never ready, `exit`: dies before ready), then optionally
+/// `args`: the mode (`ok`, `silent`: never ready, `exit`: dies before ready,
+/// `deaf`: ready then ignores stdin, `badready`: valid JSON but the wrong `ready`), then optionally
 /// `--heartbeat <file>` (rewritten every 20 ms while alive).
 ///
 /// In `ok` mode the input picks the behavior: `"sleep"`, `"crash"`, `"fail"` (ok:false),
@@ -96,6 +96,16 @@ fn mock_worker(args: &[String]) {
     match args[0].as_str() {
         "ok" => {}
         "silent" => return std::thread::sleep(Duration::from_secs(60)),
+        // Ready, then deaf: ignores stdin (no exit on EOF) and keeps running.
+        "deaf" => {
+            println!(r#"{{"v":1,"type":"ready"}}"#);
+            return std::thread::sleep(Duration::from_secs(60));
+        }
+        // A valid JSON line that is not the v1 `ready`.
+        "badready" => {
+            println!(r#"{{"v":2,"type":"ready"}}"#);
+            return std::thread::sleep(Duration::from_secs(60));
+        }
         "exit" => {
             eprintln!("no model here");
             std::process::exit(2);
@@ -163,12 +173,13 @@ fn answer(input: &Value) -> Result<Value, String> {
 // ---------------------------------------------------------------------------------------------
 
 fn block_on<F: Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(f)
+    static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    });
+    RT.block_on(f)
 }
 
 /// The predictor running this binary as a mock worker in `mode`, with a 10 s timeout.
@@ -284,6 +295,12 @@ fn external_predictor_protocol_ready_handshake() {
             "worker handshake timed out after 300ms"
         );
         assert!(start.elapsed() < Duration::from_secs(5));
+
+        let r = mock("badready", &[])
+            .load(&model(ArtifactKind::Model, "sklearn-pickle"), dir.path())
+            .await;
+        let m = runtime_msg(r.map(drop));
+        assert!(m.contains("ready"), "{m}");
 
         let r = mock("exit", &[])
             .load(&model(ArtifactKind::Model, "sklearn-pickle"), dir.path())
@@ -487,6 +504,7 @@ fn external_predictor_protocol_dropped_request_restarts() {
         let beat_arg = beat.to_str().unwrap();
         let loaded = load(&mock("ok", &["--heartbeat", beat_arg]), dir.path()).await;
         let before = pid(&*loaded).await;
+        changed(&beat, None); // the first beat is out
         let dropped = tokio::time::timeout(
             Duration::from_millis(200),
             loaded.predict(j(json!("sleep"))),
@@ -496,15 +514,10 @@ fn external_predictor_protocol_dropped_request_restarts() {
             "the sleeping request must not finish"
         );
         // The worker that had the request in flight is dead (its heartbeat stops)...
-        let last = std::fs::read_to_string(&beat).unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        let settled = std::fs::read_to_string(&beat).unwrap();
+        let settled = changed(&beat, Some("")); // any non-empty read (a rewrite may be mid-way)
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(
-            std::fs::read_to_string(&beat).unwrap(),
-            settled,
-            "was {last}"
-        );
+        assert_eq!(changed(&beat, Some("")), settled, "worker still running");
         // ...and no stale reply can reach the next request.
         assert_eq!(
             loaded.predict(j(json!(9))).await.unwrap(),
@@ -519,7 +532,7 @@ fn external_predictor_protocol_child_killed_on_drop() {
         let dir = payload();
         let beat = dir.path().join("heartbeat");
         let loaded = load(
-            &mock("ok", &["--heartbeat", beat.to_str().unwrap()]),
+            &mock("deaf", &["--heartbeat", beat.to_str().unwrap()]),
             dir.path(),
         )
         .await;
@@ -527,34 +540,10 @@ fn external_predictor_protocol_child_killed_on_drop() {
         changed(&beat, Some(&first)); // alive: the heartbeat advances
         drop(loaded);
         std::thread::sleep(Duration::from_millis(300));
-        let settled = std::fs::read_to_string(&beat).unwrap();
+        let settled = changed(&beat, Some(""));
         std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(
-            std::fs::read_to_string(&beat).unwrap(),
-            settled,
-            "worker still running"
-        );
+        assert_eq!(changed(&beat, Some("")), settled, "worker still running");
     });
-}
-
-fn external_predictor_protocol_worker_py_compiles() {
-    if !python_available() {
-        return;
-    }
-    // `compile` instead of `py_compile`: no `__pycache__` written into the source tree.
-    let out = std::process::Command::new(PYTHON)
-        .args([
-            "-c",
-            "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], 'exec')",
-        ])
-        .arg(WORKER_PY)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// The real `worker.py` on a pickled builtins-only model (`predict` and `predict_proba` are

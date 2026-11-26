@@ -392,24 +392,33 @@ flowchart LR
 In v0.1, the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) before promotion to `mallops-core` ahead of 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)):
 
 ```rust
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PredictInput {
     Json(serde_json::Value),
     Bytes { content_type: String, data: Vec<u8> },
 }
 
 pub trait Predictor: Send + Sync {
-    fn flavors(&self) -> &[&str];                       // e.g. ["smartcore-logistic", "smartcore-linear"], ["sklearn-pickle"]
-    fn executes_code(&self) -> bool;                    // true for pickle/joblib/torchscript
-    fn load(&self, pkg: &Artifact, workdir: &Path) -> BoxFuture<'_, Result<Box<dyn LoadedPredictor>, Error>>;
+    fn flavors(&self) -> &[&str];
+    fn executes_code(&self) -> bool;
+    fn load<'a>(
+        &'a self,
+        artifact: &'a Artifact,
+        payload_dir: &'a Path,
+    ) -> BoxFuture<'a, Result<Box<dyn LoadedPredictor>, Error>>;
 }
 
 pub trait LoadedPredictor: Send + Sync {
     fn predict(&self, input: PredictInput) -> BoxFuture<'_, Result<PredictInput, Error>>;
-    fn predict_batch(&self, inputs: Vec<PredictInput>) -> BoxFuture<'_, Result<Vec<PredictInput>, Error>>;
+    fn predict_batch(
+        &self,
+        inputs: Vec<PredictInput>,
+    ) -> BoxFuture<'_, Result<Vec<PredictInput>, Error>>;
 }
 ```
 
-Flavors where `executes_code()` is `true` are rejected by `mallops serve` unless `--trust-unsafe-flavors` is explicitly enabled.
+Consumers resolve a predictor through `PredictorRegistry`, which registers predictors by flavor atomically and enforces trust policy: flavors where `executes_code()` is `true` (such as `sklearn-pickle`) are rejected by `PredictorRegistry::get` with `Error::Config` unless `trust_unsafe_flavors` is explicitly passed (CLI: `--trust-unsafe-flavors`). See the full [Predictor contract reference](reference/predictor.md).
 
 ## 8. Edge and federated learning (v0.4)
 

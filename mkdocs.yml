@@ -79,5 +79,6 @@ nav:
   - Reference:
       - std/train.external: reference/train-external.md
       - std/train.smartcore: reference/train-smartcore.md
+      - Predictor contract: reference/predictor.md
   - Contributing: contributing.md
   - API reference: https://docs.rs/mallops-core

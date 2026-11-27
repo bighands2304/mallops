@@ -188,10 +188,11 @@ When `with.gate` is configured:
 - **Failed with `on_fail: skip` (default):**
   - Returns `BlockOutcome::Skipped { reason, outputs }` (e.g. `"gate failed: f1 = 0.75 < min 0.8"`).
     The `metrics` artifact is still committed to the store so the failed evaluation can be inspected.
-  - **Downstream blocking:** the runtime skips only downstream nodes that consume `eval.metrics` as
-    a **required** input. For example, `std/package` must wire `metrics: eval.metrics` (as in
-    [SPEC §5](../SPEC.md#5-pipeline-definition-mallopsyaml)); a consumer without that required edge
-    still runs.
+  - **Downstream blocking:** the runtime skips downstream nodes that consume `eval.metrics` as a
+    **required** input. In addition, [`std/package`](package.md) checks `metadata.gate.passed` on a
+    wired `metrics` input even though its `metrics` port is optional, so a package that wires
+    `metrics: eval.metrics` (as in [SPEC §5](../SPEC.md#5-pipeline-definition-mallopsyaml)) is
+    `Skipped` when the gate failed; a package that omits `metrics` still runs.
   - **`runs/latest.json` and serving:** when any node is `Skipped`, `mallops run` exits `0` but
     leaves `runs/latest.json` unchanged, so `mallops serve` continues serving the previous accepted
     package.

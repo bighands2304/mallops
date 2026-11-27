@@ -362,7 +362,10 @@ The host maps this to `Error::Runtime("worker error: ValueError: missing feature
 - **Inputs:** `worker.py` accepts either an object `{"feature": value}` (ordered using `MALLOPS_FEATURES` or
   the model's `feature_names_in_`) or a list of values already in column order.
 - **Outputs:** `{"prediction": <val>}`. If the model provides `predict_proba` and has exactly two classes
-  (`len(classes_) == 2`), `"probability": <p>` is included (positive class probability).
+  (`len(classes_) == 2`), `"probability": <p>` is included — the probability of the greater class
+  (`classes[1]` in sorted ascending order, matching scikit-learn's `classes_[1]` and
+  `SmartcorePredictor`). Consumers such as [`std/evaluate.classification`](evaluate.md) rely on this
+  contract to compute `roc_auc` (using `1 - p` when `with.positive` is `classes[0]`).
 - NumPy scalars and arrays are automatically converted to standard JSON primitives via `.tolist()` / `.item()`.
 
 ### Lifecycle, failure recovery, and process management

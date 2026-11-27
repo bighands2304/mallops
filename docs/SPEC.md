@@ -1,6 +1,6 @@
 # mallops — Technical Specification
 
-> Status: **Draft** · Target: v0.1 · Last update: 2026-11-24
+> Status: **Draft** · Target: v0.1 · Last update: 2026-11-27
 
 ## 1. Vision
 
@@ -88,6 +88,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-PRE-3: fitted transforms are themselves artifacts (`kind: transform`, `format: json`, `payload/transform.json` = `{"v":1,"target":…,"input":[…],"steps":[…]}` serialized deterministically, `io_schema = { "input": […], "output": […] }` where `output` records the training output schema including `target`), capturing fitted steps (`select`, `impute`, `scale`, `ordinal`, `one_hot`; never `filter` or `split`). `mallops_std::FittedTransform` reloads the artifact (`from_dir`, rejecting versions other than `1`) and replays it so serving applies the exact same preprocessing:
   - `apply_batch`: projects the incoming `RecordBatch` onto `input` columns in `input` order (`target` optional, extra columns ignored) with strict Arrow type checks (`Error::Runtime` naming the column, expected, and found types) before applying the fitted steps.
   - `apply_json`: accepts a JSON array of row objects keyed by `input` columns (`target` optional, unknown keys ignored, explicit `null` allowed; a missing key for a non-target column fails with `Error::Runtime("…row {i}: missing column '{col}'")`; `int64` columns accept whole-number floats; type mismatches report row index and column name), builds the `RecordBatch`, and applies the exact same steps as `apply_batch`.
+- FR-PRE-4: **data validation**: check a dataset against declared expectations (schema, row count, null fraction, range, allowed values, uniqueness) with the same quality gate as FR-EVL-2 (`on_fail: fail|skip`) — v0.1 (`std/validate.tabular`, #56).
 
 ### 3.4 Training
 - FR-TRN-1: native Rust training (`smartcore` for classic ML) — v0.1. The block is `std/train.smartcore` (feature `train-smartcore`, not in `default`; binary logistic regression and linear regression); see [`std/train.smartcore`](reference/train-smartcore.md).
@@ -103,6 +104,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-EVL-1: standard metrics (accuracy, precision/recall/F1, ROC-AUC, RMSE, MAE, R²) — v0.1. In `mallops-std`, provided by `std/evaluate.classification` and `std/evaluate.regression` (feature `evaluate`, not in `default`; see [`std/evaluate`](reference/evaluate.md)).
 - FR-EVL-2: **quality gates**: a pipeline can skip downstream consumers or fail when a metric falls outside configured thresholds (`min`/`max`, v0.1); comparing against the current production model is deferred to v0.2 (with the model registry).
 - FR-EVL-3: custom metrics via plugins (in v0.1, external processes via [`std/external`](reference/external.md)).
+- FR-EVL-4: explainability: model-agnostic feature importance (permutation importance over `Predictor` + evaluate metrics) as a block — v0.2.
 
 ### 3.7 Model packaging
 - FR-PKG-1: package = model artifact + preprocessing `transform` artifacts + manifest (`flavor`, `io_schema`, requirements) — v0.1.
@@ -116,6 +118,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 ### 3.9 Deploy
 - FR-DEP-1: deploy targets as blocks: local process, Docker, Kubernetes manifest, SSH host, edge fleet — v0.2+.
 - FR-DEP-2: strategies: replace, canary, shadow — v0.3.
+- FR-DEP-3: remote execution of pipeline nodes (remote runners, Kubernetes jobs) — v0.3.
 - FR-DEP-3: rollback to a previous registry version in one command.
 
 ### 3.10 Model serving
@@ -123,6 +126,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 - FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.
 - FR-SRV-4: MQTT transport (`serve.transport: mqtt`): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 ([ADR-0009](adr/0009-mqtt-blocks-and-serve-transport.md)).
 - FR-SRV-3: **backend-agnostic**: the server dispatches to a `Predictor` chosen by the package flavor (smartcore, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…) via `PredictorRegistry::get`. In v0.1 the minimal `Predictor` contract lives in `mallops-std` (shared by `evaluate` and `serve`) and is promoted to `mallops-core` before 1.0 ([ADR-0007](adr/0007-core-contracts-revision.md)). See the [Predictor contract reference](reference/predictor.md).
+- FR-SRV-5: **batch inference** inside the DAG: apply a `package` (fitted transform + `Predictor`) to a dataset and emit the predictions as an artifact — v0.1 (`std/predict.batch`, #57).
 
 ### 3.11 Monitoring and logging
 - FR-MON-1: structured logs (`tracing`) for every run and every request — v0.1.
@@ -144,6 +148,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 ### 3.14 Lineage
 - FR-LIN-1: the runtime emits lineage events (`RunStarted`, `BlockStarted`, `ArtifactProduced`, `BlockFinished`, `RunFinished`) with RFC 3339 UTC millisecond timestamps (`YYYY-MM-DDTHH:MM:SS.mmmZ`, computed from `SystemTime` without an external date crate) — v0.1. `RunStarted` carries `pipeline_hash` (domain-separated BLAKE3 `"mallops pipeline v1"` over canonical JSON of the topologically ordered nodes: `id`, `use`, `BlockSpec.version`, `config_hash`, `in`, `seed`), `git_commit` (`None` in the core library; populated by `mallops-cli`), and `host` (`os`, `arch`, `hostname` from `HOSTNAME`/`COMPUTERNAME` or `"unknown"`, `mallops_version`). Each started node emits `BlockStarted` (`block` string, `block_version`, `config_hash`, `seed`, `inputs`), one `ArtifactProduced` per output (including cache hits), and `BlockFinished` (`status`, `duration_ms`, `cached: true` on cache hits). Nodes that never start (`Skipped` or `Cancelled` before execution) emit only `BlockFinished` with `duration_ms: 0`. `RunFinished` reports `Cancelled` if the run was cancelled, else `Succeeded` if `RunSummary::is_success()`, else `Failed`.
 - FR-LIN-2: events go to pluggable `LineageSink`s; the core ships `JsonSink` (default in `RuntimeConfig::new`), writing `runs/<run-id>/lineage.json` = `{"v":1,"run":"<run-id>","events":[...]}` (events internally tagged with `"event"` in `snake_case`) via `ArtifactStore::put_meta`, rewritten on every event so the file stays valid JSON after a crash — v0.1. `mallops_core::lineage::conformance::check_sink` provides a shared conformance suite reusable by future sinks. SQLite, OpenLineage and MLflow sinks are optional — v0.2+.
+- FR-LIN-3: experiment tracking: list and compare runs, their configs and metrics (`mallops runs list/compare`) on top of lineage and the SQLite sink — v0.2.
 - FR-LIN-3: multiple sinks can be active at once via `RuntimeConfig::lineage` (YAML `lineage:` mapping lives in `mallops-cli`); an empty sink list (`lineage: off`) disables lineage entirely while caching still works (it relies on artifact hashes and `cache/<key>.json`, not on lineage). A sink returning `Err` logs a `tracing::warn!` and never fails the run.
 - FR-LIN-4: secrets are never written to any sink, log, workdir, or store (verified by `lineage_anti_leak_*`).
 
@@ -158,6 +163,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 | NFR-5 Observability | Every run emits structured `tracing` logs (per-node `node` span, warnings on cache or lineage sink errors) and, unless `lineage: off` (`RuntimeConfig::lineage` empty), a lineage record (`runs/<run-id>/lineage.json` by default, rewritten incrementally per event). |
 | NFR-6 Stability | Semantic versioning; public API of `mallops-core` frozen at 1.0 (`#[non_exhaustive]` on extensible public types). MSRV documented and tested in CI. |
 | NFR-7 Footprint | `mallops-core` compiles without any ML, cloud-SDK, `object_store`, database, or HTTP/gRPC dependency; dependencies are restricted to the explicit allowlist (`tokio`, `serde`, `serde_json`, `blake3`, `tracing`, `thiserror`, `ulid`, `tempfile`) plus feature-gated `yaml` (`yaml_serde`, default) and `schema` (`schemars`, optional) ([ADR-0007](adr/0007-core-contracts-revision.md)). |
+| NFR-8 Data scale | In v0.1 the tabular std blocks load a whole dataset in memory (Arrow); streaming / out-of-core processing in chunked Arrow batches comes in v0.2, and larger-than-memory data can always go through `std/external` (Polars, DuckDB, Spark). |
 
 ### 4.1 Trust model
 
@@ -315,9 +321,9 @@ Inputs and outputs of blocks declare the accepted `kind` and optionally accepted
 
 | Version | Scope |
 |---|---|
-| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `store verify`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train smartcore, generic external block, evaluate classification/regression, package, HTTP serving) |
-| v0.2 | remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry & versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging |
-| v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport |
+| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `store verify`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train smartcore, generic external block, data validation, evaluate classification/regression, package, batch inference, HTTP serving) |
+| v0.2 | remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry & versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging, WASM and gRPC plugin runtimes, experiment tracking, explainability, streaming / out-of-core std blocks |
+| v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport, remote execution of nodes |
 | v0.4 | `mallops-edge` (edge build profiles), on-device online learning, federated learning, fleet deploy, distributed monitoring |
 | v1.0 | stable public API, plugin protocol v1 frozen |
 

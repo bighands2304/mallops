@@ -66,9 +66,9 @@ flowchart LR
 
 | Version | Focus |
 |---|---|
-| v0.1 | Core runtime, YAML pipelines, CLI, local end-to-end pipeline |
-| v0.2 | Object stores, model registry & versioning, deploy, gRPC serving |
-| v0.3 | Monitoring, drift detection, retrain triggers, deep-learning training |
+| v0.1 | Core runtime, YAML pipelines, CLI, local end-to-end pipeline (incl. data validation and batch inference) |
+| v0.2 | Object stores, model registry & versioning, deploy, gRPC serving, WASM/gRPC plugins, experiment tracking, explainability, streaming |
+| v0.3 | Monitoring, drift detection, retrain triggers, deep-learning training, remote execution |
 | v0.4 | Edge agent, federated learning, fleet deploy |
 | v1.0 | Stable API and plugin protocol |
 

@@ -27,6 +27,8 @@ package = []
 evaluate = ["predictor", "_ingest", "_read_parquet", "dep:arrow-select"]
 predict-smartcore = ["predictor"]
 predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]
+# HTTP/JSON inference server (`serve` module); not a DAG block (ADR-0007 D5).
+serve-http = ["package", "predictor", "dep:axum", "dep:tempfile", "dep:tracing", "tokio/net", "tokio/time"]
 # Reading Parquet back into memory (preprocess, train, evaluate); not a public feature.
 _read_parquet = []
 # Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.
@@ -39,6 +41,8 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing = { workspace = true, optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"], optional = true }
+tempfile = { workspace = true, optional = true }
 # Codecs are for reading external files; the output is always uncompressed.
 arrow-array = { version = "60", optional = true }
 arrow-cast = { version = "60", optional = true }
@@ -56,7 +60,8 @@ nix = { version = "0.32", default-features = false, features = ["signal"], optio
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [[test]]
 name = "predict_external"

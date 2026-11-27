@@ -20,6 +20,13 @@ mod package;
 pub mod predictor;
 #[cfg(feature = "preprocess-tabular")]
 mod preprocess;
+#[cfg(any(
+    feature = "evaluate",
+    all(feature = "serve-http", feature = "preprocess-tabular")
+))]
+mod rows;
+#[cfg(feature = "serve-http")]
+pub mod serve;
 #[cfg(any(feature = "train-smartcore", feature = "predict-smartcore"))]
 mod smartcore_model;
 #[cfg(feature = "train-smartcore")]

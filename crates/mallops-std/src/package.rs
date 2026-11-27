@@ -11,14 +11,14 @@
 //! transform). `io_schema` is absent when the model or the transform declares none (opaque
 //! models such as `std/external`).
 //!
-//! Limits (v0.1): a `metrics` input whose quality gate failed skips the block; the `io_schema`
-//! coherence check compares `{name, type}` columns only; `Package` applies no trust policy.
+//! Limits and the checks done by [`Package::load`]: see `docs/reference/package.md`.
 
 use std::path::{Path, PathBuf};
 
 use mallops_core::{
     Artifact, ArtifactId, ArtifactKind, ArtifactStore, Block, BlockOutcome, BlockSpec, BoxFuture,
     Context, DraftPayload, Error, Inputs, Manifest, OutputDraft, OutputDrafts, Port, Stage,
+    StoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,13 +51,19 @@ impl Entry {
         }
     }
 
-    /// Checks `path` and `kind`, then returns the artifact.
+    /// Checks `path`, `kind` and manifest `schema_version`, then returns the artifact.
     fn check(self, path: &str, kind: ArtifactKind) -> Result<Artifact, Error> {
         if self.path != path {
             return Err(bad(format!("`{path}` entry has path `{}`", self.path)));
         }
         if self.manifest.kind != kind {
             return Err(bad(format!("`{path}` entry is not a {kind} artifact")));
+        }
+        if self.manifest.schema_version != Manifest::SCHEMA_VERSION {
+            return Err(bad(format!(
+                "`{path}` entry has unsupported manifest schema_version {}",
+                self.manifest.schema_version
+            )));
         }
         Ok(Artifact::new(self.id, self.manifest))
     }
@@ -91,15 +97,14 @@ pub struct Package {
     dir: PathBuf,
     model: Artifact,
     transform: Option<Artifact>,
-    flavor: String,
     io_schema: Option<Value>,
 }
 
 impl Package {
     /// Loads the package `id` from `store` into the (new or empty) directory `dest`.
     ///
-    /// The stored package is verified first (`store.verify`), then materialized; the descriptor is
-    /// checked against the package manifest and the layout on disk.
+    /// The stored package is verified first (`store.verify`), then its manifest is checked, it is
+    /// materialized, and the descriptor is checked against the manifest and the layout on disk.
     ///
     /// # Errors
     ///
@@ -111,6 +116,12 @@ impl Package {
         id: &ArtifactId,
         dest: &Path,
     ) -> Result<Self, Error> {
+        match store.verify(id).await {
+            Err(Error::Store(StoreError::NotFound(_))) => {
+                return Err(Error::Config(format!("artifact {id} not found")));
+            }
+            r => r?,
+        }
         let artifact = store
             .get(id)
             .await?
@@ -122,7 +133,6 @@ impl Package {
                 manifest.kind, manifest.format
             )));
         }
-        store.verify(id).await?;
         let dir = store.fetch(id, dest).await?;
 
         let bytes = std::fs::read(dir.join(DESCRIPTOR))
@@ -135,8 +145,9 @@ impl Package {
                 d.schema_version
             )));
         }
-        let manifest_io = manifest.io_schema.clone().filter(|v| !v.is_null());
-        if manifest.flavor.as_deref() != Some(d.flavor.as_str()) || manifest_io != d.io_schema {
+        if manifest.flavor.as_deref() != Some(d.flavor.as_str())
+            || schema(manifest) != d.io_schema.as_ref()
+        {
             return Err(bad("descriptor flavor/io_schema differ from the manifest"));
         }
         let model = d.model.check(MODEL, ArtifactKind::Model)?;
@@ -150,18 +161,13 @@ impl Package {
         if let Some(m) = d.metrics {
             m.check(METRICS, ArtifactKind::Metrics)?;
         }
-        let missing = [Some(MODEL), transform.as_ref().map(|_| TRANSFORM_DIR)]
-            .into_iter()
-            .flatten()
-            .find(|p| !dir.join(p).is_dir());
-        if let Some(p) = missing {
-            return Err(bad(format!("missing directory `{p}`")));
+        if !dir.join(MODEL).is_dir() || transform.is_some() && !dir.join(TRANSFORM_DIR).is_dir() {
+            return Err(bad("missing `model` or `transform` directory"));
         }
         Ok(Self {
             dir,
             model,
             transform,
-            flavor: d.flavor,
             io_schema: d.io_schema,
         })
     }
@@ -189,7 +195,7 @@ impl Package {
     /// The model flavor, which selects the predictor.
     #[must_use]
     pub fn flavor(&self) -> &str {
-        &self.flavor
+        self.model.manifest().flavor.as_deref().unwrap_or_default()
     }
 
     /// The package `io_schema` (`input`/`output` column lists), if the model declares one.
@@ -199,9 +205,19 @@ impl Package {
     }
 }
 
+/// The manifest's `io_schema`; `null` counts as absent.
+fn schema(m: &Manifest) -> Option<&Value> {
+    m.io_schema.as_ref().filter(|v| !v.is_null())
+}
+
 /// `input`/`output` column lists of an `io_schema`.
 fn columns<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
     schema.get(key)?.as_array()
+}
+
+/// The `(name, type)` identity of a column.
+fn key(c: &Value) -> (Option<&Value>, Option<&Value>) {
+    (c.get("name"), c.get("type"))
 }
 
 /// Package `io_schema` from the model's and the optional transform's (see the module docs).
@@ -209,26 +225,33 @@ fn derive_io_schema(
     model: &Manifest,
     transform: Option<&Manifest>,
 ) -> Result<Option<Value>, Error> {
-    let Some(m) = model.io_schema.as_ref().filter(|v| !v.is_null()) else {
+    let Some(m) = schema(model) else {
         return Ok(None);
     };
-    let Some(t) = transform else {
+    let Some(transform) = transform else {
         return Ok(Some(m.clone()));
     };
-    let Some(t) = t.io_schema.as_ref().filter(|v| !v.is_null()) else {
+    let Some(t) = schema(transform) else {
         return Ok(None);
     };
-    let (Some(t_in), Some(m_out)) = (columns(t, "input"), columns(m, "output")) else {
-        return Ok(None);
-    };
-    if let (Some(t_out), Some(m_in)) = (columns(t, "output"), columns(m, "input"))
-        && let Some(col) = m_in.iter().find(|c| !t_out.contains(c))
+    let (t_in, t_out) = (columns(t, "input"), columns(t, "output"));
+    let (m_in, m_out) = (columns(m, "input"), columns(m, "output"));
+    if let (Some(t_out), Some(m_in)) = (t_out, m_in)
+        && let Some(col) = m_in
+            .iter()
+            .find(|c| !t_out.iter().any(|o| key(o) == key(c)))
     {
         return Err(Error::Runtime(format!(
             "model input column {col} is not produced by the transform"
         )));
     }
-    let target = |c: &Value| m_out.iter().any(|o| o.get("name") == c.get("name"));
+    let (Some(t_in), Some(m_out)) = (t_in, m_out) else {
+        return Ok(None);
+    };
+    let target = |c: &Value| {
+        c.get("name")
+            .is_some_and(|n| m_out.iter().any(|o| o.get("name") == Some(n)))
+    };
     let input: Vec<&Value> = t_in.iter().filter(|c| !target(c)).collect();
     Ok(Some(serde_json::json!({ "input": input, "output": m_out })))
 }
@@ -252,10 +275,10 @@ impl PackageBlock {
 
 /// `with:` must be absent, `null` or `{}`.
 fn check_config(config: &Value) -> Result<(), Error> {
-    match config {
-        Value::Null => Ok(()),
-        Value::Object(o) if o.is_empty() => Ok(()),
-        _ => Err(Error::Config("`std/package` takes no configuration".into())),
+    if config.is_null() || config.as_object().is_some_and(|o| o.is_empty()) {
+        Ok(())
+    } else {
+        Err(Error::Config("`std/package` takes no configuration".into()))
     }
 }
 
@@ -348,7 +371,6 @@ mod tests {
 
     use mallops_core::{
         CancelSource, LocalStore, MemorySecretProvider, MemoryStore, PayloadSource, RunId,
-        StoreError,
     };
     use serde_json::json;
 
@@ -544,11 +566,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn package_load_rejects_tampered() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn ArtifactStore> =
             Arc::new(LocalStore::new(dir.path().join("store")).unwrap());
@@ -559,7 +578,10 @@ mod tests {
             .join("store/artifacts")
             .join(pkg.id().to_hex())
             .join("payload/package.json");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)] // portable; the store file is ours
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
         let text = std::fs::read_to_string(&file)
             .unwrap()
             .replace("mock", "evil");
@@ -624,50 +646,87 @@ mod tests {
         assert!(matches!(err, Error::Config(_)), "{err:?}");
     }
 
-    #[tokio::test]
-    async fn package_load_rejects_bad_descriptor() {
+    /// Stores a package whose sane `package.json` is mutated by `f`, then loads it.
+    async fn tampered(f: fn(&mut Value), model_dir: bool) -> Result<Package, Error> {
         use std::collections::BTreeMap;
 
         use mallops_core::RelPath;
 
         let store: Arc<dyn ArtifactStore> = Arc::new(MemoryStore::new());
-        let f = fixture(Arc::clone(&store)).await;
+        let f_ = fixture(Arc::clone(&store)).await;
         let io = model_manifest().io_schema.unwrap();
-        let descriptor = |version: u32, io_schema: Option<&Value>| {
-            let mut d = json!({
-                "flavor": "mock",
-                "model": {"id": f.model.id(), "manifest": f.model.manifest(), "path": "model"},
-                "schema_version": version,
-            });
-            if let Some(s) = io_schema {
-                d["io_schema"] = s.clone();
-            }
-            serde_json::to_vec(&d).unwrap()
-        };
+        let mut d = json!({
+            "flavor": "mock",
+            "io_schema": io,
+            "model": {"id": f_.model.id(), "manifest": f_.model.manifest(), "path": "model"},
+            "schema_version": 1,
+        });
+        f(&mut d);
+        let bytes = serde_json::to_vec(&d).unwrap();
+        let mut files =
+            BTreeMap::from([(RelPath::parse("package.json").unwrap(), bytes.as_slice())]);
+        if model_dir {
+            files.insert(RelPath::parse("model/data").unwrap(), b"x".as_slice());
+        }
         let manifest = Manifest::new(ArtifactKind::Package, "dir")
             .with_flavor("mock")
-            .with_io_schema(io.clone());
-        let cases = [
-            (descriptor(2, Some(&io)), false), // unsupported version
-            (descriptor(1, None), false),      // io_schema differs from the manifest
-            (descriptor(1, Some(&io)), true),  // sane
+            .with_io_schema(io);
+        let id = store
+            .put(manifest, PayloadSource::Files(files))
+            .await
+            .unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        Package::load(store.as_ref(), &id, &dest.path().join("p")).await
+    }
+
+    #[tokio::test]
+    async fn package_load_rejects_bad_descriptor() {
+        type Case = (&'static str, fn(&mut Value), bool);
+        let cases: [Case; 8] = [
+            ("sane", |_| {}, true),
+            ("version", |d| d["schema_version"] = json!(2), true),
+            (
+                "io_schema",
+                |d| _ = d.as_object_mut().unwrap().remove("io_schema"),
+                true,
+            ),
+            ("path", |d| d["model"]["path"] = json!("other"), true),
+            (
+                "kind",
+                |d| d["model"]["manifest"]["kind"] = json!("transform"),
+                true,
+            ),
+            ("unknown field", |d| d["extra"] = json!(1), true),
+            (
+                "manifest version",
+                |d| d["model"]["manifest"]["schema_version"] = json!(2),
+                true,
+            ),
+            ("missing model dir", |_| {}, false),
         ];
-        for (i, (bytes, ok)) in cases.into_iter().enumerate() {
-            let files = BTreeMap::from([
-                (RelPath::parse("package.json").unwrap(), bytes.as_slice()),
-                (RelPath::parse("model/data").unwrap(), b"x".as_slice()),
-            ]);
-            let id = store
-                .put(manifest.clone(), PayloadSource::Files(files))
-                .await
-                .unwrap();
-            let dest = tempfile::tempdir().unwrap();
-            let r = Package::load(store.as_ref(), &id, &dest.path().join(format!("p{i}"))).await;
-            match (r, ok) {
-                (Ok(_), true) => {}
-                (Err(Error::Runtime(_)), false) => {}
-                (r, _) => panic!("case {i}: {r:?}"),
+        for (name, f, model_dir) in cases {
+            let r = tampered(f, model_dir).await;
+            match (name, r) {
+                ("sane", Ok(_)) | (_, Err(Error::Runtime(_))) => {}
+                (_, r) => panic!("{name}: {r:?}"),
             }
         }
+    }
+
+    #[test]
+    fn io_schema_coherence() {
+        let model = |io: Value| Manifest::new(ArtifactKind::Model, "json").with_io_schema(io);
+        let col = |n: &str| json!({"name": n, "type": "float64"});
+        // extra fields on one side only are not an incoherence
+        let t = Manifest::new(ArtifactKind::Transform, "json").with_io_schema(json!({
+            "input": [col("a")],
+            "output": [{"name": "a", "type": "float64", "nullable": true}],
+        }));
+        let m = model(json!({"input": [col("a")], "output": [col("y")]}));
+        assert!(derive_io_schema(&m, Some(&t)).unwrap().is_some());
+        // checked even when the model declares no `output`
+        let m = model(json!({"input": [col("z")]}));
+        let err = derive_io_schema(&m, Some(&t)).unwrap_err();
+        assert!(matches!(err, Error::Runtime(_)), "{err:?}");
     }
 }

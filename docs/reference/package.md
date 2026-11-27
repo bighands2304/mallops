@@ -157,8 +157,8 @@ impl Package {
     ) -> Result<Package, Error>;
 
     pub fn model(&self) -> &Artifact;
-    pub fn model_dir(&self) -> &Path;
-    pub fn transform(&self) -> Option<(&Artifact, &Path)>;
+    pub fn model_dir(&self) -> PathBuf;
+    pub fn transform(&self) -> Option<(&Artifact, PathBuf)>;
     pub fn flavor(&self) -> &str;
     pub fn io_schema(&self) -> Option<&serde_json::Value>;
 }
@@ -169,21 +169,22 @@ The future returned by `Package::load` is `Send`. Callers inside a `Block` can p
 
 ### What `Package::load` verifies
 
-1. **Lookup and manifest check:** calls `store.get(id)`. A missing artifact or a manifest whose
-   `kind` is not `package` returns `Error::Config`; a `format` other than `"dir"` or a missing
-   `flavor` returns `Error::Runtime`.
-2. **Integrity verification:** calls `store.verify(id)` **before** `store.fetch(id, dest)`. Because
-   the canonical `ArtifactId` hashes `manifest.json`, `package.json`, and every bundled payload
-   file, any tampering or corruption in the store fails with `Error::Store` before files are
-   materialized or parsed.
+1. **Integrity verification:** calls `store.verify(id)` first. Because the canonical `ArtifactId`
+   hashes `manifest.json`, `package.json` and every bundled payload file, any tampering or
+   corruption in the store fails with `Error::Store`. An absent `id` is `Error::Config`.
+2. **Manifest check:** `store.get(id)`; `kind` must be `package` and `format` `"dir"`, otherwise
+   `Error::Config`.
 3. **Materialization:** fetches the package directory into `dest` via `store.fetch(id, dest)`.
-4. **Descriptor validation:** parses `dest/package.json` with `deny_unknown_fields` and checks:
+4. **Descriptor validation** (`Error::Runtime` on any failure): parses `dest/package.json` with
+   `deny_unknown_fields` and checks:
    - `schema_version == 1`
-   - `flavor` equals the package manifest's `flavor`
-   - `io_schema` equals the package manifest's `io_schema`
+   - `flavor` equals the package manifest's `flavor` (which must be present), and the embedded
+     model manifest's `flavor`
+   - `io_schema` equals the package manifest's `io_schema` (`null` counts as absent)
    - `model.path == "model"`, `transform.path == "transform"` (if present), and
      `metrics.path == "metrics"` (if present)
-   - embedded manifest kinds match (`Model`, `Transform`, `Metrics`)
+   - embedded manifest kinds match (`Model`, `Transform`, `Metrics`) and their `schema_version` is
+     the supported one
    - `model/` (and `transform/` when present) exist inside `dest`.
 
 ### Trust policy
@@ -201,15 +202,18 @@ before calling `predictor.load(pkg.model(), pkg.model_dir())`.
 | Missing `flavor` in `model` manifest | `Error::Runtime` |
 | `model.io_schema.input` column missing from or incompatible with `transform.io_schema.output` | `Error::Runtime` |
 | Cancellation via `ctx.cancel()` | `Error::Cancelled` |
-| `Package::load`: artifact `id` not found in store, or `kind != package` | `Error::Config` |
+| `Package::load`: artifact `id` not found in store, `kind != package` or `format != dir` | `Error::Config` |
 | `Package::load`: store corruption or tampering detected by `store.verify(id)` | `Error::Store` |
-| `Package::load`: `format != dir`, missing manifest `flavor`, invalid `package.json`, unsupported `schema_version`, mismatched `flavor`/`io_schema`/`path`/embedded `kind`, or missing bundled subdir | `Error::Runtime` |
+| `Package::load`: missing manifest `flavor`, invalid `package.json`, unsupported `schema_version` (descriptor or embedded manifest), mismatched `flavor`/`io_schema`/`path`/embedded `kind`, or missing bundled subdir | `Error::Runtime` |
 
 A wired `metrics` input with `metadata["gate"]["passed"] == false` is not an error: `std/package`
 returns `BlockOutcome::Skipped { reason: "metrics gate failed" }`.
 
 ## Known limitations
 
+- **Coherence check scope:** the `io_schema` check compares `{name, type}` of columns only; other
+  column fields are ignored.
+- **No trust policy in `Package`:** see [Trust policy](#trust-policy).
 - **No environment requirements in v0.1:** recording runtime/Python dependency requirements in the
   package descriptor is deferred to a later release ([SPEC FR-PKG-1](../SPEC.md#37-model-packaging)).
 - **No OCI packaging or signing in v0.1:** OCI image output (`FR-PKG-2`, v0.2) and cryptographic

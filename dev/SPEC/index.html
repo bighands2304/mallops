@@ -1635,7 +1635,7 @@
 
 <h1 id="mallops-technical-specification">mallops — Technical Specification<a class="headerlink" href="#mallops-technical-specification" title="Permanent link">&para;</a></h1>
 <blockquote>
-<p>Status: <strong>Draft</strong> · Target: v0.1 · Last update: 2026-11-24</p>
+<p>Status: <strong>Draft</strong> · Target: v0.1 · Last update: 2026-11-27</p>
 </blockquote>
 <h2 id="1-vision">1. Vision<a class="headerlink" href="#1-vision" title="Permanent link">&para;</a></h2>
 <p>mallops is a modular MLOps framework written in Rust. It covers the whole machine-learning lifecycle — from data ingestion to serving, monitoring and retraining, down to edge devices with federated learning — through <strong>composable blocks</strong>.</p>
@@ -1775,6 +1775,7 @@
 <li>FR-PRE-3: fitted transforms are themselves artifacts (<code>kind: transform</code>, <code>format: json</code>, <code>payload/transform.json</code> = <code>{"v":1,"target":…,"input":[…],"steps":[…]}</code> serialized deterministically, <code>io_schema = { "input": […], "output": […] }</code> where <code>output</code> records the training output schema including <code>target</code>), capturing fitted steps (<code>select</code>, <code>impute</code>, <code>scale</code>, <code>ordinal</code>, <code>one_hot</code>; never <code>filter</code> or <code>split</code>). <code>mallops_std::FittedTransform</code> reloads the artifact (<code>from_dir</code>, rejecting versions other than <code>1</code>) and replays it so serving applies the exact same preprocessing:</li>
 <li><code>apply_batch</code>: projects the incoming <code>RecordBatch</code> onto <code>input</code> columns in <code>input</code> order (<code>target</code> optional, extra columns ignored) with strict Arrow type checks (<code>Error::Runtime</code> naming the column, expected, and found types) before applying the fitted steps.</li>
 <li><code>apply_json</code>: accepts a JSON array of row objects keyed by <code>input</code> columns (<code>target</code> optional, unknown keys ignored, explicit <code>null</code> allowed; a missing key for a non-target column fails with <code>Error::Runtime("…row {i}: missing column '{col}'")</code>; <code>int64</code> columns accept whole-number floats; type mismatches report row index and column name), builds the <code>RecordBatch</code>, and applies the exact same steps as <code>apply_batch</code>.</li>
+<li>FR-PRE-4: <strong>data validation</strong>: check a dataset against declared expectations (schema, row count, null fraction, range, allowed values, uniqueness) with the same quality gate as FR-EVL-2 (<code>on_fail: fail|skip</code>) — v0.1 (<code>std/validate.tabular</code>, #56).</li>
 </ul>
 <h3 id="34-training">3.4 Training<a class="headerlink" href="#34-training" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1793,6 +1794,7 @@
 <li>FR-EVL-1: standard metrics (accuracy, precision/recall/F1, ROC-AUC, RMSE, MAE, R²) — v0.1. In <code>mallops-std</code>, provided by <code>std/evaluate.classification</code> and <code>std/evaluate.regression</code> (feature <code>evaluate</code>, not in <code>default</code>; see <a href="../reference/evaluate/"><code>std/evaluate</code></a>).</li>
 <li>FR-EVL-2: <strong>quality gates</strong>: a pipeline can skip downstream consumers or fail when a metric falls outside configured thresholds (<code>min</code>/<code>max</code>, v0.1); comparing against the current production model is deferred to v0.2 (with the model registry).</li>
 <li>FR-EVL-3: custom metrics via plugins (in v0.1, external processes via <a href="../reference/external/"><code>std/external</code></a>).</li>
+<li>FR-EVL-4: explainability: model-agnostic feature importance (permutation importance over <code>Predictor</code> + evaluate metrics) as a block — v0.2.</li>
 </ul>
 <h3 id="37-model-packaging">3.7 Model packaging<a class="headerlink" href="#37-model-packaging" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1809,6 +1811,7 @@
 <ul>
 <li>FR-DEP-1: deploy targets as blocks: local process, Docker, Kubernetes manifest, SSH host, edge fleet — v0.2+.</li>
 <li>FR-DEP-2: strategies: replace, canary, shadow — v0.3.</li>
+<li>FR-DEP-3: remote execution of pipeline nodes (remote runners, Kubernetes jobs) — v0.3.</li>
 <li>FR-DEP-3: rollback to a previous registry version in one command.</li>
 </ul>
 <h3 id="310-model-serving">3.10 Model serving<a class="headerlink" href="#310-model-serving" title="Permanent link">&para;</a></h3>
@@ -1817,6 +1820,7 @@
 <li>FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.</li>
 <li>FR-SRV-4: MQTT transport (<code>serve.transport: mqtt</code>): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</li>
 <li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (smartcore, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…) via <code>PredictorRegistry::get</code>. In v0.1 the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) and is promoted to <code>mallops-core</code> before 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). See the <a href="../reference/predictor/">Predictor contract reference</a>.</li>
+<li>FR-SRV-5: <strong>batch inference</strong> inside the DAG: apply a <code>package</code> (fitted transform + <code>Predictor</code>) to a dataset and emit the predictions as an artifact — v0.1 (<code>std/predict.batch</code>, #57).</li>
 </ul>
 <h3 id="311-monitoring-and-logging">3.11 Monitoring and logging<a class="headerlink" href="#311-monitoring-and-logging" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1842,6 +1846,7 @@
 <ul>
 <li>FR-LIN-1: the runtime emits lineage events (<code>RunStarted</code>, <code>BlockStarted</code>, <code>ArtifactProduced</code>, <code>BlockFinished</code>, <code>RunFinished</code>) with RFC 3339 UTC millisecond timestamps (<code>YYYY-MM-DDTHH:MM:SS.mmmZ</code>, computed from <code>SystemTime</code> without an external date crate) — v0.1. <code>RunStarted</code> carries <code>pipeline_hash</code> (domain-separated BLAKE3 <code>"mallops pipeline v1"</code> over canonical JSON of the topologically ordered nodes: <code>id</code>, <code>use</code>, <code>BlockSpec.version</code>, <code>config_hash</code>, <code>in</code>, <code>seed</code>), <code>git_commit</code> (<code>None</code> in the core library; populated by <code>mallops-cli</code>), and <code>host</code> (<code>os</code>, <code>arch</code>, <code>hostname</code> from <code>HOSTNAME</code>/<code>COMPUTERNAME</code> or <code>"unknown"</code>, <code>mallops_version</code>). Each started node emits <code>BlockStarted</code> (<code>block</code> string, <code>block_version</code>, <code>config_hash</code>, <code>seed</code>, <code>inputs</code>), one <code>ArtifactProduced</code> per output (including cache hits), and <code>BlockFinished</code> (<code>status</code>, <code>duration_ms</code>, <code>cached: true</code> on cache hits). Nodes that never start (<code>Skipped</code> or <code>Cancelled</code> before execution) emit only <code>BlockFinished</code> with <code>duration_ms: 0</code>. <code>RunFinished</code> reports <code>Cancelled</code> if the run was cancelled, else <code>Succeeded</code> if <code>RunSummary::is_success()</code>, else <code>Failed</code>.</li>
 <li>FR-LIN-2: events go to pluggable <code>LineageSink</code>s; the core ships <code>JsonSink</code> (default in <code>RuntimeConfig::new</code>), writing <code>runs/&lt;run-id&gt;/lineage.json</code> = <code>{"v":1,"run":"&lt;run-id&gt;","events":[...]}</code> (events internally tagged with <code>"event"</code> in <code>snake_case</code>) via <code>ArtifactStore::put_meta</code>, rewritten on every event so the file stays valid JSON after a crash — v0.1. <code>mallops_core::lineage::conformance::check_sink</code> provides a shared conformance suite reusable by future sinks. SQLite, OpenLineage and MLflow sinks are optional — v0.2+.</li>
+<li>FR-LIN-3: experiment tracking: list and compare runs, their configs and metrics (<code>mallops runs list/compare</code>) on top of lineage and the SQLite sink — v0.2.</li>
 <li>FR-LIN-3: multiple sinks can be active at once via <code>RuntimeConfig::lineage</code> (YAML <code>lineage:</code> mapping lives in <code>mallops-cli</code>); an empty sink list (<code>lineage: off</code>) disables lineage entirely while caching still works (it relies on artifact hashes and <code>cache/&lt;key&gt;.json</code>, not on lineage). A sink returning <code>Err</code> logs a <code>tracing::warn!</code> and never fails the run.</li>
 <li>FR-LIN-4: secrets are never written to any sink, log, workdir, or store (verified by <code>lineage_anti_leak_*</code>).</li>
 </ul>
@@ -1881,6 +1886,10 @@
 <tr>
 <td>NFR-7 Footprint</td>
 <td><code>mallops-core</code> compiles without any ML, cloud-SDK, <code>object_store</code>, database, or HTTP/gRPC dependency; dependencies are restricted to the explicit allowlist (<code>tokio</code>, <code>serde</code>, <code>serde_json</code>, <code>blake3</code>, <code>tracing</code>, <code>thiserror</code>, <code>ulid</code>, <code>tempfile</code>) plus feature-gated <code>yaml</code> (<code>yaml_serde</code>, default) and <code>schema</code> (<code>schemars</code>, optional) (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</td>
+</tr>
+<tr>
+<td>NFR-8 Data scale</td>
+<td>In v0.1 the tabular std blocks load a whole dataset in memory (Arrow); streaming / out-of-core processing in chunked Arrow batches comes in v0.2, and larger-than-memory data can always go through <code>std/external</code> (Polars, DuckDB, Spark).</td>
 </tr>
 </tbody>
 </table>
@@ -2107,15 +2116,15 @@
 <tbody>
 <tr>
 <td><strong>v0.1</strong></td>
-<td><code>mallops-core</code> (Block trait, canonical artifacts, immutable <code>ArtifactStore</code> + local/memory + auxiliary metadata, explicit <code>BlockRegistry</code>, lineage events + JSON sink, DAG runtime, YAML), CLI (<code>init</code>, <code>validate</code>, <code>run</code>, <code>graph</code>, <code>blocks list</code>, <code>store verify</code>, <code>serve</code>), <code>mallops-std</code> (<code>Predictor</code> contract, ingest csv/parquet, preprocess tabular, train smartcore, generic external block, evaluate classification/regression, package, HTTP serving)</td>
+<td><code>mallops-core</code> (Block trait, canonical artifacts, immutable <code>ArtifactStore</code> + local/memory + auxiliary metadata, explicit <code>BlockRegistry</code>, lineage events + JSON sink, DAG runtime, YAML), CLI (<code>init</code>, <code>validate</code>, <code>run</code>, <code>graph</code>, <code>blocks list</code>, <code>store verify</code>, <code>serve</code>), <code>mallops-std</code> (<code>Predictor</code> contract, ingest csv/parquet, preprocess tabular, train smartcore, generic external block, data validation, evaluate classification/regression, package, batch inference, HTTP serving)</td>
 </tr>
 <tr>
 <td>v0.2</td>
-<td>remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry &amp; versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging</td>
+<td>remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry &amp; versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging, WASM and gRPC plugin runtimes, experiment tracking, explainability, streaming / out-of-core std blocks</td>
 </tr>
 <tr>
 <td>v0.3</td>
-<td>monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport</td>
+<td>monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport, remote execution of nodes</td>
 </tr>
 <tr>
 <td>v0.4</td>

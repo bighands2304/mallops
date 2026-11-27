@@ -17,6 +17,7 @@ blocks:
         - { name: income, type: float64 }
         - { name: plan, type: string }
         - { name: churned, type: bool }
+        - { name: customer_id, type: int64 }
       allow_extra_columns: false
       min_rows: 100
       checks:
@@ -57,7 +58,7 @@ Unknown fields are rejected (`deny_unknown_fields`). `validate_config` uses the 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `schema` | list of `{ name, type }` | none | Expected columns and their Arrow types (`bool` \| `int64` \| `float64` \| `string` \| `date32`). |
-| `allow_extra_columns` | `bool` | `true` | Whether columns present in the dataset but not listed in `schema` are allowed. Only has an effect when `schema` is set. |
+| `allow_extra_columns` | `bool` | `true` | Whether columns present in the dataset but not listed in `schema` are allowed. Requires `schema`: `false` without a `schema` is rejected (`Error::Config`). |
 | `min_rows` | non-negative integer | none | Minimum number of rows required in the dataset (`rows >= min_rows`). |
 | `checks` | map `<column>` → object | none | Per-column data quality expectations (see below). |
 | `on_fail` | `fail` \| `skip` | `fail` | Action when one or more checks fail. **Note:** unlike [`std/evaluate`](evaluate.md) (where the default is `skip`), `std/validate.tabular` defaults to `fail`. |
@@ -70,7 +71,7 @@ Unknown fields are rejected (`deny_unknown_fields`). `validate_config` uses the 
 | `min` | `f64` | Finite inclusive lower bound (`value >= min`) for numeric columns (`int64`, `float64`). |
 | `max` | `f64` | Finite inclusive upper bound (`value <= max`) for numeric columns (`int64`, `float64`). |
 | `allowed` | list of JSON scalars | Set of permitted non-null values. Supported only on `string`, `int64`, and `bool` columns. |
-| `unique` | `bool` | When `true`, all non-null values in the column must be distinct. |
+| `unique` | `bool` | When `true`, all non-null values in the column must be distinct (supported on `string`, `int64`, `float64`, `bool`, `date32`; `-0.0` equals `0.0` and all `NaN` are one value). `unique: false` is not an active check. |
 
 Validation rules (`validate_config`):
 
@@ -78,7 +79,9 @@ Validation rules (`validate_config`):
 - `min > max` on the same column is rejected.
 - `max_null_fraction` outside `[0.0, 1.0]` or non-finite (`NaN`, `±inf`) is rejected.
 - Non-finite `min` or `max` values (`NaN`, `±inf`) are rejected.
-- An empty check object for a column in `checks` (no check keys configured) is rejected.
+- A `checks.<column>` object needs at least one **active** check: `{}` and `{ unique: false }` alone are rejected (`unique: false` next to another check is accepted).
+- `allow_extra_columns: false` without a `schema` is rejected.
+- `allowed` must be a non-empty list of strings, integers or booleans (floats, `null`, objects, `[]` are rejected).
 - Strings containing `${secret:` anywhere in the config are rejected (as in
   [`std/external`](external.md) and [`std/evaluate`](evaluate.md)).
 
@@ -132,10 +135,16 @@ and check ordering:
   "checks": [
     {
       "check": "schema",
-      "column": "age",
-      "passed": true,
-      "observed": "int64",
-      "expected": "int64"
+      "passed": false,
+      "observed": {
+        "missing": ["plan"],
+        "mismatched": [{ "column": "age", "found": "float64" }],
+        "extra": []
+      },
+      "expected": [
+        { "name": "age", "type": "int64" },
+        { "name": "plan", "type": "string" }
+      ]
     },
     {
       "check": "min_rows",
@@ -165,13 +174,14 @@ and check ordering:
 - `passed`: `true` iff every entry in `checks` has `passed: true`.
 - `checks`: array of `{ "check", "column"?, "passed", "observed", "expected" }` in a **fixed
   deterministic order**:
-  1. `schema` checks (declared columns and, when `allow_extra_columns: false`, extra-column check),
+  1. a single `schema` check (no `column`): `observed` is `{ missing, mismatched, extra }` (column names in schema order; `mismatched` entries are `{ column, found }`; `extra` is listed only when `allow_extra_columns: false`), `expected` is the `schema` list. Type names are those of `with.schema` (`int64`, `string`, ...),
   2. `min_rows`,
-  3. per-column `checks`, with columns sorted **alphabetically**.
+  3. per-column `checks`, with columns sorted **alphabetically** and, within a column, in the fixed order `max_null_fraction`, `min`, `max`, `allowed`, `unique`.
 - **Non-finite floats:** `NaN`, `+inf`, and `-inf` are serialized as JSON strings `"NaN"`, `"inf"`,
   and `"-inf"` so `report.json` is always valid JSON.
-- **`observed` for `allowed` and `unique`:** reports the violation count together with at most
-  **5** offending examples.
+- **`observed` for `allowed` and `unique`:** `{ "count", "examples" }` with at most **5** distinct offending values in ascending order. For `allowed`, `count` is the number of rows with a disallowed value and `expected` is the allowed list. For `unique`, `count` is the number of occurrences beyond the first of a repeated value and `expected` is `{ "count": 0 }`.
+- **`observed` for `min` / `max`:** the observed minimum / maximum (`null` for an empty or all-null column, `"NaN"` if the column holds a `NaN`); for a non-numeric column, a text naming the type. `observed` is `"missing column"` when the column does not exist.
+- **Manifest:** the `report` manifest carries `metadata.passed` (bool), mirroring the report's `passed`.
 - No timestamps, run IDs, or block-written `parents` (the runtime injects `parents` on commit).
 
 ## Quality gate semantics (`on_fail`)
@@ -179,13 +189,14 @@ and check ordering:
 - **All checks passed (`passed == true`):** returns `BlockOutcome::Produced` with both `data` and
   `report`.
 - **One or more checks failed with `on_fail: fail` (default):**
-  - Returns `Error::Validation` containing one `ValidationError` item per failed check.
+  - Returns `Error::Validation` with one `ValidationError` per failed check; the single `schema` check yields one item **per offending column** (`schema.<col>`: `missing column`, `unexpected type <type>`, `unexpected column`).
+  - Messages never contain data values: only `check failed` or `<n> violating row(s)` (`allowed`, `unique`).
   - The error paths (`schema.<col>`, `min_rows`, `checks.<col>.<check>`) refer to the **validation
     report**, not to the YAML pipeline definition.
   - The runtime marks the node `Failed`, cancels all descendants, does **not** commit `data` or
     `report`, leaves `runs/latest.json` unchanged, and `mallops run` exits `1`.
 - **One or more checks failed with `on_fail: skip`:**
-  - Returns `BlockOutcome::Skipped` (committing `report` so the failed report can be inspected).
+  - Returns `BlockOutcome::Skipped` (committing `report` so the failed report can be inspected) with reason `validation failed: <path>, <path>, ...` (the same paths as the `fail` errors).
   - **Downstream blocking:** the runtime skips downstream nodes that consume `validate.data` (or
     `validate.report`) as a **required** input. `report` reaches only downstream nodes that wire it
     as an **optional** input.
@@ -206,8 +217,8 @@ and check ordering:
 
 | Situation | Error |
 |---|---|
-| Unknown field, `min > max`, `max_null_fraction` outside `[0.0, 1.0]` or non-finite, non-finite `min`/`max`, empty check entry, `${secret:` in config | `Error::Config` (in `mallops validate`, aggregated into `Error::Validation` under `blocks.<id>.with`) |
-| One or more data checks failed with `on_fail: fail` | `Error::Validation` (one item per failed check; report paths `schema.<col>`, `min_rows`, `checks.<col>.<check>`) |
+| Unknown field, `min > max`, `max_null_fraction` outside `[0.0, 1.0]` or non-finite, non-finite `min`/`max`, `checks.<col>` without an active check, `allowed` empty or with non-string/int64/bool items, `allow_extra_columns: false` without `schema`, `${secret:` in config | `Error::Config` (in `mallops validate`, aggregated into `Error::Validation` under `blocks.<id>.with`) |
+| One or more data checks failed with `on_fail: fail` | `Error::Validation` (one item per failed check, per offending column for `schema`; report paths `schema.<col>`, `min_rows`, `checks.<col>.<check>`) |
 | Unreadable or corrupted input Parquet file | `Error::Runtime` |
 | Cancellation via `ctx.cancel()` | `Error::Cancelled` |
 

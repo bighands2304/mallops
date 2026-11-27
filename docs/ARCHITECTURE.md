@@ -424,6 +424,11 @@ pub trait LoadedPredictor: Send + Sync {
 
 Consumers resolve a predictor through `PredictorRegistry`, which registers predictors by flavor atomically and enforces trust policy: flavors where `executes_code()` is `true` (such as `sklearn-pickle`) are rejected by `PredictorRegistry::get` with `Error::Config` unless `trust_unsafe_flavors` is explicitly passed (CLI: `--trust-unsafe-flavors`). See the full [Predictor contract reference](reference/predictor.md).
 
+Behind the `serve-http` feature, `mallops-std` provides `mallops_std::serve` (`ServeOptions`, `Server`, `ServeHandle`) over `axum` (HTTP/1.1):
+
+- **Request flow:** `GET /health` bypasses auth, timeout, and concurrency limits so probes stay responsive under load. `POST /predict` passes through metadata-only logging → timeout (`504`) → optional constant-time BLAKE3 bearer auth (`401`, before body read) → semaphore concurrency permit (`503`) → body size limit (`413`) → JSON decode → optional `FittedTransform::apply_json` → `LoadedPredictor`.
+- **Zero-downtime hot-swap:** `Server::handle()` yields a `Clone` `ServeHandle` with `async fn swap(store, id, predictors) -> Result<bool, Error>`. Swaps are serialized with an async mutex; the replacement state (`Package::load` in a fresh tempdir, trust-gate check, transform, and `Predictor::load`) is built completely before atomically replacing the `Arc<State>` behind a `RwLock` (never held across `.await`). In-flight requests finish on the previous `Arc<State>`, dropping the old predictor and tempdir only after the last request completes; any load or trust error logs a `warn` and keeps the active package untouched. `mallops-std` stays signal-agnostic: on Unix, `mallops-cli` installs a `SIGHUP` handler before initial load, re-reads `runs/latest.json`, and calls `ServeHandle::swap` (ignoring `SIGHUP` with a `warn` when an explicit `PACKAGE_ID` was given). See the [`mallops serve` reference](reference/serve.md).
+
 ## 8. Edge and federated learning (v0.4)
 
 ```mermaid

@@ -14,6 +14,8 @@ mod external;
     allow(dead_code)
 )]
 mod ingest;
+#[cfg(feature = "package")]
+mod package;
 #[cfg(feature = "predictor")]
 pub mod predictor;
 #[cfg(feature = "preprocess-tabular")]
@@ -23,6 +25,8 @@ mod smartcore_model;
 #[cfg(feature = "train-smartcore")]
 mod train;
 
+#[cfg(feature = "package")]
+pub use package::Package;
 #[cfg(feature = "preprocess-tabular")]
 pub use preprocess::transform::{FittedTransform, TRANSFORM_FILE};
 
@@ -71,6 +75,8 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
         ))))?;
         registry.register(Arc::new(evaluate::Evaluate::regression(predictors)))?;
     }
+    #[cfg(feature = "package")]
+    registry.register(Arc::new(package::PackageBlock::new()))?;
     Ok(())
 }
 
@@ -92,6 +98,7 @@ mod tests {
         let train_smartcore: BlockRef = "std/train.smartcore".parse().unwrap();
         let eval_cls: BlockRef = "std/evaluate.classification".parse().unwrap();
         let eval_reg: BlockRef = "std/evaluate.regression".parse().unwrap();
+        let package: BlockRef = "std/package".parse().unwrap();
 
         assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
         assert_eq!(
@@ -109,6 +116,7 @@ mod tests {
         );
         assert_eq!(registry.contains(&eval_cls), cfg!(feature = "evaluate"));
         assert_eq!(registry.contains(&eval_reg), cfg!(feature = "evaluate"));
+        assert_eq!(registry.contains(&package), cfg!(feature = "package"));
     }
 
     #[test]
@@ -122,7 +130,8 @@ mod tests {
             feature = "preprocess-tabular",
             feature = "external",
             feature = "train-smartcore",
-            feature = "evaluate"
+            feature = "evaluate",
+            feature = "package"
         )) {
             assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");
         } else {

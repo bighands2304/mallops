@@ -23,6 +23,7 @@ preprocess-tabular = ["_ingest", "_read_parquet", "dep:arrow-cast", "dep:arrow-o
 external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
 train-smartcore = ["_ingest", "_read_parquet", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
 predictor = []
+package = []
 evaluate = ["predictor", "_ingest", "_read_parquet", "dep:arrow-select"]
 predict-smartcore = ["predictor"]
 predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]

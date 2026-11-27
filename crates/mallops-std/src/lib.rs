@@ -3,6 +3,8 @@
 //! Blocks are registered explicitly with [`register_std`] (ADR-0007 D8): only the blocks whose
 //! feature is enabled are compiled and registered.
 
+#[cfg(feature = "evaluate")]
+mod evaluate;
 #[cfg(feature = "external")]
 mod external;
 #[cfg(feature = "_ingest")]
@@ -28,7 +30,11 @@ use mallops_core::{BlockRegistry, Error};
 
 /// Whether any string (key or value) in `value` contains `${secret:`; JSON never escapes `$`,
 /// `{` or `:`.
-#[cfg(any(feature = "external", feature = "train-smartcore"))]
+#[cfg(any(
+    feature = "external",
+    feature = "train-smartcore",
+    feature = "evaluate"
+))]
 pub(crate) fn has_secret_ref(value: &impl serde::Serialize) -> bool {
     serde_json::to_string(value).is_ok_and(|json| json.contains("${secret:"))
 }
@@ -50,6 +56,20 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
     registry.register(std::sync::Arc::new(external::External::new()))?;
     #[cfg(feature = "train-smartcore")]
     registry.register(std::sync::Arc::new(train::smartcore::TrainSmartcore::new()))?;
+    #[cfg(feature = "evaluate")]
+    {
+        // One predictor registry shared by both evaluate blocks. Without a `predict-*` feature
+        // the blocks register but fail at run time with "no predictor for flavor".
+        let mut predictors = predictor::PredictorRegistry::new();
+        predictor::register_std_predictors(&mut predictors)?;
+        let predictors = std::sync::Arc::new(predictors);
+        registry.register(std::sync::Arc::new(evaluate::Evaluate::classification(
+            std::sync::Arc::clone(&predictors),
+        )))?;
+        registry.register(std::sync::Arc::new(evaluate::Evaluate::regression(
+            predictors,
+        )))?;
+    }
     Ok(())
 }
 
@@ -69,6 +89,8 @@ mod tests {
         let preprocess: BlockRef = "std/preprocess.tabular".parse().unwrap();
         let external: BlockRef = "std/external".parse().unwrap();
         let train_smartcore: BlockRef = "std/train.smartcore".parse().unwrap();
+        let eval_cls: BlockRef = "std/evaluate.classification".parse().unwrap();
+        let eval_reg: BlockRef = "std/evaluate.regression".parse().unwrap();
 
         assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
         assert_eq!(
@@ -84,6 +106,8 @@ mod tests {
             registry.contains(&train_smartcore),
             cfg!(feature = "train-smartcore")
         );
+        assert_eq!(registry.contains(&eval_cls), cfg!(feature = "evaluate"));
+        assert_eq!(registry.contains(&eval_reg), cfg!(feature = "evaluate"));
     }
 
     #[test]
@@ -96,7 +120,8 @@ mod tests {
             feature = "ingest-parquet",
             feature = "preprocess-tabular",
             feature = "external",
-            feature = "train-smartcore"
+            feature = "train-smartcore",
+            feature = "evaluate"
         )) {
             assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");
         } else {

@@ -12,15 +12,27 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use ::parquet::arrow::ArrowWriter;
-#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+#[cfg(any(
+    feature = "preprocess-tabular",
+    feature = "train-smartcore",
+    feature = "evaluate"
+))]
 use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use ::parquet::basic::Compression;
 use ::parquet::file::properties::WriterProperties;
-#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+#[cfg(any(
+    feature = "preprocess-tabular",
+    feature = "train-smartcore",
+    feature = "evaluate"
+))]
 use arrow_array::RecordBatch;
 use arrow_array::RecordBatchReader;
 use arrow_schema::DataType;
-#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+#[cfg(any(
+    feature = "preprocess-tabular",
+    feature = "train-smartcore",
+    feature = "evaluate"
+))]
 use arrow_select::concat::concat_batches;
 use mallops_core::{
     ArtifactKind, BlockOutcome, CachePolicy, CancelToken, Digest, DraftPayload, Error, Manifest,
@@ -119,7 +131,11 @@ pub(crate) fn write_parquet(
 
 /// Reads a Parquet file into a single concatenated [`RecordBatch`], checking `cancel` between
 /// batches.
-#[cfg(any(feature = "preprocess-tabular", feature = "train-smartcore"))]
+#[cfg(any(
+    feature = "preprocess-tabular",
+    feature = "train-smartcore",
+    feature = "evaluate"
+))]
 pub(crate) fn read_parquet_batch(path: &Path, cancel: &CancelToken) -> Result<RecordBatch, Error> {
     let err = |e: &dyn std::fmt::Display| Error::Runtime(format!("{}: {e}", path.display()));
     let file = File::open(path)

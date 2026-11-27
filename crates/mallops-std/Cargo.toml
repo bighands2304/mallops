@@ -23,6 +23,7 @@ preprocess-tabular = ["_ingest", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-s
 external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
 train-smartcore = ["_ingest", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
 predictor = []
+evaluate = ["predictor", "_ingest", "dep:arrow-select"]
 predict-smartcore = ["predictor"]
 predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]
 # Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.

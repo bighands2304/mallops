@@ -13,25 +13,26 @@
 
 pub(crate) mod metrics;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use mallops_core::{
     ArtifactKind, Block, BlockOutcome, BlockSpec, BoxFuture, Context, DraftPayload, Error, Inputs,
-    Manifest, OutputDraft, OutputDrafts, Port, ResolvedPorts, Stage,
+    Manifest, OutputDraft, OutputDrafts, Port, Stage,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::has_secret_ref;
 use crate::ingest::{DATA_FILE, blocking, parse_config, read_parquet_batch};
 use crate::predictor::{PredictInput, PredictorRegistry};
-use metrics::{CLASSIFICATION_METRICS, Label, REGRESSION_METRICS};
+use metrics::{CLASSIFICATION_METRICS, Label, Metrics, REGRESSION_METRICS};
 
 const MODEL: &str = "model";
 const TEST: &str = "test";
 const METRICS: &str = "metrics";
+/// File name of the `metrics` payload.
+const METRICS_FILE: &str = "metrics.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Task {
@@ -62,7 +63,7 @@ impl Task {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum OnFail {
     #[default]
@@ -70,20 +71,13 @@ enum OnFail {
     Fail,
 }
 
-impl OnFail {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Skip => "skip",
-            Self::Fail => "fail",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Gate {
     metric: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max: Option<f64>,
     #[serde(default)]
     on_fail: OnFail,
@@ -105,16 +99,12 @@ impl Gate {
         Err(format!("gate failed: {} = {value} {bound}", self.metric))
     }
 
-    fn to_json(&self, passed: bool) -> Value {
-        let mut g =
-            json!({ "metric": self.metric, "on_fail": self.on_fail.as_str(), "passed": passed });
-        if let Some(m) = self.min {
-            g["min"] = json!(m);
-        }
-        if let Some(m) = self.max {
-            g["max"] = json!(m);
-        }
-        g
+    /// The `gate` manifest metadata: the gate itself plus its verdict.
+    fn to_json(&self, passed: bool) -> Result<Value, Error> {
+        let mut g = serde_json::to_value(self)
+            .map_err(|e| Error::Runtime(format!("failed to serialize gate: {e}")))?;
+        g["passed"] = json!(passed);
+        Ok(g)
     }
 }
 
@@ -246,86 +236,59 @@ impl<'a> Col<'a> {
             })
     }
 
-    fn is_null(&self, i: usize) -> bool {
-        match self {
-            Self::I(a) => a.is_null(i),
-            Self::F(a) => a.is_null(i),
-            Self::B(a) => a.is_null(i),
-            Self::S(a) => a.is_null(i),
-        }
-    }
-
     /// Feature value for the predictor; null and non-finite floats become JSON `null`.
     fn json(&self, i: usize) -> Value {
-        if self.is_null(i) {
-            return Value::Null;
-        }
         match self {
-            Self::I(a) => a.value(i).into(),
-            Self::F(a) => {
+            Self::I(a) if a.is_valid(i) => a.value(i).into(),
+            Self::F(a) if a.is_valid(i) => {
                 serde_json::Number::from_f64(a.value(i)).map_or(Value::Null, Value::Number)
             }
-            Self::B(a) => a.value(i).into(),
-            Self::S(a) => a.value(i).into(),
+            Self::B(a) if a.is_valid(i) => a.value(i).into(),
+            Self::S(a) if a.is_valid(i) => a.value(i).into(),
+            _ => Value::Null,
         }
     }
 
     fn labels(&self, name: &str) -> Result<Vec<Label>, Error> {
-        let n = match self {
-            Self::I(a) => a.len(),
+        let cells: Vec<Option<Label>> = match self {
+            Self::I(a) => a.iter().map(|v| v.map(Label::I64)).collect(),
+            Self::B(a) => a.iter().map(|v| v.map(Label::Bool)).collect(),
+            Self::S(a) => a
+                .iter()
+                .map(|v| v.map(|s| Label::Str(s.to_owned())))
+                .collect(),
             Self::F(_) => {
                 return Err(Error::Runtime(format!(
                     "classification target `{name}` must be int64, bool or string, not float64"
                 )));
             }
-            Self::B(a) => a.len(),
-            Self::S(a) => a.len(),
         };
-        (0..n)
-            .map(|i| {
-                if self.is_null(i) {
-                    return Err(Error::Runtime(format!(
-                        "target `{name}` is null at row {i}"
-                    )));
-                }
-                Ok(match self {
-                    Self::I(a) => Label::I64(a.value(i)),
-                    Self::B(a) => Label::Bool(a.value(i)),
-                    Self::S(a) => Label::Str(a.value(i).to_owned()),
-                    Self::F(_) => unreachable!("rejected above"),
-                })
+        cells
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| {
+                l.ok_or_else(|| Error::Runtime(format!("target `{name}` is null at row {i}")))
             })
             .collect()
     }
 
     fn numbers(&self, name: &str) -> Result<Vec<f64>, Error> {
-        let n = match self {
-            Self::I(a) => a.len(),
-            Self::F(a) => a.len(),
+        let cells: Vec<Option<f64>> = match self {
+            Self::I(a) => a.iter().map(|v| v.map(|x| x as f64)).collect(),
+            Self::F(a) => a.iter().collect(),
             _ => {
                 return Err(Error::Runtime(format!(
                     "regression target `{name}` must be int64 or float64"
                 )));
             }
         };
-        (0..n)
-            .map(|i| {
-                let v = match self {
-                    Self::I(a) if !a.is_null(i) => a.value(i) as f64,
-                    Self::F(a) if !a.is_null(i) => a.value(i),
-                    _ => {
-                        return Err(Error::Runtime(format!(
-                            "target `{name}` is null at row {i}"
-                        )));
-                    }
-                };
-                if v.is_finite() {
-                    Ok(v)
-                } else {
-                    Err(Error::Runtime(format!(
-                        "target `{name}` is not finite at row {i}"
-                    )))
-                }
+        cells
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.filter(|x| x.is_finite()).ok_or_else(|| {
+                    Error::Runtime(format!("target `{name}` is null or not finite at row {i}"))
+                })
             })
             .collect()
     }
@@ -360,7 +323,11 @@ fn resolve_target(cfg: &Config, manifest: &Manifest) -> Result<String, Error> {
 
 /// Names of the columns to send to the predictor: the model's `io_schema.input` (strings, or
 /// objects with a `name`) when declared, else every column but the target.
-fn feature_names(model: &Manifest, batch: &RecordBatch, target: &str) -> Vec<String> {
+fn feature_names(
+    model: &Manifest,
+    batch: &RecordBatch,
+    target: &str,
+) -> Result<Vec<String>, Error> {
     let declared = model
         .io_schema
         .as_ref()
@@ -375,15 +342,19 @@ fn feature_names(model: &Manifest, batch: &RecordBatch, target: &str) -> Vec<Str
                 })
                 .collect::<Option<Vec<_>>>()
         });
-    declared.unwrap_or_else(|| {
-        batch
+    match declared {
+        Some(cols) if cols.is_empty() => Err(Error::Runtime(
+            "model `io_schema.input` is empty: nothing to send to the predictor".into(),
+        )),
+        Some(cols) => Ok(cols),
+        None => Ok(batch
             .schema()
             .fields()
             .iter()
             .map(|f| f.name().clone())
             .filter(|n| n != target)
-            .collect()
-    })
+            .collect()),
+    }
 }
 
 fn load_test_set(
@@ -402,7 +373,7 @@ fn load_test_set(
         Task::Classification => Truth::Labels(truth_col.labels(target)?),
         Task::Regression => Truth::Numbers(truth_col.numbers(target)?),
     };
-    let names = feature_names(model, &batch, target);
+    let names = feature_names(model, &batch, target)?;
     let cols = names
         .iter()
         .map(|n| Col::new(&batch, n).map(|c| (n, c)))
@@ -469,14 +440,9 @@ fn parse_outputs(outputs: Vec<PredictInput>, rows: usize) -> Result<Predictions,
     })
 }
 
-struct Scored {
-    values: BTreeMap<String, f64>,
-    positive: Option<Label>,
-}
-
-fn score(task: Task, cfg: &Config, truth: &Truth, pred: &Predictions) -> Result<Scored, Error> {
-    match (task, truth) {
-        (Task::Classification, Truth::Labels(y_true)) => {
+fn score(truth: &Truth, positive: Option<&Label>, pred: &Predictions) -> Result<Metrics, Error> {
+    match truth {
+        Truth::Labels(y_true) => {
             let y_pred = pred
                 .values
                 .iter()
@@ -489,18 +455,9 @@ fn score(task: Task, cfg: &Config, truth: &Truth, pred: &Predictions) -> Result<
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let m = metrics::classification(
-                y_true,
-                &y_pred,
-                pred.proba.as_deref(),
-                cfg.positive.as_ref(),
-            )?;
-            Ok(Scored {
-                values: m.values,
-                positive: m.positive,
-            })
+            metrics::classification(y_true, &y_pred, pred.proba.as_deref(), positive)
         }
-        (Task::Regression, Truth::Numbers(y_true)) => {
+        Truth::Numbers(y_true) => {
             let y_pred = pred
                 .values
                 .iter()
@@ -511,14 +468,8 @@ fn score(task: Task, cfg: &Config, truth: &Truth, pred: &Predictions) -> Result<
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Scored {
-                values: metrics::regression(y_true, &y_pred)?,
-                positive: None,
-            })
+            metrics::regression(y_true, &y_pred)
         }
-        _ => Err(Error::Runtime(
-            "internal error: task/target mismatch".into(),
-        )),
     }
 }
 
@@ -529,11 +480,6 @@ impl Block for Evaluate {
 
     fn validate_config(&self, config: &Value) -> Result<(), Error> {
         Config::parse(self.task, config).map(|_| ())
-    }
-
-    fn resolve_ports(&self, config: &Value) -> Result<ResolvedPorts, Error> {
-        Config::parse(self.task, config)?;
-        Ok(ResolvedPorts::from(&self.spec))
     }
 
     fn run<'a>(
@@ -555,6 +501,10 @@ impl Block for Evaluate {
                 .ok_or_else(|| Error::Runtime("model artifact has no `flavor`".into()))?;
             let target = resolve_target(&cfg, test.manifest())?;
 
+            // The pipeline is trusted at run time (ADR-0007 D7): code-executing flavors allowed.
+            // Resolved before the fetches so an unsupported flavor fails without copying data.
+            let predictor = self.predictors.get(&flavor, true)?;
+
             let model_dir = ctx.workdir().join(MODEL);
             let test_dir = ctx.workdir().join(TEST);
             let model_dir = ctx.store().fetch(&model.id(), &model_dir).await?;
@@ -563,8 +513,6 @@ impl Block for Evaluate {
                 return Err(Error::Cancelled);
             }
 
-            // The pipeline is trusted at run time (ADR-0007 D7): code-executing flavors allowed.
-            let predictor = self.predictors.get(&flavor, true)?;
             let loaded = predictor.load(model, &model_dir).await?;
 
             let (task, cancel) = (self.task, ctx.cancel().clone());
@@ -578,7 +526,7 @@ impl Block for Evaluate {
             }
 
             let pred = parse_outputs(outputs, rows)?;
-            let scored = score(self.task, &cfg, &set.truth, &pred)?;
+            let scored = score(&set.truth, cfg.positive.as_ref(), &pred)?;
 
             let verdict = match &cfg.gate {
                 None => None,
@@ -595,6 +543,9 @@ impl Block for Evaluate {
 
             let payload = serde_json::to_vec(&scored.values)
                 .map_err(|e| Error::Runtime(format!("failed to serialize metrics: {e}")))?;
+            let metrics_path = ctx.workdir().join(METRICS_FILE);
+            std::fs::write(&metrics_path, payload)
+                .map_err(|e| Error::Runtime(format!("{}: {e}", metrics_path.display())))?;
             let mut manifest = Manifest::new(ArtifactKind::Metrics, "json")
                 .with_metadata_entry("task", json!(self.task.name()))
                 .with_metadata_entry("target", json!(target))
@@ -603,11 +554,11 @@ impl Block for Evaluate {
                 manifest = manifest.with_metadata_entry("positive", p.to_json());
             }
             if let Some((g, res)) = &verdict {
-                manifest = manifest.with_metadata_entry("gate", g.to_json(res.is_ok()));
+                manifest = manifest.with_metadata_entry("gate", g.to_json(res.is_ok())?);
             }
             let drafts = OutputDrafts::new().with(
                 METRICS,
-                OutputDraft::new(manifest, DraftPayload::Bytes(payload)),
+                OutputDraft::new(manifest, DraftPayload::File(metrics_path)),
             );
             match verdict {
                 Some((g, Err(reason))) => match g.on_fail {
@@ -628,6 +579,7 @@ impl Block for Evaluate {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
     use arrow_array::{ArrayRef, RecordBatchIterator};
@@ -646,10 +598,13 @@ mod tests {
     /// fixtures are analytic. `drop_last` makes it return one output too few.
     struct Mock {
         drop_last: bool,
+        /// When set, every row must carry exactly these (sorted) keys.
+        keys: Option<&'static [&'static str]>,
     }
 
     struct MockLoaded {
         drop_last: bool,
+        keys: Option<&'static [&'static str]>,
     }
 
     impl Predictor for Mock {
@@ -664,10 +619,10 @@ mod tests {
             _: &'a Artifact,
             _: &'a Path,
         ) -> BoxFuture<'a, Result<Box<dyn LoadedPredictor>, Error>> {
-            let drop_last = self.drop_last;
-            Box::pin(
-                async move { Ok(Box::new(MockLoaded { drop_last }) as Box<dyn LoadedPredictor>) },
-            )
+            let (drop_last, keys) = (self.drop_last, self.keys);
+            Box::pin(async move {
+                Ok(Box::new(MockLoaded { drop_last, keys }) as Box<dyn LoadedPredictor>)
+            })
         }
     }
 
@@ -677,6 +632,16 @@ mod tests {
                 let PredictInput::Json(row) = input else {
                     return Err(Error::Runtime("json only".into()));
                 };
+                if let Some(want) = self.keys {
+                    let got: Vec<&str> = row
+                        .as_object()
+                        .map(|o| o.keys().map(String::as_str).collect())
+                        .unwrap_or_default();
+                    // serde_json keeps keys sorted (no `preserve_order`)
+                    if got != want {
+                        return Err(Error::Runtime(format!("keys {got:?}, expected {want:?}")));
+                    }
+                }
                 let mut out = json!({ "prediction": row["p"] });
                 if !row["q"].is_null() {
                     out["probability"] = row["q"].clone();
@@ -702,8 +667,15 @@ mod tests {
     }
 
     fn registry(drop_last: bool) -> Arc<PredictorRegistry> {
+        registry_with(drop_last, None)
+    }
+
+    fn registry_with(
+        drop_last: bool,
+        keys: Option<&'static [&'static str]>,
+    ) -> Arc<PredictorRegistry> {
         let mut r = PredictorRegistry::new();
-        r.register(Arc::new(Mock { drop_last })).unwrap();
+        r.register(Arc::new(Mock { drop_last, keys })).unwrap();
         Arc::new(r)
     }
 
@@ -724,7 +696,15 @@ mod tests {
 
     /// Stores a mock model and a test set; returns the block inputs.
     async fn stage(store: &Arc<MemoryStore>, batch: &RecordBatch, target: Option<&str>) -> Inputs {
-        let model = model_manifest();
+        stage_model(store, model_manifest(), batch, target).await
+    }
+
+    async fn stage_model(
+        store: &Arc<MemoryStore>,
+        model: Manifest,
+        batch: &RecordBatch,
+        target: Option<&str>,
+    ) -> Inputs {
         let mid = store
             .put(model.clone(), PayloadSource::Bytes(b"m"))
             .await
@@ -761,10 +741,21 @@ mod tests {
         meta_target: Option<&str>,
         config: Value,
     ) -> Result<BlockOutcome, Error> {
+        run_model(block, model_manifest(), batch, meta_target, config).await
+    }
+
+    async fn run_model(
+        block: &Evaluate,
+        model: Manifest,
+        batch: &RecordBatch,
+        meta_target: Option<&str>,
+        config: Value,
+    ) -> Result<BlockOutcome, Error> {
         let store = Arc::new(MemoryStore::new());
-        let inputs = stage(&store, batch, meta_target).await;
-        let wd = tempfile::tempdir().unwrap();
-        let (ctx, _c) = ctx(&store, wd.path().to_path_buf(), config);
+        let inputs = stage_model(&store, model, batch, meta_target).await;
+        // kept (leaked) so tests can still read the `metrics.json` the draft points to
+        let wd = tempfile::tempdir().unwrap().keep();
+        let (ctx, _c) = ctx(&store, wd, config);
         block.run(&ctx, inputs).await
     }
 
@@ -776,11 +767,16 @@ mod tests {
         }
     }
 
-    fn metrics_of(d: &OutputDrafts) -> BTreeMap<String, f64> {
-        let DraftPayload::Bytes(b) = &d.get(METRICS).unwrap().payload else {
-            panic!("expected bytes");
+    fn metrics_raw(d: &OutputDrafts) -> String {
+        let DraftPayload::File(p) = &d.get(METRICS).unwrap().payload else {
+            panic!("expected a file payload");
         };
-        serde_json::from_slice(b).unwrap()
+        assert_eq!(p.file_name().unwrap(), "metrics.json");
+        std::fs::read_to_string(p).unwrap()
+    }
+
+    fn metrics_of(d: &OutputDrafts) -> BTreeMap<String, f64> {
+        serde_json::from_str(&metrics_raw(d)).unwrap()
     }
 
     fn close(m: &BTreeMap<String, f64>, k: &str, want: f64) {
@@ -822,9 +818,19 @@ mod tests {
             .unwrap();
         let d = drafts(out);
         let m = metrics_of(&d);
+        let raw: Value = serde_json::from_str(&metrics_raw(&d)).unwrap();
         assert_eq!(
-            m.keys().map(String::as_str).collect::<Vec<_>>(),
+            raw.as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             ["accuracy", "f1", "precision", "recall", "roc_auc"]
+        );
+        assert!(
+            metrics_raw(&d).starts_with(r#"{"accuracy":0.75,"f1":"#),
+            "{}",
+            metrics_raw(&d)
         );
         close(&m, "accuracy", 0.75);
         close(&m, "precision", 2.0 / 3.0);
@@ -887,13 +893,14 @@ mod tests {
     #[tokio::test]
     async fn evaluate_regression_metrics() {
         let b = Evaluate::regression(registry(false));
-        let batch = reg_batch(vec![1.0, 2.0, 3.0, 6.0]);
+        // MSE 2.25 != RMSE 1.5, so a missing sqrt is caught
+        let batch = reg_batch(vec![1.0, 2.0, 3.0, 7.0]);
         let d = drafts(run_with(&b, &batch, Some("y"), json!({})).await.unwrap());
         let m = metrics_of(&d);
         assert_eq!(m.len(), 3);
-        close(&m, "mae", 0.5);
-        close(&m, "rmse", 1.0);
-        close(&m, "r2", 0.2);
+        close(&m, "mae", 0.75);
+        close(&m, "rmse", 1.5);
+        close(&m, "r2", -0.8);
         let man = &d.get(METRICS).unwrap().manifest;
         assert_eq!(man.metadata["task"], "regression");
         assert!(!man.metadata.contains_key("positive"));
@@ -955,6 +962,113 @@ mod tests {
             let cfg = json!({ "gate": { "metric": "roc_auc", "min": 0.5, "on_fail": on_fail } });
             let e = run_with(&b, &batch, Some("y"), cfg).await;
             assert!(matches!(e, Err(Error::Config(_))), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn evaluate_gate_check_bounds() {
+        let gate = |min, max| Gate {
+            metric: "f1".into(),
+            min,
+            max,
+            on_fail: OnFail::Skip,
+        };
+        // bounds are inclusive
+        assert!(gate(Some(0.5), None).check(0.5).is_ok());
+        assert!(gate(Some(0.5), None).check(0.49).is_err());
+        assert!(gate(None, Some(0.5)).check(0.5).is_ok());
+        assert!(gate(None, Some(0.5)).check(0.51).is_err());
+        let range = gate(Some(0.2), Some(0.8));
+        assert!(range.check(0.2).is_ok() && range.check(0.5).is_ok() && range.check(0.8).is_ok());
+        assert!(range.check(0.19).is_err() && range.check(0.81).is_err());
+        // NaN fails closed
+        assert!(gate(Some(0.5), None).check(f64::NAN).is_err());
+        assert!(gate(None, Some(0.5)).check(f64::NAN).is_err());
+        assert!(range.check(f64::NAN).is_err());
+    }
+
+    #[tokio::test]
+    async fn evaluate_sends_exact_feature_columns() {
+        let keys =
+            |k: &'static [&'static str]| Evaluate::classification(registry_with(false, Some(k)));
+        let meta = |input: Value| model_manifest().with_io_schema(json!({ "input": input }));
+
+        // (a) no io_schema: every column but the target
+        let b = keys(&["p", "q", "x"]);
+        run_with(&b, &cls_batch(), Some("y"), json!({}))
+            .await
+            .unwrap();
+
+        // (b) objects {name,type}: only the declared columns, `x` is not sent
+        let b = keys(&["p", "q"]);
+        let m = meta(json!([{ "name": "p", "type": "int64" }, { "name": "q", "type": "float64" }]));
+        run_model(&b, m, &cls_batch(), Some("y"), json!({}))
+            .await
+            .unwrap();
+
+        // (c) plain strings
+        let m = meta(json!(["p", "q"]));
+        run_model(&b, m, &cls_batch(), Some("y"), json!({}))
+            .await
+            .unwrap();
+
+        // (d) a declared column missing from the test set
+        let m = meta(json!(["p", "nope"]));
+        let e = run_model(&b, m, &cls_batch(), Some("y"), json!({})).await;
+        assert!(matches!(e, Err(Error::Runtime(m)) if m.contains("`nope` not found")));
+
+        // an empty declaration is an error, not rows of `{}`
+        let e = run_model(&b, meta(json!([])), &cls_batch(), Some("y"), json!({})).await;
+        assert!(matches!(e, Err(Error::Runtime(m)) if m.contains("empty")));
+    }
+
+    #[tokio::test]
+    async fn evaluate_metrics_payload_is_metrics_json_in_the_store() {
+        let b = Evaluate::classification(registry(false));
+        let d = drafts(
+            run_with(&b, &cls_batch(), Some("y"), json!({}))
+                .await
+                .unwrap(),
+        );
+        let draft = d.get(METRICS).unwrap();
+        let store = MemoryStore::new();
+        let id = store
+            .put(draft.manifest.clone(), draft.payload.as_source())
+            .await
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let dir = store.fetch(&id, &out.path().join("m")).await.unwrap();
+        let m: BTreeMap<String, f64> =
+            serde_json::from_slice(&std::fs::read(dir.join("metrics.json")).unwrap()).unwrap();
+        close(&m, "accuracy", 0.75);
+    }
+
+    #[tokio::test]
+    async fn evaluate_rejects_empty_test_set_and_bad_probability() {
+        let b = Evaluate::classification(registry(false));
+        let empty = RecordBatch::try_from_iter([
+            (
+                "p",
+                Arc::new(Int64Array::from(Vec::<i64>::new())) as ArrayRef,
+            ),
+            ("y", Arc::new(Int64Array::from(Vec::<i64>::new())) as _),
+        ])
+        .unwrap();
+        let e = run_with(&b, &empty, Some("y"), json!({})).await;
+        assert!(
+            matches!(&e, Err(Error::Runtime(m)) if m.contains("no rows")),
+            "{e:?}"
+        );
+
+        for bad in [1.5, -0.1] {
+            let batch = RecordBatch::try_from_iter([
+                ("p", Arc::new(Int64Array::from(vec![0, 1])) as ArrayRef),
+                ("q", Arc::new(Float64Array::from(vec![0.5, bad])) as _),
+                ("y", Arc::new(Int64Array::from(vec![0, 1])) as _),
+            ])
+            .unwrap();
+            let e = run_with(&b, &batch, Some("y"), json!({})).await;
+            assert!(matches!(e, Err(Error::Runtime(m)) if m.contains("[0, 1]")));
         }
     }
 

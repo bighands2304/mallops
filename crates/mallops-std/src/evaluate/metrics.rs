@@ -43,12 +43,12 @@ impl Label {
     }
 }
 
-/// Result of [`classification`].
+/// Result of [`classification`] / [`regression`].
 #[derive(Debug, PartialEq)]
-pub(crate) struct ClassificationMetrics {
+pub(crate) struct Metrics {
     /// Metric name → finite value; only the metrics that could be computed.
     pub(crate) values: BTreeMap<String, f64>,
-    /// The positive class, for binary tasks.
+    /// The positive class, for binary classification only.
     pub(crate) positive: Option<Label>,
 }
 
@@ -125,7 +125,7 @@ pub(crate) fn classification(
     y_pred: &[Label],
     proba: Option<&[f64]>,
     positive: Option<&Label>,
-) -> Result<ClassificationMetrics, Error> {
+) -> Result<Metrics, Error> {
     let n = y_true.len();
     if n == 0 || y_pred.len() != n || proba.is_some_and(|p| p.len() != n) {
         return Err(Error::Runtime(
@@ -179,10 +179,17 @@ pub(crate) fn classification(
         }
         Some(pos)
     } else {
-        if positive.is_some() {
-            return Err(Error::Runtime(
-                "with.positive is only valid for binary classification".into(),
-            ));
+        if let Some(pos) = positive {
+            let observed: BTreeSet<&Label> = y_true.iter().chain(y_pred).collect();
+            return Err(Error::Runtime(if observed.len() <= 2 {
+                format!(
+                    "with.positive {} is not one of the {} observed classes",
+                    pos.to_json(),
+                    observed.len()
+                )
+            } else {
+                "with.positive is only valid for binary classification".into()
+            }));
         }
         let (mut p, mut r, mut f) = (0.0, 0.0, 0.0);
         for class in &classes {
@@ -198,7 +205,7 @@ pub(crate) fn classification(
         None
     };
     ensure_finite(&values)?;
-    Ok(ClassificationMetrics {
+    Ok(Metrics {
         values,
         positive: positive_class,
     })
@@ -210,7 +217,7 @@ pub(crate) fn classification(
 ///
 /// [`Error::Runtime`] on empty or mismatched inputs, or a non-finite metric (e.g. overflow of
 /// the squared error on absurd predictions).
-pub(crate) fn regression(y_true: &[f64], y_pred: &[f64]) -> Result<BTreeMap<String, f64>, Error> {
+pub(crate) fn regression(y_true: &[f64], y_pred: &[f64]) -> Result<Metrics, Error> {
     let n = y_true.len();
     if n == 0 || y_pred.len() != n {
         return Err(Error::Runtime(
@@ -225,7 +232,8 @@ pub(crate) fn regression(y_true: &[f64], y_pred: &[f64]) -> Result<BTreeMap<Stri
         ss_tot += (t - mean) * (t - mean);
         abs += (t - p).abs();
     }
-    let r2 = if ss_tot == 0.0 {
+    // Exact test: the mean of a constant target can differ from it by rounding.
+    let r2 = if y_true.iter().all(|t| *t == y_true[0]) {
         if ss_res == 0.0 { 1.0 } else { 0.0 }
     } else {
         1.0 - ss_res / ss_tot
@@ -236,7 +244,10 @@ pub(crate) fn regression(y_true: &[f64], y_pred: &[f64]) -> Result<BTreeMap<Stri
         ("rmse".to_owned(), (ss_res / nf).sqrt()),
     ]);
     ensure_finite(&values)?;
-    Ok(values)
+    Ok(Metrics {
+        values,
+        positive: None,
+    })
 }
 
 #[cfg(test)]
@@ -313,6 +324,13 @@ mod tests {
     }
 
     #[test]
+    fn positive_outside_the_two_observed_classes() {
+        let y = ints(&[0, 1]);
+        let e = classification(&y, &y, None, Some(&Label::I64(2))).unwrap_err();
+        assert!(e.to_string().contains("not one of the 2 observed"), "{e}");
+    }
+
+    #[test]
     fn string_and_bool_labels() {
         let s = |v: &[&str]| {
             v.iter()
@@ -358,16 +376,28 @@ mod tests {
 
     #[test]
     fn regression_analytic() {
-        let m = regression(&[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 6.0]).unwrap();
-        close(m["mae"], 0.5);
-        close(m["rmse"], 1.0);
-        close(m["r2"], 1.0 - 4.0 / 5.0);
+        // MSE 2.25 != RMSE 1.5, so a missing sqrt is caught
+        let m = regression(&[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 7.0])
+            .unwrap()
+            .values;
+        close(m["mae"], 0.75);
+        close(m["rmse"], 1.5);
+        close(m["r2"], -0.8);
     }
 
     #[test]
     fn regression_constant_target_r2() {
-        close(regression(&[2.0, 2.0], &[2.0, 2.0]).unwrap()["r2"], 1.0);
-        close(regression(&[2.0, 2.0], &[2.0, 3.0]).unwrap()["r2"], 0.0);
+        close(
+            regression(&[2.0, 2.0], &[2.0, 2.0]).unwrap().values["r2"],
+            1.0,
+        );
+        close(
+            regression(&[2.0, 2.0], &[2.0, 3.0]).unwrap().values["r2"],
+            0.0,
+        );
+        // 0.1 * 3 / 3 != 0.1 in floating point: still a constant target
+        let m = regression(&[0.1; 3], &[0.1, 0.1, 0.2]).unwrap();
+        close(m.values["r2"], 0.0);
     }
 
     #[test]

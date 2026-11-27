@@ -90,8 +90,10 @@ Both blocks have `version: "0.1.0"` and `Stage::Evaluate`:
 - **Test dataset:** the entire `test` Parquet file is loaded into memory. Empty datasets (`0` rows)
   fail with `Error::Runtime`.
 - **Feature columns sent to the predictor:**
-  - If `model.manifest.io_schema.input` is a JSON array of strings, exactly those columns are sent
-    (a missing column fails with `Error::Runtime`).
+  - If `model.manifest.io_schema.input` is a JSON array of column names, exactly those columns are
+    sent. Each entry is either a string or an object with a `name` (the `{ "name", "type" }` form
+    written by `std/train.smartcore`). A missing column, or an empty array, fails with
+    `Error::Runtime`.
   - Otherwise, every column in the `test` Parquet schema except the target column is sent.
   - Supported Arrow feature column types are `Int64`, `Float64`, `Boolean`, and `Utf8`. Nulls are
     encoded as JSON `null`; non-finite `Float64` values (`NaN`, `±inf`) are also encoded as JSON

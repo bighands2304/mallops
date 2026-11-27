@@ -10,7 +10,7 @@
       
       
       
-        <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/reference/train-external/">
+        <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/reference/external/">
       
       
         <link rel="prev" href="../../adr/0009-mqtt-blocks-and-serve-transport/">
@@ -27,7 +27,7 @@
     
     
       
-        <title>std/train.external - mallops</title>
+        <title>std/external - mallops</title>
       
     
     
@@ -91,7 +91,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#stdtrainexternal" class="md-skip">
+        <a href="#stdexternal" class="md-skip">
           Skip to content
         </a>
       
@@ -130,7 +130,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              std/train.external
+              std/external
             
           </span>
         </div>
@@ -767,7 +767,7 @@
   <span class="md-ellipsis">
     
   
-    std/train.external
+    std/external
   
 
     
@@ -785,7 +785,7 @@
   <span class="md-ellipsis">
     
   
-    std/train.external
+    std/external
   
 
     
@@ -1299,7 +1299,7 @@
 
 
   
-    <a href="https://github.com/bighands2304/mallops/edit/dev/docs/reference/train-external.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/bighands2304/mallops/edit/dev/docs/reference/external.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -1307,23 +1307,42 @@
   
 
 
-<h1 id="stdtrainexternal"><code>std/train.external</code><a class="headerlink" href="#stdtrainexternal" title="Permanent link">&para;</a></h1>
-<p>Runs any command (Python, R, Julia, a container…) as a training step. mallops materializes the
-input artifacts into a working directory, writes <code>inputs.json</code> and <code>config.json</code>, runs the
-command, and commits what the command declares in <code>outputs.json</code>. No Rust bindings are needed.
-See SPEC FR-TRN-3 and <a href="../../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</p>
+<h1 id="stdexternal"><code>std/external</code><a class="headerlink" href="#stdexternal" title="Permanent link">&para;</a></h1>
+<p>Runs any command (Python, R, Julia, a container…) as a pipeline step — custom preprocessing,
+feature engineering, model training, custom evaluation metrics, report generation, or anything
+else. Behind the optional <code>external</code> Cargo feature of <code>mallops-std</code> (<code>Stage::Custom</code>, version
+<code>0.1.0</code>).</p>
+<p>mallops materializes the input artifacts into a working directory, writes <code>inputs.json</code> and
+<code>config.json</code>, runs the command, and commits what the command declares in <code>outputs.json</code>. No Rust
+bindings are needed. See <a href="../../SPEC/#33-preprocessing-data-features">SPEC FR-PRE-2</a>,
+<a href="../../SPEC/#34-training">FR-TRN-3</a>, <a href="../../SPEC/#36-model-evaluation">FR-EVL-3</a> and
+<a href="../../adr/0003-plugins-wasm-and-grpc/">ADR-0003</a>.</p>
+<p>Generic example (custom feature engineering emitting features and metrics):</p>
+<div class="highlight"><pre><span></span><code><span class="nt">blocks</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">custom_features</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">use</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">std/external</span>
+<span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> dataset</span><span class="p">:</span><span class="w"> </span><span class="nv">raw.dataset</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">    </span><span class="nt">with</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"./featurize.py"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">inputs</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> dataset</span><span class="p">:</span><span class="w"> </span><span class="nv">dataset</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">outputs</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> features</span><span class="p">:</span><span class="w"> </span><span class="nv">features</span><span class="p p-Indicator">,</span><span class="nt"> metrics</span><span class="p">:</span><span class="w"> </span><span class="nv">metrics</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">params</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> window</span><span class="p">:</span><span class="w"> </span><span class="nv">7</span><span class="w"> </span><span class="p p-Indicator">}</span>
+</code></pre></div>
+<p>Training example (emitting a <code>model</code> artifact with a <code>flavor</code>):</p>
 <div class="highlight"><pre><span></span><code><span class="nt">blocks</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">model</span><span class="p">:</span>
-<span class="w">    </span><span class="nt">use</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">std/train.external</span>
-<span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> train</span><span class="p">:</span><span class="w"> </span><span class="nv">features.train</span><span class="p p-Indicator">,</span><span class="nt"> val</span><span class="p">:</span><span class="w"> </span><span class="nv">features.validation</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">    </span><span class="nt">use</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">std/external</span>
+<span class="w">    </span><span class="nt">in</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> train</span><span class="p">:</span><span class="w"> </span><span class="nv">features.train</span><span class="w"> </span><span class="p p-Indicator">}</span>
 <span class="w">    </span><span class="nt">with</span><span class="p">:</span>
 <span class="w">      </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"./train.py"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">inputs</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> train</span><span class="p">:</span><span class="w"> </span><span class="nv">features</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">outputs</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> model</span><span class="p">:</span><span class="w"> </span><span class="nv">model</span><span class="w"> </span><span class="p p-Indicator">}</span>
 <span class="w">      </span><span class="nt">flavor</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sklearn-pickle</span>
 <span class="w">      </span><span class="nt">params</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> n_estimators</span><span class="p">:</span><span class="w"> </span><span class="nv">200</span><span class="w"> </span><span class="p p-Indicator">}</span>
 <span class="w">      </span><span class="nt">secrets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">MLFLOW_TOKEN</span><span class="p p-Indicator">]</span>
 <span class="w">      </span><span class="nt">timeout_secs</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3600</span>
 </code></pre></div>
-<p>A runnable reference script is in <code>examples/train-external/train.py</code>.</p>
+<p>A runnable reference script is in <code>examples/external/train.py</code>.</p>
 <h2 id="configuration-with">Configuration (<code>with:</code>)<a class="headerlink" href="#configuration-with" title="Permanent link">&para;</a></h2>
 <p>Unknown fields are rejected.</p>
 <table>
@@ -1343,10 +1362,22 @@ See SPEC FR-TRN-3 and <a href="../../adr/0003-plugins-wasm-and-grpc/">ADR-0003</
 <td>argv, executed directly (never through a shell). Not empty; <code>command[0]</code> not empty.</td>
 </tr>
 <tr>
+<td><code>inputs</code></td>
+<td>map port → kind</td>
+<td>required</td>
+<td>Declared input ports (may be <code>{}</code>). Every declared port is required.</td>
+</tr>
+<tr>
+<td><code>outputs</code></td>
+<td>map port → kind</td>
+<td>required</td>
+<td>Declared output ports (must be non-empty). Every declared port is required.</td>
+</tr>
+<tr>
 <td><code>flavor</code></td>
 <td>string</td>
 <td>none</td>
-<td>Flavor of every port of kind <code>model</code> (inputs and outputs); fills model outputs that do not set their own.</td>
+<td>Allowed only when at least one declared port has kind <code>model</code>. Sets the flavor of every port of kind <code>model</code> (inputs and outputs); fills model outputs that do not set their own.</td>
 </tr>
 <tr>
 <td><code>params</code></td>
@@ -1384,33 +1415,30 @@ See SPEC FR-TRN-3 and <a href="../../adr/0003-plugins-wasm-and-grpc/">ADR-0003</
 <td><code>[]</code></td>
 <td>Files that make the block cacheable (see <a href="#cache">Cache</a>).</td>
 </tr>
-<tr>
-<td><code>inputs</code></td>
-<td>map port → kind</td>
-<td><code>train</code> (required) + <code>val</code> (optional), kind <code>features</code></td>
-<td><strong>Replaces</strong> the default input ports.</td>
-</tr>
-<tr>
-<td><code>outputs</code></td>
-<td>map port → kind</td>
-<td><code>model</code>, kind <code>model</code></td>
-<td><strong>Replaces</strong> the default output port.</td>
-</tr>
 </tbody>
 </table>
 <p>Validation (<code>mallops validate</code>, which never runs the command):</p>
 <ul>
-<li><code>env</code> / <code>secrets</code> names match <code>[A-Za-z_][A-Za-z0-9_]*</code>, are disjoint from each other and differ
-  from <code>PATH</code>, <code>SYSTEMROOT</code> and <code>MALLOPS_*</code>.</li>
+<li><code>inputs</code> and <code>outputs</code> are required; <code>outputs</code> must declare at least one port (<code>inputs</code> may be
+  empty <code>{}</code>).</li>
 <li>Port names match <code>[a-z][a-z0-9_]*</code> (also re-checked at run time for input names given through
   the library API).</li>
+<li><code>flavor</code> is rejected unless at least one declared input or output port has kind <code>model</code>.</li>
+<li><code>env</code> / <code>secrets</code> names match <code>[A-Za-z_][A-Za-z0-9_]*</code>, are disjoint from each other and differ
+  from <code>PATH</code>, <code>SYSTEMROOT</code> and <code>MALLOPS_*</code>.</li>
 <li>Strings containing <code>${secret:</code> in <code>command</code>, <code>flavor</code>, <code>params</code>, <code>env</code>, <code>secrets</code> or
   <code>watch_files</code> are rejected: use <code>secrets:</code>.</li>
 </ul>
 <h2 id="ports">Ports<a class="headerlink" href="#ports" title="Permanent link">&para;</a></h2>
-<p>Default inputs: <code>train</code> (required) and <code>val</code> (optional), kind <code>features</code>. Default output: <code>model</code>,
-kind <code>model</code>. Custom <code>inputs</code> / <code>outputs</code> replace these entirely. Unknown ports, kind mismatches and
-missing required outputs are checked by the runtime when it commits the outputs.</p>
+<p><code>std/external</code> has <strong>no default ports</strong>: <code>inputs</code> and <code>outputs</code> must always be declared explicitly
+in <code>with:</code> (and are resolved dynamically via <code>Block::resolve_ports</code>).</p>
+<ul>
+<li><code>outputs</code> must contain at least one port; <code>inputs</code> may be empty.</li>
+<li>Every declared input and output port is <strong>required</strong> (there are no optional ports).</li>
+<li>When <code>flavor</code> is set, it applies to every declared port of kind <code>model</code> (inputs and outputs).</li>
+<li>Unknown ports, kind mismatches and missing required outputs are checked by the runtime when it
+  commits the outputs.</li>
+</ul>
 <h2 id="contract-v1">Contract v1<a class="headerlink" href="#contract-v1" title="Permanent link">&para;</a></h2>
 <p>mallops runs the command with the node workdir as cwd (mode <code>0700</code> on Unix; removed with the run).
 Every contract file carries <code>"protocol_version": 1</code>; a command must refuse any other value.</p>
@@ -1443,8 +1471,8 @@ All paths in the contract use <code>/</code> and are relative to the workdir.</p
 <span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
-<p>Optional ports that are not wired are absent from <code>inputs</code>. <code>manifest</code> is the artifact manifest;
-<code>flavor</code> and <code>io_schema</code> appear only when set.</p>
+<p><code>inputs</code> contains an entry for every declared input port (or <code>{}</code> when <code>with.inputs</code> is empty).
+<code>manifest</code> is the artifact manifest; <code>flavor</code> and <code>io_schema</code> appear only when set.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">"$schema"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://json-schema.org/draft/2020-12/schema"</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"object"</span><span class="p">,</span>
@@ -1564,8 +1592,9 @@ unchanged and looked up through <code>PATH</code>. Hence <code>["python", "./tra
 <h2 id="cache">Cache<a class="headerlink" href="#cache" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Without <code>watch_files</code> the block is <strong>uncacheable</strong>: it runs every time.</li>
-<li>With <code>watch_files</code> it is cacheable: the key adds a BLAKE3 hash of every watched file's path and
-  content, in a fixed order. A missing file or a directory is an error.</li>
+<li>With <code>watch_files</code> it is cacheable: the key adds a domain-separated BLAKE3 hash
+  (<code>mallops/external/watch_files/v1</code>) of every watched file's path and content, in a fixed order.
+  A missing file or a directory is an error.</li>
 </ul>
 <p>Not part of the key: values of host environment variables, the binary or interpreter, and the
 Python (or other) dependencies. Add the script and a lock file to <code>watch_files</code>, and change <code>params</code>
@@ -1579,6 +1608,10 @@ when you bump the environment.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td>Missing <code>inputs</code> or <code>outputs</code>, empty <code>outputs</code>, <code>flavor</code> without any <code>model</code> port, invalid port / <code>env</code> / <code>secrets</code> name, <code>${secret:</code> in config, unknown field</td>
+<td><code>Error::Config</code> (reported under <code>blocks.&lt;id&gt;.with</code> by <code>mallops validate</code>)</td>
+</tr>
 <tr>
 <td>Timeout</td>
 <td><code>Error::Runtime("timed out after Ns")</code>, process group killed</td>
@@ -1610,7 +1643,7 @@ inputs are guard rails against accidents, not isolation. Flavors that execute co
 <h2 id="what-mallops-does-not-manage">What mallops does not manage<a class="headerlink" href="#what-mallops-does-not-manage" title="Permanent link">&para;</a></h2>
 <p>Python itself, interpreter versions, virtualenvs, dependencies and containers are yours. Point
 <code>command</code> at the interpreter you want (<code>["./.venv/bin/python", "./train.py"]</code>), or use a container:</p>
-<div class="highlight"><pre><span></span><code><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"docker"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"run"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"--rm"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"-e"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"MLFLOW_TOKEN"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"my-trainer:1.2"</span><span class="p p-Indicator">]</span>
+<div class="highlight"><pre><span></span><code><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"docker"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"run"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"--rm"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"-e"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"MLFLOW_TOKEN"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"my-runner:1.2"</span><span class="p p-Indicator">]</span>
 <span class="nt">secrets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">MLFLOW_TOKEN</span><span class="p p-Indicator">]</span>
 </code></pre></div>
 <p>Forward env vars explicitly with <code>-e NAME</code>. The container only sees the workdir (inputs, contract

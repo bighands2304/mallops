@@ -21,7 +21,7 @@ use mallops_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::has_secret_ref;
+use crate::has_secret_ref;
 use crate::ingest::{Column, ColumnType, DATA_FILE, blocking, parse_config, read_parquet_batch};
 use crate::smartcore_model::{
     Algorithm, FLAVOR_LINEAR, FLAVOR_LOGISTIC, MODEL_FILE, MODEL_SCHEMA_VERSION, ModelClasses,

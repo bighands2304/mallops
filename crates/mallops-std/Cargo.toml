@@ -20,7 +20,7 @@ ingest = ["ingest-csv", "ingest-parquet"]
 ingest-csv = ["dep:arrow-csv", "_ingest"]
 ingest-parquet = ["_ingest"]
 preprocess-tabular = ["_ingest", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-select"]
-train-external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
+external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
 train-smartcore = ["_ingest", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
 predictor = []
 predict-smartcore = ["predictor"]
@@ -46,7 +46,7 @@ parquet = { version = "60", default-features = false, features = ["arrow", "snap
 # Native classic ML for std/train.smartcore (pure Rust, no BLAS).
 smartcore = { version = "0.7", default-features = false, features = ["std"], optional = true }
 
-# Process-group kill for train.external (safe `killpg`; `unsafe_code` is forbidden).
+# Process-group kill for external (safe `killpg`; `unsafe_code` is forbidden).
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.32", default-features = false, features = ["signal"], optional = true }
 

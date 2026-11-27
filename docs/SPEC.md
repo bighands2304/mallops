@@ -84,7 +84,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
     - `scale: { method: standard | minmax, columns? }`: default columns are numeric (`int64`, `float64`) non-target; `standard` fits `offset = mean` and `scale = population stddev`, `minmax` fits `offset = min` and `scale = max - min` (all-null column fails). Outputs `float64` via `(x - offset) / scale`; `scale == 0` maps valid values to `0.0`; nulls remain null. Non-finite float values (`NaN`, `±inf`) fail with `Error::Runtime` at both `fit` and `apply`.
     - `encode: { method: ordinal | one_hot, columns? }`: default columns are `utf8` non-target; collects sorted unique non-null categories (`BTreeSet`) from `train`. `ordinal` outputs `int64` category indices (`-1` for unseen or null); `one_hot` replaces `<col>` in place with `float64` columns `<col>=<cat>` in category order (all `0.0` for unseen or null) and fails with `Error::Runtime` if a generated `<col>=<cat>` name collides with an existing or another generated column.
     - Explicit `columns` referencing `target`, a missing column, or an unsupported type fail with `Error::Runtime` naming the column.
-- FR-PRE-2: user-defined transforms (Rust closure, WASM, external process).
+- FR-PRE-2: user-defined transforms (Rust closure, WASM, external process — in v0.1 via [`std/external`](reference/external.md)).
 - FR-PRE-3: fitted transforms are themselves artifacts (`kind: transform`, `format: json`, `payload/transform.json` = `{"v":1,"target":…,"input":[…],"steps":[…]}` serialized deterministically, `io_schema = { "input": […], "output": […] }` where `output` records the training output schema including `target`), capturing fitted steps (`select`, `impute`, `scale`, `ordinal`, `one_hot`; never `filter` or `split`). `mallops_std::FittedTransform` reloads the artifact (`from_dir`, rejecting versions other than `1`) and replays it so serving applies the exact same preprocessing:
   - `apply_batch`: projects the incoming `RecordBatch` onto `input` columns in `input` order (`target` optional, extra columns ignored) with strict Arrow type checks (`Error::Runtime` naming the column, expected, and found types) before applying the fitted steps.
   - `apply_json`: accepts a JSON array of row objects keyed by `input` columns (`target` optional, unknown keys ignored, explicit `null` allowed; a missing key for a non-target column fails with `Error::Runtime("…row {i}: missing column '{col}'")`; `int64` columns accept whole-number floats; type mismatches report row index and column name), builds the `RecordBatch`, and applies the exact same steps as `apply_batch`.
@@ -92,7 +92,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 ### 3.4 Training
 - FR-TRN-1: native Rust training (`smartcore` for classic ML) — v0.1. The block is `std/train.smartcore` (feature `train-smartcore`, not in `default`; binary logistic regression and linear regression); see [`std/train.smartcore`](reference/train-smartcore.md).
 - FR-TRN-2: deep learning via burn/candle — v0.3.
-- FR-TRN-3: **external trainer**: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings. The block is `std/train.external`; the CLI contract v1 is specified in [`std/train.external`](reference/train-external.md).
+- FR-TRN-3: **external trainer**: run any command/container (Python, R, Julia…) that reads input artifacts and writes outputs into a mallops-managed workspace directory — v0.1. This is how PyTorch, TensorFlow, scikit-learn, XGBoost are supported without Rust bindings. In v0.1 this is provided by the generic [`std/external`](reference/external.md) block (CLI contract v1).
 - FR-TRN-4: hyperparameters, seed and environment recorded in the run lineage.
 
 ### 3.5 Model engineering
@@ -102,7 +102,7 @@ Two distinct concerns, deliberately kept apart ([ADR-0006](adr/0006-store-and-li
 ### 3.6 Model evaluation
 - FR-EVL-1: standard metrics (accuracy, precision/recall/F1, ROC-AUC, RMSE, MAE, R²) — v0.1.
 - FR-EVL-2: **quality gates**: a pipeline can fail or branch when a metric is below a threshold or worse than the current production model.
-- FR-EVL-3: custom metrics via plugins.
+- FR-EVL-3: custom metrics via plugins (in v0.1, external processes via [`std/external`](reference/external.md)).
 
 ### 3.7 Model packaging
 - FR-PKG-1: package = model artifact + preprocessing `transform` artifacts + manifest (`flavor`, `io_schema`, requirements) — v0.1.
@@ -202,10 +202,12 @@ blocks:
         - scale: { method: standard }
 
   model:
-    use: std/train.external            # any language, any library
-    in: { train: features.train }      # wire `val: features.validation` when `split.validation` is set
+    use: std/external                  # any language, any library
+    in: { train: features.train }
     with:
       command: ["python", "./train.py"]
+      inputs: { train: features }
+      outputs: { model: model }
       flavor: sklearn-pickle
       params: { n_estimators: 200 }
 
@@ -243,7 +245,7 @@ Rules:
 - Store and lineage backend mapping in the v0.1 CLI (`check_backends`, enforced by `validate`, `run`, and `store verify`):
   - `store.kind` accepts `local` (`LocalStore` at `<yaml-dir>/<store.path>`, where `<yaml-dir>` is the parent directory of the `mallops.yaml` path, defaulting to `.` when empty) and `memory` (`MemoryStore`). Any other `store.kind` fails with an error.
   - `lineage: off` disables lineage (`RuntimeConfig::lineage = vec![]`); otherwise every configured sink must have `sink: json` (`JsonSink` on the configured store). Any other sink name fails with an error.
-- Built-in blocks in `mallops-cli`: `core/noop` (version `1.0.0`, `Stage::Custom`, optional input `in: blob`, output `out: blob` with `format: noop` and empty payload; test affordances `fail: "<message>"` and `skip: "<reason>"` in `with:`) plus all feature-enabled standard blocks registered via `mallops_std::register_std(&mut registry)` (in v0.1 so far: `std/ingest.csv`, `std/ingest.parquet`, `std/preprocess.tabular`, `std/train.external`, `std/train.smartcore`).
+- Built-in blocks in `mallops-cli`: `core/noop` (version `1.0.0`, `Stage::Custom`, optional input `in: blob`, output `out: blob` with `format: noop` and empty payload; test affordances `fail: "<message>"` and `skip: "<reason>"` in `with:`) plus all feature-enabled standard blocks registered via `mallops_std::register_std(&mut registry)` (in v0.1 so far: `std/external`, `std/ingest.csv`, `std/ingest.parquet`, `std/preprocess.tabular`, `std/train.smartcore`).
 - Latest run pointer (`runs/latest.json`): after `mallops run`, if and only if every node is `Succeeded`, the CLI writes `runs/latest.json` via `ArtifactStore::put_meta` (`meta/runs/latest.json` on `LocalStore`) as `{"v":1,"pipeline":"<name>","run":"<run-id>","outputs":{"<node>":{"<port>":"<artifact-id>"}}}` (deterministic key order via `BTreeMap`), so `mallops serve` can resolve `serve.package` without an explicit id. If any node is `Skipped` (with no failed/cancelled nodes), `mallops run` leaves any previous `runs/latest.json` unchanged, prints `latest.json not updated: <S> skipped`, and exits `0`. A failed run leaves any previous `runs/latest.json` unchanged and exits `1` (`error: run failed`).
 - A JSON Schema for `mallops.yaml` can be generated via the optional `schema` feature (`schemars`) for editor completion.
 
@@ -257,7 +259,7 @@ Exit codes: `0` on success, `1` on configuration, validation, runtime, or store 
 |---|---|
 | `mallops init [DIR]` | Writes a minimal runnable `mallops.yaml` (two `core/noop` nodes, `hello` → `world`) into `DIR` (default `.`, creating missing parent directories); fails if `mallops.yaml` already exists. |
 | `mallops validate` | Parses and validates `mallops.yaml` (including `serve:` if present) and checks supported store/lineage backends without executing blocks or spawning processes. Prints `ok: <name> (<N> blocks)` on stdout, or every validation error (`error: <path>: <message>`) on stderr. |
-| `mallops run [--jobs N] [--no-cache]` | Validates and executes the batch DAG (`blocks:` only; ignores `serve:`). Changes the working directory to the directory of `mallops.yaml` so relative paths in block configs (such as `std/ingest.*` `path`) resolve against the pipeline directory, matching `store.path`. `--jobs N` overrides `RuntimeConfig::max_jobs` (default: available parallelism; `0` counts as `1`); `--no-cache` bypasses the cache. Populates `git_commit` via best-effort `git rev-parse HEAD` in the `mallops.yaml` directory. Prints one line per node in topological order (`<node> <status>[ (cached)] <ms>ms[: <reason/error>]`) followed by `run <run-id>: <E> executed, <C> cached, <F> failed, <S> skipped, <X> cancelled` (`executed` = non-cached `Succeeded`). Writes `runs/latest.json` only when every node is `Succeeded` (if any node is `Skipped`, prints `latest.json not updated: <S> skipped` and exits `0`); exits `1` on failure. Ctrl-C (SIGINT) cancels the run cooperatively through the run's `CancelToken`: running nodes end `Cancelled` (`std/train.external` kills its child's process group), the summary is printed and the exit code is `1`. |
+| `mallops run [--jobs N] [--no-cache]` | Validates and executes the batch DAG (`blocks:` only; ignores `serve:`). Changes the working directory to the directory of `mallops.yaml` so relative paths in block configs (such as `std/ingest.*` `path`) resolve against the pipeline directory, matching `store.path`. `--jobs N` overrides `RuntimeConfig::max_jobs` (default: available parallelism; `0` counts as `1`); `--no-cache` bypasses the cache. Populates `git_commit` via best-effort `git rev-parse HEAD` in the `mallops.yaml` directory. Prints one line per node in topological order (`<node> <status>[ (cached)] <ms>ms[: <reason/error>]`) followed by `run <run-id>: <E> executed, <C> cached, <F> failed, <S> skipped, <X> cancelled` (`executed` = non-cached `Succeeded`). Writes `runs/latest.json` only when every node is `Succeeded` (if any node is `Skipped`, prints `latest.json not updated: <S> skipped` and exits `0`); exits `1` on failure. Ctrl-C (SIGINT) cancels the run cooperatively through the run's `CancelToken`: running nodes end `Cancelled` (`std/external` kills its child's process group), the summary is printed and the exit code is `1`. |
 | `mallops graph [--format mermaid\|dot]` | Prints the validated DAG in topological order as Mermaid (`flowchart TD`, default) or Graphviz DOT (`digraph`), with edges labeled by input port name, without executing blocks or spawning processes. |
 | `mallops blocks list` | Prints registered blocks (`ID`, `VERSION`, `STAGE`, `INPUTS`, `OUTPUTS`; optional inputs suffixed with `?`, empty port list shown as `-`), sorted by block id. |
 | `mallops store verify <ID>` | Parses `<ID>` as an `ArtifactId`, checks backends, opens the configured store (for `kind: local`, fails with `store not found: <path>` without creating it if absent), and calls `ArtifactStore::verify`. Prints `ok: <id>` on stdout on success; exits `1` on invalid id, missing store/artifact, or corruption/tampering. |
@@ -313,7 +315,7 @@ Inputs and outputs of blocks declare the accepted `kind` and optionally accepted
 
 | Version | Scope |
 |---|---|
-| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `store verify`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train smartcore + external, evaluate classification/regression, package, HTTP serving) |
+| **v0.1** | `mallops-core` (Block trait, canonical artifacts, immutable `ArtifactStore` + local/memory + auxiliary metadata, explicit `BlockRegistry`, lineage events + JSON sink, DAG runtime, YAML), CLI (`init`, `validate`, `run`, `graph`, `blocks list`, `store verify`, `serve`), `mallops-std` (`Predictor` contract, ingest csv/parquet, preprocess tabular, train smartcore, generic external block, evaluate classification/regression, package, HTTP serving) |
 | v0.2 | remote store backends, SQLite/OpenLineage/MLflow lineage sinks, data storage blocks, model registry & versioning, hyperparameter search, deploy local/docker, gRPC serving, OCI packaging |
 | v0.3 | monitoring (Prometheus/OTel), drift detection, retrain triggers, DL training (burn/candle), signing, canary/shadow deploy, MQTT ingest/publish blocks and MQTT serving transport |
 | v0.4 | `mallops-edge` (edge build profiles), on-device online learning, federated learning, fleet deploy, distributed monitoring |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reference trainer for mallops `std/train.external` (contract v1), standard library only.
+"""Reference trainer for mallops `std/external` (contract v1), standard library only.
 
 mallops runs this script with the node workdir as cwd and writes `inputs.json` and `config.json`
 there. The script checks `protocol_version == 1`, "trains" a fake model (it just stores `params`
@@ -8,15 +8,17 @@ and the input description) and declares it in `outputs.json`. Non-zero exit = fa
 Wire it in `mallops.yaml` (the `./` makes the path absolute against the mallops.yaml directory):
 
     model:
-      use: std/train.external
+      use: std/external
       in: { train: features.train }
       with:
-        command: ["python3", "./examples/train-external/train.py"]
-        flavor: demo-json
+        command: ["python3", "./examples/external/train.py"]
+        inputs: { train: features }     # required: declared input ports (name: kind)
+        outputs: { model: model }       # required: at least one declared output port
+        flavor: demo-json               # needs at least one port of kind `model`
         params: { alpha: 0.5 }
-        watch_files: [examples/train-external/train.py]   # optional: makes the block cacheable
+        watch_files: [examples/external/train.py]   # optional: makes the block cacheable
 
-Full contract: docs/reference/train-external.md
+Full contract: docs/reference/external.md
 """
 
 import json

@@ -475,7 +475,7 @@ mod tests {
         let config_hash = Digest::from_bytes([0x22; 32]);
         let in_id = ArtifactId::from_bytes([0xaa; 32]);
         let out_id = ArtifactId::from_bytes([0xbb; 32]);
-        let block: BlockRef = "std/train.external".parse().unwrap();
+        let block: BlockRef = "std/external".parse().unwrap();
 
         let started = LineageEvent::RunStarted {
             run,
@@ -523,7 +523,7 @@ mod tests {
                 "run": run.to_string(),
                 "timestamp": "2026-11-23T10:00:00.123Z",
                 "node": "train",
-                "block": "std/train.external",
+                "block": "std/external",
                 "block_version": "1.0.0",
                 "config_hash": config_hash.to_hex(),
                 "seed": 42,

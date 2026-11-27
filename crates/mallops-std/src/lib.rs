@@ -3,6 +3,8 @@
 //! Blocks are registered explicitly with [`register_std`] (ADR-0007 D8): only the blocks whose
 //! feature is enabled are compiled and registered.
 
+#[cfg(feature = "external")]
+mod external;
 #[cfg(feature = "_ingest")]
 // Without an ingest block only the shared Arrow/Parquet helpers are used (by preprocess / train.smartcore).
 #[cfg_attr(
@@ -16,13 +18,20 @@ pub mod predictor;
 mod preprocess;
 #[cfg(any(feature = "train-smartcore", feature = "predict-smartcore"))]
 mod smartcore_model;
-#[cfg(any(feature = "train-external", feature = "train-smartcore"))]
+#[cfg(feature = "train-smartcore")]
 mod train;
 
 #[cfg(feature = "preprocess-tabular")]
 pub use preprocess::transform::{FittedTransform, TRANSFORM_FILE};
 
 use mallops_core::{BlockRegistry, Error};
+
+/// Whether any string (key or value) in `value` contains `${secret:`; JSON never escapes `$`,
+/// `{` or `:`.
+#[cfg(any(feature = "external", feature = "train-smartcore"))]
+pub(crate) fn has_secret_ref(value: &impl serde::Serialize) -> bool {
+    serde_json::to_string(value).is_ok_and(|json| json.contains("${secret:"))
+}
 
 /// Registers every feature-enabled standard block into `registry`.
 ///
@@ -37,8 +46,8 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
     registry.register(std::sync::Arc::new(ingest::parquet::IngestParquet::new()))?;
     #[cfg(feature = "preprocess-tabular")]
     registry.register(std::sync::Arc::new(preprocess::PreprocessTabular::new()))?;
-    #[cfg(feature = "train-external")]
-    registry.register(std::sync::Arc::new(train::external::TrainExternal::new()))?;
+    #[cfg(feature = "external")]
+    registry.register(std::sync::Arc::new(external::External::new()))?;
     #[cfg(feature = "train-smartcore")]
     registry.register(std::sync::Arc::new(train::smartcore::TrainSmartcore::new()))?;
     Ok(())
@@ -58,7 +67,7 @@ mod tests {
         let csv: BlockRef = "std/ingest.csv".parse().unwrap();
         let parquet: BlockRef = "std/ingest.parquet".parse().unwrap();
         let preprocess: BlockRef = "std/preprocess.tabular".parse().unwrap();
-        let train_external: BlockRef = "std/train.external".parse().unwrap();
+        let external: BlockRef = "std/external".parse().unwrap();
         let train_smartcore: BlockRef = "std/train.smartcore".parse().unwrap();
 
         assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
@@ -70,10 +79,7 @@ mod tests {
             registry.contains(&preprocess),
             cfg!(feature = "preprocess-tabular")
         );
-        assert_eq!(
-            registry.contains(&train_external),
-            cfg!(feature = "train-external")
-        );
+        assert_eq!(registry.contains(&external), cfg!(feature = "external"));
         assert_eq!(
             registry.contains(&train_smartcore),
             cfg!(feature = "train-smartcore")
@@ -89,7 +95,7 @@ mod tests {
             feature = "ingest-csv",
             feature = "ingest-parquet",
             feature = "preprocess-tabular",
-            feature = "train-external",
+            feature = "external",
             feature = "train-smartcore"
         )) {
             assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");

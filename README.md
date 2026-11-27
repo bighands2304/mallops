@@ -39,8 +39,8 @@ blocks:
   raw:      { use: std/ingest.csv, with: { path: data/customers.csv } }
   features: { use: std/preprocess.tabular, in: { data: raw.dataset },
               with: { target: churned, steps: [{ split: { test: 0.2, seed: 42 } }] } }
-  model:    { use: std/train.external, in: { train: features.train },
-              with: { command: [python, train.py], flavor: sklearn-pickle } }
+  model:    { use: std/external, in: { train: features.train },
+              with: { command: [python, ./train.py], inputs: { train: features }, outputs: { model: model }, flavor: sklearn-pickle } }
   eval:     { use: std/evaluate.classification, in: { model: model.model, test: features.test },
               with: { gate: { metric: f1, min: 0.8 } } }
   package:  { use: std/package,

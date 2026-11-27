@@ -77,7 +77,7 @@ nav:
       - adr/0008-edge-build-profiles-and-on-device-training.md
       - adr/0009-mqtt-blocks-and-serve-transport.md
   - Reference:
-      - std/train.external: reference/train-external.md
+      - std/external: reference/external.md
       - std/train.smartcore: reference/train-smartcore.md
       - Predictor contract: reference/predictor.md
   - Contributing: contributing.md

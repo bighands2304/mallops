@@ -92,7 +92,7 @@ where
             run,
             timestamp: ts(110),
             node: "n_ok".into(),
-            block: parse_block("std/train.external"),
+            block: parse_block("std/external"),
             block_version: "1.2.3".into(),
             config_hash,
             seed: Some(42),
@@ -180,7 +180,7 @@ where
     assert_eq!(ev1["run"], run_str);
     assert_eq!(ev1["timestamp"], "2026-11-23T10:00:00.110Z");
     assert_eq!(ev1["node"], "n_ok");
-    assert_eq!(ev1["block"], "std/train.external");
+    assert_eq!(ev1["block"], "std/external");
     assert_eq!(ev1["block_version"], "1.2.3");
     assert_eq!(ev1["config_hash"], config_hash.to_hex());
     assert_eq!(ev1["seed"], 42);

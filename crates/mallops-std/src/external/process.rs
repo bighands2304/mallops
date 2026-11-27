@@ -1,4 +1,4 @@
-//! Child process execution for `std/train.external`: argv only, cleared environment, process
+//! Child process execution for `std/external`: argv only, cleared environment, process
 //! group, timeout/cancel, capped and redacted output. Knows nothing about `Context`.
 
 use std::future::Future;
@@ -278,7 +278,7 @@ mod tests {
 
     use super::*;
 
-    const CHILD_TEST_NAME: &str = "train::external::process::tests::child_entry";
+    const CHILD_TEST_NAME: &str = "external::process::tests::child_entry";
     const MODE_MARKER: &str = "mallops_child_mode:";
     const SECRET_VAR: &str = "TEST_SECRET";
 
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_security_redacts_secret_straddling_log_cap() {
+    async fn external_security_redacts_secret_straddling_log_cap() {
         // log_cap = 20; 16 'A's + 24-byte secret + 20 'B's -> secret crosses byte 20.
         let template = format!("{}@{}", "A".repeat(16), "B".repeat(20));
         let output = emit_secret("TOPSECRET_BOUNDARY_VALUE", &template, 20).await;
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_security_redacts_secret_cut_at_capture_cap() {
+    async fn external_security_redacts_secret_cut_at_capture_cap() {
         // Redacting the first occurrence pulls the second, cut at log_cap + secret len, into
         // the log_cap window: no byte of it may survive.
         let pad = |n| "A".repeat(n);
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_precancelled_skips_spawn() {
+    async fn external_timeout_and_cancel_precancelled_skips_spawn() {
         let dir = tempfile::tempdir().expect("tempdir");
         let argv = vec!["nonexistent-binary-that-must-not-spawn".to_string()];
         let cancel = CancelSource::new();
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_caps_and_drains_streams() {
+    async fn external_timeout_and_cancel_caps_and_drains_streams() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Write 256 KiB per stream (well above typical OS pipe buffers) with a 256 B cap.
         let argv = child_argv("emit_bytes", &["262144", "262144"]);
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_nonzero_exit_is_ok() {
+    async fn external_timeout_and_cancel_nonzero_exit_is_ok() {
         let dir = tempfile::tempdir().expect("tempdir");
         let argv = child_argv("exit_code", &["42"]);
         let spec = spec(dir.path(), argv, Some(Duration::from_secs(10)), 4096);
@@ -565,21 +565,21 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_kills_process_group_on_cancel() {
+    async fn external_timeout_and_cancel_kills_process_group_on_cancel() {
         let err = group_killed("sleep", None, CancelSource::cancel).await;
         assert!(matches!(err, Err(Error::Cancelled)), "{err:?}");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_kills_process_group_on_normal_exit() {
+    async fn external_timeout_and_cancel_kills_process_group_on_normal_exit() {
         let output = group_killed("exit_immediately", None, |_| {}).await;
         assert!(output.expect("child exited cleanly").status.success());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_kills_process_group_on_timeout() {
+    async fn external_timeout_and_cancel_kills_process_group_on_timeout() {
         let err = group_killed("sleep", Some(Duration::from_secs(2)), |_| {}).await;
         assert!(
             matches!(&err, Err(Error::Runtime(m)) if m == "timed out after 2s"),
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn train_external_timeout_and_cancel_spawn_failure_returns_runtime_error() {
+    async fn external_timeout_and_cancel_spawn_failure_returns_runtime_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("does-not-exist-binary");
         let argv = vec![missing.to_string_lossy().into_owned()];

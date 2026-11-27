@@ -1,4 +1,4 @@
-//! Versioned file contract v1 between `std/train.external` and the external command.
+//! Versioned file contract v1 between `std/external` and the external command.
 //!
 //! mallops writes `inputs.json` and `config.json` into the node workdir (the child's cwd); the
 //! command writes `outputs.json` there. Every file carries `protocol_version: 1`.
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_contract_v1_read_outputs_rejects_wrong_version() {
+    fn external_contract_v1_read_outputs_rejects_wrong_version() {
         let dir = tempfile::tempdir().unwrap();
         write_outputs(
             dir.path(),
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_contract_v1_read_outputs_rejects_unknown_fields() {
+    fn external_contract_v1_read_outputs_rejects_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
         write_outputs(
             dir.path(),
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_contract_v1_read_outputs_missing_or_malformed() {
+    fn external_contract_v1_read_outputs_missing_or_malformed() {
         let dir = tempfile::tempdir().unwrap();
         assert!(runtime_msg(read_outputs(dir.path())).contains("not written"));
         fs::write(dir.path().join(OUTPUTS_FILE), "{").unwrap();
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_contract_v1_read_outputs_skipped_into_outcome() {
+    fn external_contract_v1_read_outputs_skipped_into_outcome() {
         let dir = tempfile::tempdir().unwrap();
         write_outputs(
             dir.path(),
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_contract_v1_read_outputs_produced_into_outcome() {
+    fn external_contract_v1_read_outputs_produced_into_outcome() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("out")).unwrap();
         fs::write(dir.path().join("out/model.onnx"), b"m").unwrap();
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn train_external_security_output_payload_rejects_traversal_and_absolute() {
+    fn external_security_output_payload_rejects_traversal_and_absolute() {
         let dir = tempfile::tempdir().unwrap();
         for bad in ["../x", "a/../b", "/etc/passwd", "./x", "", "a\\b", "C:/x"] {
             assert!(
@@ -317,14 +317,14 @@ mod tests {
     }
 
     #[test]
-    fn train_external_security_output_payload_missing() {
+    fn external_security_output_payload_missing() {
         let dir = tempfile::tempdir().unwrap();
         runtime_msg(output_payload(dir.path(), "nope"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn train_external_security_output_payload_rejects_symlinks() {
+    fn external_security_output_payload_rejects_symlinks() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -353,7 +353,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn train_external_security_output_payload_rejects_special_files() {
+    fn external_security_output_payload_rejects_special_files() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sock");
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -362,7 +362,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn train_external_security_read_outputs_rejects_symlinked_file() {
+    fn external_security_read_outputs_rejects_symlinked_file() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         write_outputs(

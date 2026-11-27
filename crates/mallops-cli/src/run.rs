@@ -198,7 +198,7 @@ pub(crate) fn run(file: &Path, jobs: Option<usize>, no_cache: bool) -> anyhow::R
     rt_cfg.git_commit = git_commit(base);
 
     // Ctrl-C cancels the run cooperatively, so blocks can stop their children (e.g. the process
-    // group of `std/train.external`, which no longer receives the terminal's SIGINT).
+    // group of `std/external`, which no longer receives the terminal's SIGINT).
     let cancel = CancelSource::new();
     rt_cfg.cancel = cancel.token();
 

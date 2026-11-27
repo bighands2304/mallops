@@ -1,4 +1,4 @@
-//! Ctrl-C during `mallops run` cancels the run and kills the `std/train.external` process group
+//! Ctrl-C during `mallops run` cancels the run and kills the `std/external` process group
 //! (issue #13).
 
 #![cfg(unix)]
@@ -40,14 +40,14 @@ fn read_pid(path: &Path) -> Option<String> {
 }
 
 #[test]
-fn ctrl_c_cancels_run_and_kills_trainer_process_group() {
+fn ctrl_c_cancels_run_and_kills_external_process_group() {
     let wd = WorkDir::new();
     let pid_file = wd.path().join("grandchild.pid");
     // The pid file path is `$1` (quoted), written atomically so `read_pid` never sees it partial.
     let script = r#"sleep 30 & echo $! > "$1.tmp" && mv "$1.tmp" "$1"; wait"#;
     let yaml = format!(
-        "version: 1\nname: ctrl-c\nblocks:\n  train:\n    use: std/train.external\n    with:\n      \
-         command: {}\n      inputs: {{}}\n",
+        "version: 1\nname: ctrl-c\nblocks:\n  train:\n    use: std/external\n    with:\n      \
+         command: {}\n      inputs: {{}}\n      outputs: {{ model: model }}\n",
         serde_json::json!(["sh", "-c", script, "_", pid_file])
     );
     wd.write("mallops.yaml", &yaml);

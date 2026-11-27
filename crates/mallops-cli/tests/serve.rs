@@ -24,6 +24,7 @@ blocks:
 serve: { package: package.package, port: 0 }
 "#;
 
+#[cfg(unix)] // only the Unix e2e test runs the pipeline
 fn csv() -> String {
     let mut s = String::from("x1,x2,y\n");
     for i in 0..40 {

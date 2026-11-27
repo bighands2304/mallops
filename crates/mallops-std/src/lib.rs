@@ -8,7 +8,7 @@ mod evaluate;
 #[cfg(feature = "external")]
 mod external;
 #[cfg(feature = "_ingest")]
-// Without an ingest block only the shared Arrow/Parquet helpers are used (by preprocess / train.smartcore).
+// Without an ingest block only the shared Arrow/Parquet helpers are used (by preprocess / train.smartcore / evaluate).
 #[cfg_attr(
     not(any(feature = "ingest-csv", feature = "ingest-parquet")),
     allow(dead_code)
@@ -46,29 +46,30 @@ pub(crate) fn has_secret_ref(value: &impl serde::Serialize) -> bool {
 /// [`Error::Validation`] if a standard block id is already registered.
 #[allow(unused_variables)] // with `--no-default-features` no block is registered
 pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
+    #[allow(unused_imports)] // only the blocks that share state need it
+    use std::sync::Arc;
+
     #[cfg(feature = "ingest-csv")]
-    registry.register(std::sync::Arc::new(ingest::csv::IngestCsv::new()))?;
+    registry.register(Arc::new(ingest::csv::IngestCsv::new()))?;
     #[cfg(feature = "ingest-parquet")]
-    registry.register(std::sync::Arc::new(ingest::parquet::IngestParquet::new()))?;
+    registry.register(Arc::new(ingest::parquet::IngestParquet::new()))?;
     #[cfg(feature = "preprocess-tabular")]
-    registry.register(std::sync::Arc::new(preprocess::PreprocessTabular::new()))?;
+    registry.register(Arc::new(preprocess::PreprocessTabular::new()))?;
     #[cfg(feature = "external")]
-    registry.register(std::sync::Arc::new(external::External::new()))?;
+    registry.register(Arc::new(external::External::new()))?;
     #[cfg(feature = "train-smartcore")]
-    registry.register(std::sync::Arc::new(train::smartcore::TrainSmartcore::new()))?;
+    registry.register(Arc::new(train::smartcore::TrainSmartcore::new()))?;
     #[cfg(feature = "evaluate")]
     {
         // One predictor registry shared by both evaluate blocks. Without a `predict-*` feature
         // the blocks register but fail at run time with "no predictor for flavor".
         let mut predictors = predictor::PredictorRegistry::new();
         predictor::register_std_predictors(&mut predictors)?;
-        let predictors = std::sync::Arc::new(predictors);
-        registry.register(std::sync::Arc::new(evaluate::Evaluate::classification(
-            std::sync::Arc::clone(&predictors),
-        )))?;
-        registry.register(std::sync::Arc::new(evaluate::Evaluate::regression(
-            predictors,
-        )))?;
+        let predictors = Arc::new(predictors);
+        registry.register(Arc::new(evaluate::Evaluate::classification(Arc::clone(
+            &predictors,
+        ))))?;
+        registry.register(Arc::new(evaluate::Evaluate::regression(predictors)))?;
     }
     Ok(())
 }

@@ -12,6 +12,7 @@
 //! Limits (v0.1): the whole dataset is read into memory; the report has no row-level detail
 //! beyond up to 5 sorted example values for `allowed` / `unique`.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use arrow_array::cast::AsArray;
@@ -51,7 +52,8 @@ struct ColumnChecks {
     min: Option<Number>,
     max: Option<Number>,
     allowed: Option<Vec<Value>>,
-    unique: Option<bool>,
+    #[serde(default)]
+    unique: bool,
 }
 
 const fn yes() -> bool {
@@ -89,7 +91,7 @@ impl Config {
                 && c.min.is_none()
                 && c.max.is_none()
                 && c.allowed.is_none()
-                && c.unique != Some(true)
+                && !c.unique
             {
                 return err(format!("`checks.{col}` has no active check"));
             }
@@ -101,7 +103,10 @@ impl Config {
                 ));
             }
             if let (Some(lo), Some(hi)) = (&c.min, &c.max)
-                && lo.as_f64() > hi.as_f64()
+                && lo
+                    .as_i64()
+                    .zip(hi.as_i64())
+                    .map_or_else(|| lo.as_f64() > hi.as_f64(), |(a, b)| a > b)
             {
                 return err(format!("`checks.{col}.min` must not exceed `max`"));
             }
@@ -129,9 +134,9 @@ struct Check {
     passed: bool,
     observed: Value,
     expected: Value,
-    /// Gate errors `(path, message)` of a failed check; never carries data values.
+    /// Gate errors of a failed check; paths and counts only, never data values.
     #[serde(skip)]
-    errors: Vec<(String, String)>,
+    errors: Vec<ValidationError>,
 }
 
 impl Check {
@@ -149,7 +154,7 @@ impl Check {
                 || "check failed".to_owned(),
                 |n| format!("{n} violating row(s)"),
             );
-            errors.push((path, message));
+            errors.push(ValidationError::new(path, message));
         }
         Self {
             check,
@@ -173,12 +178,8 @@ struct Report<'a> {
 fn fnum(x: f64) -> Value {
     if x.is_finite() {
         json!(x)
-    } else if x.is_nan() {
-        json!("NaN")
-    } else if x > 0.0 {
-        json!("inf")
     } else {
-        json!("-inf")
+        json!(x.to_string()) // "NaN" / "inf" / "-inf"
     }
 }
 
@@ -229,10 +230,12 @@ fn bound(a: &ArrayRef, b: &Number, is_min: bool) -> (bool, Value) {
             let Some(x) = (if is_min { vals.min() } else { vals.max() }) else {
                 return (true, Value::Null);
             };
-            let passed = b.as_i64().map_or_else(
-                || ok_f(x as f64),
-                |bi| if is_min { x >= bi } else { x <= bi },
-            );
+            let ord = match b.as_i64() {
+                Some(bi) => x.cmp(&bi),
+                None if b.is_u64() => Ordering::Less, // bound above i64::MAX
+                None => (x as f64).total_cmp(&want),
+            };
+            let passed = if is_min { ord.is_ge() } else { ord.is_le() };
             (passed, json!(x))
         }
         DataType::Float64 => {
@@ -245,7 +248,10 @@ fn bound(a: &ArrayRef, b: &Number, is_min: bool) -> (bool, Value) {
                 .reduce(|p, q| if is_min == (q < p) { q } else { p });
             ext.map_or((true, Value::Null), |x| (ok_f(x), fnum(x)))
         }
-        dt => (false, json!(format!("non-numeric column of type {dt}"))),
+        dt => (
+            false,
+            json!(format!("non-numeric column of type {}", type_name(dt))),
+        ),
     }
 }
 
@@ -272,52 +278,49 @@ fn allowed(a: &ArrayRef, list: &[Value]) -> (bool, Value) {
             let ok: BTreeSet<bool> = list.iter().filter_map(Value::as_bool).collect();
             tally(a.as_boolean().iter(), |v| !ok.contains(v), |v| json!(v))
         }
-        dt => (false, json!(format!("`allowed` is not supported on {dt}"))),
+        dt => (
+            false,
+            json!(format!("`allowed` is not supported on {}", type_name(dt))),
+        ),
     }
 }
 
 /// `unique` check: `count` is the number of rows repeating an earlier value.
 fn unique(a: &ArrayRef) -> (bool, Value) {
+    fn dups<T: Ord + Copy>(
+        it: impl Iterator<Item = Option<T>>,
+        js: impl Fn(&T) -> Value,
+    ) -> (bool, Value) {
+        let mut seen = BTreeSet::new();
+        tally(it, |v| !seen.insert(*v), js)
+    }
     match a.data_type() {
-        DataType::Utf8 => {
-            let mut seen = BTreeSet::new();
-            tally(
-                a.as_string::<i32>().iter(),
-                |v| !seen.insert(*v),
-                |v| json!(v),
-            )
-        }
-        DataType::Int64 => {
-            let mut seen = BTreeSet::new();
-            tally(
-                a.as_primitive::<Int64Type>().iter(),
-                |v| !seen.insert(*v),
-                |v| json!(v),
-            )
-        }
-        DataType::Date32 => {
-            let mut seen = BTreeSet::new();
-            tally(
-                a.as_primitive::<Date32Type>().iter(),
-                |v| !seen.insert(*v),
-                |v| json!(v),
-            )
-        }
-        DataType::Boolean => {
-            let mut seen = BTreeSet::new();
-            tally(a.as_boolean().iter(), |v| !seen.insert(*v), |v| json!(v))
-        }
-        DataType::Float64 => {
-            let mut seen = BTreeSet::new();
-            tally(
-                a.as_primitive::<Float64Type>()
-                    .iter()
-                    .map(|o| o.map(float_key)),
-                |v| !seen.insert(*v),
-                |v| fnum(float_from_key(*v)),
-            )
-        }
-        dt => (false, json!(format!("`unique` is not supported on {dt}"))),
+        DataType::Utf8 => dups(a.as_string::<i32>().iter(), |v| json!(v)),
+        DataType::Int64 => dups(a.as_primitive::<Int64Type>().iter(), |v| json!(v)),
+        DataType::Date32 => dups(a.as_primitive::<Date32Type>().iter(), |v| json!(v)),
+        DataType::Boolean => dups(a.as_boolean().iter(), |v| json!(v)),
+        DataType::Float64 => dups(
+            a.as_primitive::<Float64Type>()
+                .iter()
+                .map(|o| o.map(float_key)),
+            |v| fnum(float_from_key(*v)),
+        ),
+        dt => (
+            false,
+            json!(format!("`unique` is not supported on {}", type_name(dt))),
+        ),
+    }
+}
+
+/// Column type name as in `with.schema` (`int64`, `string`, ...); Arrow's own name otherwise.
+fn type_name(dt: &DataType) -> String {
+    match dt {
+        DataType::Boolean => "bool".into(),
+        DataType::Int64 => "int64".into(),
+        DataType::Float64 => "float64".into(),
+        DataType::Utf8 => "string".into(),
+        DataType::Date32 => "date32".into(),
+        other => other.to_string(),
     }
 }
 
@@ -328,7 +331,7 @@ fn schema_check(batch: &RecordBatch, schema: &[Column], allow_extra: bool) -> Ch
         match bs.field_with_name(&c.name) {
             Err(_) => missing.push(c.name.clone()),
             Ok(f) if *f.data_type() != c.ty.data_type() => {
-                mismatched.push((c.name.clone(), f.data_type().to_string()));
+                mismatched.push((c.name.clone(), type_name(f.data_type())));
             }
             Ok(_) => {}
         }
@@ -351,19 +354,17 @@ fn schema_check(batch: &RecordBatch, schema: &[Column], allow_extra: bool) -> Ch
     });
     let mut check = Check::new("schema", None, passed, observed, json!(schema));
     // one gate entry per offending column (names only, never values)
-    check.errors.clear();
-    check.errors.extend(
-        missing
-            .iter()
-            .map(|c| (c, "missing column".to_owned()))
-            .chain(
-                mismatched
-                    .iter()
-                    .map(|(c, t)| (c, format!("unexpected type {t}"))),
-            )
-            .chain(extra.iter().map(|c| (c, "unexpected column".to_owned())))
-            .map(|(c, m)| (format!("schema.{c}"), m)),
-    );
+    check.errors = missing
+        .iter()
+        .map(|c| (c, "missing column".to_owned()))
+        .chain(
+            mismatched
+                .iter()
+                .map(|(c, t)| (c, format!("unexpected type {t}"))),
+        )
+        .chain(extra.iter().map(|c| (c, "unexpected column".to_owned())))
+        .map(|(c, m)| ValidationError::new(format!("schema.{c}"), m))
+        .collect();
     check
 }
 
@@ -409,7 +410,7 @@ fn evaluate(batch: &RecordBatch, cfg: &Config) -> Vec<Check> {
         if let Some(list) = &c.allowed {
             push("allowed", json!(list), &|a| allowed(a, list));
         }
-        if c.unique == Some(true) {
+        if c.unique {
             push("unique", json!({ "count": 0 }), &unique);
         }
     }
@@ -460,6 +461,9 @@ impl Block for ValidateTabular {
                 .store()
                 .fetch(&input.id(), &ctx.workdir().join(DATA))
                 .await?;
+            if ctx.cancel().is_cancelled() {
+                return Err(Error::Cancelled);
+            }
             let (file, cancel) = (dir.join(DATA_FILE), ctx.cancel().clone());
             let checks = blocking(move || {
                 let batch = read_parquet_batch(&file, &cancel)?;
@@ -488,11 +492,7 @@ impl Block for ValidateTabular {
                 let data = OutputDraft::new(input.manifest().clone(), DraftPayload::Dir(dir));
                 return Ok(BlockOutcome::Produced(drafts.with(DATA, data)));
             }
-            let errors: Vec<ValidationError> = checks
-                .iter()
-                .flat_map(|c| &c.errors)
-                .map(|(p, m)| ValidationError::new(p.as_str(), m.as_str()))
-                .collect();
+            let errors: Vec<ValidationError> = checks.into_iter().flat_map(|c| c.errors).collect();
             match on_fail {
                 OnFail::Fail => Err(Error::Validation(errors)),
                 OnFail::Skip => Ok(BlockOutcome::Skipped {
@@ -595,7 +595,7 @@ mod tests {
         );
         assert!(!ok);
         assert_eq!(obs["missing"], json!(["zz"]));
-        assert_eq!(obs["mismatched"], json!([{"column":"x","found":"Int64"}]));
+        assert_eq!(obs["mismatched"], json!([{"column":"x","found":"int64"}]));
         assert_eq!(obs["extra"], json!([]));
         assert_eq!(exp[0], json!({"name":"x","type":"float64"}));
 
@@ -625,6 +625,9 @@ mod tests {
         let (ok, obs, exp) = one(&b, col("x", json!({"min": 2})));
         assert!(!ok);
         assert_eq!((obs, exp), (json!(1), json!(2)));
+        // bound above i64::MAX: every i64 is below it
+        assert!(!one(&b, col("x", json!({"min": 9223372036854775808_u64}))).0);
+        assert!(one(&b, col("x", json!({"max": 9223372036854775808_u64}))).0);
         // non-integer bound on an int column is compared as float
         assert!(one(&b, col("x", json!({"min": 0.5}))).0);
         assert!(!one(&b, col("x", json!({"min": 1.5}))).0);
@@ -684,6 +687,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_tabular_checks_examples_are_capped_and_sorted() {
+        let vals = ["h", "c", "g", "a", "f", "b", "e", "d", "z"];
+        let b = RecordBatch::try_from_iter([(
+            "s",
+            Arc::new(StringArray::from(vals.to_vec())) as ArrayRef,
+        )])
+        .unwrap();
+        let (ok, obs, _) = one(&b, col("s", json!({"allowed": ["z"]})));
+        assert!(!ok);
+        assert_eq!(
+            obs,
+            json!({"count": 8, "examples": ["a", "b", "c", "d", "e"]})
+        );
+
+        let dup: Vec<i64> = (0..8).rev().chain(0..8).collect();
+        let b = RecordBatch::try_from_iter([("x", Arc::new(Int64Array::from(dup)) as ArrayRef)])
+            .unwrap();
+        let (ok, obs, _) = one(&b, col("x", json!({"unique": true})));
+        assert!(!ok);
+        assert_eq!(obs, json!({"count": 8, "examples": [0, 1, 2, 3, 4]}));
+    }
+
+    #[test]
     fn validate_tabular_checks_missing_column_zero_rows_and_all_null() {
         let b = batch();
         let c = run_checks(
@@ -716,6 +742,19 @@ mod tests {
             let (ok, obs, _) = one(&b, col("f", cfg));
             assert!(!ok, "NaN must fail {name}");
             assert_eq!(obs, json!("NaN"));
+        }
+        // NaN anywhere (not only last) fails both bounds
+        for v in [
+            vec![Some(f64::NAN), Some(1.0)],
+            vec![Some(1.0), Some(f64::NAN), Some(2.0)],
+            vec![None, Some(f64::NAN)],
+        ] {
+            let b = floats(v);
+            for cfg in [json!({"min": -10}), json!({"max": 10})] {
+                let (ok, obs, _) = one(&b, col("f", cfg));
+                assert!(!ok);
+                assert_eq!(obs, json!("NaN"));
+            }
         }
         // infinities are ordinary out-of-range values, rendered as strings
         let b = floats(vec![Some(f64::INFINITY), Some(f64::NEG_INFINITY)]);
@@ -775,6 +814,12 @@ mod tests {
         assert!(!ok(json!({"checks": {"x": {"unique": false}}})));
         assert!(!ok(json!({"checks": {"x": {"bogus": 1}}})));
         assert!(!ok(json!({"checks": {"x": {"min": 2, "max": 1}}})));
+        assert!(!ok(
+            json!({"checks": {"x": {"min": 9007199254740993_i64, "max": 9007199254740992_i64}}})
+        ));
+        assert!(ok(
+            json!({"checks": {"x": {"min": 9007199254740992_i64, "max": 9007199254740993_i64}}})
+        ));
         assert!(!ok(json!({"checks": {"x": {"max_null_fraction": 1.5}}})));
         assert!(!ok(json!({"checks": {"x": {"max_null_fraction": -0.1}}})));
         assert!(!ok(json!({"checks": {"x": {"allowed": []}}})));
@@ -933,7 +978,7 @@ mod tests {
             got,
             [
                 ("schema.zz", "missing column"),
-                ("schema.x", "unexpected type Int64"),
+                ("schema.x", "unexpected type int64"),
                 ("min_rows", "check failed"),
                 ("checks.s.allowed", "1 violating row(s)"),
             ]
@@ -980,9 +1025,10 @@ mod tests {
             .put(m.clone(), mallops_core::PayloadSource::Bytes(b"x"))
             .await
             .unwrap();
+        let wd = tempfile::tempdir().unwrap();
         let ctx = Context::new(
             RunId::new(),
-            tempfile::tempdir().unwrap().keep(),
+            wd.path().to_path_buf(),
             Arc::clone(&store) as Arc<dyn ArtifactStore>,
             json!({}),
             CancelSource::new().token(),
@@ -991,5 +1037,29 @@ mod tests {
         let inputs = Inputs::new().with(DATA, mallops_core::Artifact::new(id, m));
         let e = ValidateTabular::new().run(&ctx, inputs).await;
         assert!(matches!(e, Err(Error::Runtime(_))), "{:?}", e.err());
+    }
+
+    #[tokio::test]
+    async fn validate_tabular_cancelled_before_run() {
+        let store = Arc::new(MemoryStore::new());
+        let m = Manifest::new(ArtifactKind::Dataset, "parquet");
+        let id = store
+            .put(m.clone(), mallops_core::PayloadSource::Bytes(b"x"))
+            .await
+            .unwrap();
+        let wd = tempfile::tempdir().unwrap();
+        let cancel = CancelSource::new();
+        cancel.cancel();
+        let ctx = Context::new(
+            RunId::new(),
+            wd.path().to_path_buf(),
+            Arc::clone(&store) as Arc<dyn ArtifactStore>,
+            json!({}),
+            cancel.token(),
+            Arc::new(MemorySecretProvider::default()),
+        );
+        let inputs = Inputs::new().with(DATA, mallops_core::Artifact::new(id, m));
+        let e = ValidateTabular::new().run(&ctx, inputs).await;
+        assert!(matches!(e, Err(Error::Cancelled)), "{:?}", e.err());
     }
 }

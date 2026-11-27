@@ -8,7 +8,7 @@ mod evaluate;
 #[cfg(feature = "external")]
 mod external;
 #[cfg(feature = "_ingest")]
-// Without an ingest block only the shared Arrow/Parquet helpers are used (by preprocess / train.smartcore / evaluate).
+// Without an ingest block only the shared Arrow/Parquet helpers are used (by preprocess / train.smartcore / evaluate / validate).
 #[cfg_attr(
     not(any(feature = "ingest-csv", feature = "ingest-parquet")),
     allow(dead_code)

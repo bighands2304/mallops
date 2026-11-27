@@ -30,7 +30,7 @@ predict-smartcore = ["predictor"]
 predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]
 # HTTP/JSON inference server (`serve` module); not a DAG block (ADR-0007 D5).
 serve-http = ["package", "predictor", "dep:axum", "dep:tempfile", "dep:tracing", "tokio/net", "tokio/time"]
-# Reading Parquet back into memory (preprocess, train, evaluate); not a public feature.
+# Reading Parquet back into memory (preprocess, train, evaluate, validate); not a public feature.
 _read_parquet = []
 # Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.
 _ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]

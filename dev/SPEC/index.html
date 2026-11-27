@@ -1162,6 +1162,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../reference/evaluate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/evaluate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../reference/predictor/" class="md-nav__link">
         
   
@@ -1762,8 +1790,8 @@
 </ul>
 <h3 id="36-model-evaluation">3.6 Model evaluation<a class="headerlink" href="#36-model-evaluation" title="Permanent link">&para;</a></h3>
 <ul>
-<li>FR-EVL-1: standard metrics (accuracy, precision/recall/F1, ROC-AUC, RMSE, MAE, R²) — v0.1.</li>
-<li>FR-EVL-2: <strong>quality gates</strong>: a pipeline can fail or branch when a metric is below a threshold or worse than the current production model.</li>
+<li>FR-EVL-1: standard metrics (accuracy, precision/recall/F1, ROC-AUC, RMSE, MAE, R²) — v0.1. In <code>mallops-std</code>, provided by <code>std/evaluate.classification</code> and <code>std/evaluate.regression</code> (feature <code>evaluate</code>, not in <code>default</code>; see <a href="../reference/evaluate/"><code>std/evaluate</code></a>).</li>
+<li>FR-EVL-2: <strong>quality gates</strong>: a pipeline can skip downstream consumers or fail when a metric falls outside configured thresholds (<code>min</code>/<code>max</code>, v0.1); comparing against the current production model is deferred to v0.2 (with the model registry).</li>
 <li>FR-EVL-3: custom metrics via plugins (in v0.1, external processes via <a href="../reference/external/"><code>std/external</code></a>).</li>
 </ul>
 <h3 id="37-model-packaging">3.7 Model packaging<a class="headerlink" href="#37-model-packaging" title="Permanent link">&para;</a></h3>
@@ -1928,7 +1956,7 @@
 - Validation (<code>PipelineConfig::validate</code>, behind <code>mallops validate</code>) runs in one pass, never calls <code>Block::run</code>, and reports every problem at once as <code>Error::Validation(Vec&lt;ValidationError&gt;)</code>, each with a dotted <code>path</code>: <code>blocks.&lt;id&gt;.use</code> (unknown block, or a <code>Stage::Serve</code> block, which is not a DAG node), <code>blocks.&lt;id&gt;.in.&lt;port&gt;</code> (malformed reference, unknown upstream node or output port, undeclared input port, <code>kind</code>/<code>format</code>/<code>flavor</code> mismatch, required input not connected), <code>blocks.&lt;id&gt;.with[.&lt;sub&gt;]</code> (errors of <code>Block::validate_config</code> and <code>Block::resolve_ports</code>, prefixed with <code>blocks.&lt;id&gt;.with</code>), <code>blocks.&lt;id&gt;</code> (one error per cycle, on its first node by id, listing the nodes) and <code>serve.package</code> (not <code>&lt;node&gt;.&lt;output&gt;</code>, unknown node or output, or kind other than <code>package</code>). A node whose block is unknown, is a <code>Stage::Serve</code> block, or whose <code>with:</code> fails <code>validate_config</code> or <code>resolve_ports</code> is unresolved: checks that need its ports (declared input ports, required inputs, output ports, <code>kind</code>/<code>format</code>/<code>flavor</code> compatibility of the edges touching it, <code>serve.package</code> pointing at it) are skipped, so one root cause yields one error. When <code>validate_config</code> fails, <code>resolve_ports</code> is not called. Nodes of the validated pipeline are in topological order, ties broken by node id.
 - Execution (<code>Runtime::run</code>, behind <code>mallops run</code>) runs nodes of the validated pipeline as soon as all their upstream nodes have finished, at most <code>--jobs</code> (<code>RuntimeConfig::max_jobs</code>, <code>0</code> counts as <code>1</code>) blocks at a time, and returns a <code>RunSummary</code> with one <code>NodeSummary</code> per node: <code>status</code> (<code>Succeeded</code>, <code>Failed</code>, <code>Skipped</code>, <code>Cancelled</code>), <code>duration</code>, committed output ids, <code>cached</code> (outputs served from the cache), and a skip/cancel <code>reason</code> or the <code>error</code>. Node outcomes never make <code>run</code> return <code>Err</code>; only runtime failures do (for example, the run workdir cannot be created). Rules:
   - A node whose block or output commit fails is <code>Failed</code>; all its descendants are <code>Cancelled</code> without running, with a reason naming the failed node. Independent branches finish.
-  - <code>BlockOutcome::Skipped</code> marks the node <code>Skipped</code> (outputs it still returns are committed). A consumer is <code>Skipped</code> without running when any <strong>required</strong> input comes from a <code>Skipped</code> node or was not committed, even if its other inputs succeeded (fan-in). An optional input without a committed artifact is simply absent. If a node has both a failed/cancelled and a skipped parent, it is <code>Cancelled</code>.
+  - <code>BlockOutcome::Skipped</code> marks the node <code>Skipped</code> (outputs it still returns are committed). A consumer is <code>Skipped</code> without running when any <strong>required</strong> input comes from a <code>Skipped</code> node or was not committed, even if its other inputs succeeded (fan-in). An optional input without a committed artifact is simply absent. If a node has both a failed/cancelled and a skipped parent, it is <code>Cancelled</code>. For <code>std/evaluate.*</code> quality gates (<code>gate: { metric, min?, max?, on_fail: skip | fail }</code>, default <code>skip</code>), a failed <code>skip</code> gate commits <code>metrics</code> and blocks only consumers that wire <code>eval.metrics</code> as a <strong>required</strong> input (and <code>runs/latest.json</code> is not updated); <code>on_fail: fail</code> returns <code>Error::Block</code> without committing <code>metrics</code> and cancels descendants (see <a href="../reference/evaluate/"><code>std/evaluate</code></a>).
   - Cancellation is cooperative: once the run's <code>CancelToken</code> fires, no new node starts (<code>Cancelled</code>, reason <code>run cancelled</code>); a running block that returns <code>Error::Cancelled</code> is <code>Cancelled</code> (not <code>Failed</code>). Nothing is aborted forcibly.
   - Output drafts are validated before any <code>store.put</code> (errors at <code>out.&lt;port&gt;</code>): every draft names a declared output port and satisfies its <code>kind</code>/<code>format</code>/<code>flavor</code>; a <code>Produced</code> outcome provides every required output; <code>File</code>/<code>Dir</code> payloads canonicalize inside the node workdir to a regular file / a directory, and the canonical path is what the store receives. The runtime sets <code>parents</code> to the node's input ids (sorted, deduplicated). Payload content (nested symlinks, special files inside a <code>Dir</code>) is checked by the store during <code>put</code>; if that fails the node is <code>Failed</code>, and outputs of the same node committed before stay in the store as unreferenced artifacts (immutable, harmless, removed by a later GC).
   - Cache (NFR-2): after the node gets its job slot, the cache is bypassed when <code>cache: false</code> is set or <code>no_cache</code> is on (<code>Block::cache_policy</code> is then not called); otherwise <code>Block::cache_policy</code> is consulted (an error fails the node; <code>extra_hash</code> must not depend on secrets) and <code>Uncacheable</code> bypasses it too. Otherwise a hit (all recorded output artifacts still in the store) marks the node <code>Succeeded</code> with <code>cached: true</code>, its outputs taken from the entry, and the block is not run; a miss runs it. Only <code>Succeeded</code> nodes are cached (<code>Skipped</code>, <code>Failed</code>, <code>Cancelled</code> always re-run). Failing to write the entry, or a store error while reading it (treated as a miss), is a warning, the node stays <code>Succeeded</code>. A rerun re-executes every node that did not succeed, plus the descendants whose inputs changed.
@@ -1938,7 +1966,7 @@
 - Store and lineage backend mapping in the v0.1 CLI (<code>check_backends</code>, enforced by <code>validate</code>, <code>run</code>, and <code>store verify</code>):
   - <code>store.kind</code> accepts <code>local</code> (<code>LocalStore</code> at <code>&lt;yaml-dir&gt;/&lt;store.path&gt;</code>, where <code>&lt;yaml-dir&gt;</code> is the parent directory of the <code>mallops.yaml</code> path, defaulting to <code>.</code> when empty) and <code>memory</code> (<code>MemoryStore</code>). Any other <code>store.kind</code> fails with an error.
   - <code>lineage: off</code> disables lineage (<code>RuntimeConfig::lineage = vec![]</code>); otherwise every configured sink must have <code>sink: json</code> (<code>JsonSink</code> on the configured store). Any other sink name fails with an error.
-- Built-in blocks in <code>mallops-cli</code>: <code>core/noop</code> (version <code>1.0.0</code>, <code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload; test affordances <code>fail: "&lt;message&gt;"</code> and <code>skip: "&lt;reason&gt;"</code> in <code>with:</code>) plus all feature-enabled standard blocks registered via <code>mallops_std::register_std(&amp;mut registry)</code> (in v0.1 so far: <code>std/external</code>, <code>std/ingest.csv</code>, <code>std/ingest.parquet</code>, <code>std/preprocess.tabular</code>, <code>std/train.smartcore</code>).
+- Built-in blocks in <code>mallops-cli</code>: <code>core/noop</code> (version <code>1.0.0</code>, <code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload; test affordances <code>fail: "&lt;message&gt;"</code> and <code>skip: "&lt;reason&gt;"</code> in <code>with:</code>) plus all feature-enabled standard blocks registered via <code>mallops_std::register_std(&amp;mut registry)</code> (in v0.1 so far: <code>std/evaluate.classification</code>, <code>std/evaluate.regression</code>, <code>std/external</code>, <code>std/ingest.csv</code>, <code>std/ingest.parquet</code>, <code>std/preprocess.tabular</code>, <code>std/train.smartcore</code>).
 - Latest run pointer (<code>runs/latest.json</code>): after <code>mallops run</code>, if and only if every node is <code>Succeeded</code>, the CLI writes <code>runs/latest.json</code> via <code>ArtifactStore::put_meta</code> (<code>meta/runs/latest.json</code> on <code>LocalStore</code>) as <code>{"v":1,"pipeline":"&lt;name&gt;","run":"&lt;run-id&gt;","outputs":{"&lt;node&gt;":{"&lt;port&gt;":"&lt;artifact-id&gt;"}}}</code> (deterministic key order via <code>BTreeMap</code>), so <code>mallops serve</code> can resolve <code>serve.package</code> without an explicit id. If any node is <code>Skipped</code> (with no failed/cancelled nodes), <code>mallops run</code> leaves any previous <code>runs/latest.json</code> unchanged, prints <code>latest.json not updated: &lt;S&gt; skipped</code>, and exits <code>0</code>. A failed run leaves any previous <code>runs/latest.json</code> unchanged and exits <code>1</code> (<code>error: run failed</code>).
 - A JSON Schema for <code>mallops.yaml</code> can be generated via the optional <code>schema</code> feature (<code>schemars</code>) for editor completion.</p>
 <h3 id="51-cli-mallops">5.1 CLI (<code>mallops</code>)<a class="headerlink" href="#51-cli-mallops" title="Permanent link">&para;</a></h3>

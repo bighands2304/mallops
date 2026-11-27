@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://bighands2304.github.io/mallops/dev/reference/predictor/">
       
       
-        <link rel="prev" href="../train-smartcore/">
+        <link rel="prev" href="../evaluate/">
       
       
         <link rel="next" href="../../contributing/">
@@ -787,6 +787,34 @@
     
   
     std/train.smartcore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../evaluate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/evaluate
   
 
     
@@ -1913,7 +1941,10 @@ protocol v1 over stdin/stdout.</p>
 <li><strong>Inputs:</strong> <code>worker.py</code> accepts either an object <code>{"feature": value}</code> (ordered using <code>MALLOPS_FEATURES</code> or
   the model's <code>feature_names_in_</code>) or a list of values already in column order.</li>
 <li><strong>Outputs:</strong> <code>{"prediction": &lt;val&gt;}</code>. If the model provides <code>predict_proba</code> and has exactly two classes
-  (<code>len(classes_) == 2</code>), <code>"probability": &lt;p&gt;</code> is included (positive class probability).</li>
+  (<code>len(classes_) == 2</code>), <code>"probability": &lt;p&gt;</code> is included — the probability of the greater class
+  (<code>classes[1]</code> in sorted ascending order, matching scikit-learn's <code>classes_[1]</code> and
+  <code>SmartcorePredictor</code>). Consumers such as <a href="../evaluate/"><code>std/evaluate.classification</code></a> rely on this
+  contract to compute <code>roc_auc</code> (using <code>1 - p</code> when <code>with.positive</code> is <code>classes[0]</code>).</li>
 <li>NumPy scalars and arrays are automatically converted to standard JSON primitives via <code>.tolist()</code> / <code>.item()</code>.</li>
 </ul>
 <h3 id="lifecycle-failure-recovery-and-process-management">Lifecycle, failure recovery, and process management<a class="headerlink" href="#lifecycle-failure-recovery-and-process-management" title="Permanent link">&para;</a></h3>
@@ -2111,7 +2142,7 @@ protocol v1 over stdin/stdout.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../train-smartcore/" class="md-footer__link md-footer__link--prev" aria-label="Previous: std/train.smartcore">
+          <a href="../evaluate/" class="md-footer__link md-footer__link--prev" aria-label="Previous: std/evaluate">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -2121,7 +2152,7 @@ protocol v1 over stdin/stdout.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                std/train.smartcore
+                std/evaluate
               </div>
             </div>
           </a>

@@ -1218,6 +1218,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../reference/serve/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    mallops serve
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../reference/predictor/" class="md-nav__link">
         
   
@@ -1844,8 +1872,8 @@
 </ul>
 <h3 id="310-model-serving">3.10 Model serving<a class="headerlink" href="#310-model-serving" title="Permanent link">&para;</a></h3>
 <ul>
-<li>FR-SRV-1: HTTP/JSON inference server (<code>mallops serve [package-id]</code>) running outside the batch DAG, consuming a <code>package</code> artifact produced by <code>mallops run</code> — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>).</li>
-<li>FR-SRV-2: gRPC endpoint, batching, health/readiness probes — v0.2.</li>
+<li>FR-SRV-1: HTTP/JSON inference server (<code>mallops serve [PACKAGE_ID]</code>) running as a native process outside the batch DAG, consuming a <code>package</code> artifact produced by <code>mallops run</code> (behind the <code>serve-http</code> Cargo feature of <code>mallops-std</code>; enabled in <code>mallops-cli</code>) — v0.1 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). Exposes <code>GET /health</code> (unauthenticated liveness/readiness probe reporting active <code>package</code> id and <code>flavor</code>) and <code>POST /predict</code> (single JSON object → object, array of objects → ordered array, <code>[]</code> → <code>[]</code>; replays any bundled <code>FittedTransform</code> before calling <code>Predictor</code>), with optional bearer-token auth from <code>MALLOPS_SECRET_&lt;NAME&gt;</code>, body size limit (default 10 MiB), request timeout (default 30 s), concurrency cap (default 64), metadata-only request logs, <code>--trust-unsafe-flavors</code> enforcement, and zero-downtime <code>SIGHUP</code> hot-swap on Unix via <code>runs/latest.json</code>. See <a href="../reference/serve/"><code>mallops serve</code></a>.</li>
+<li>FR-SRV-2: health/readiness probe (<code>GET /health</code>) in v0.1 (<code>FR-SRV-1</code>); gRPC endpoint and dynamic batching — v0.2.</li>
 <li>FR-SRV-4: MQTT transport (<code>serve.transport: mqtt</code>): read requests from a topic, predict, publish to a response topic; at-least-once, acknowledged after the prediction is published — v0.3 (<a href="../adr/0009-mqtt-blocks-and-serve-transport/">ADR-0009</a>).</li>
 <li>FR-SRV-3: <strong>backend-agnostic</strong>: the server dispatches to a <code>Predictor</code> chosen by the package flavor (smartcore, external Python process in v0.1; ort, tract, candle, burn, llama.cpp…) via <code>PredictorRegistry::get</code>. In v0.1 the minimal <code>Predictor</code> contract lives in <code>mallops-std</code> (shared by <code>evaluate</code> and <code>serve</code>) and is promoted to <code>mallops-core</code> before 1.0 (<a href="../adr/0007-core-contracts-revision/">ADR-0007</a>). See the <a href="../reference/predictor/">Predictor contract reference</a>.</li>
 <li>FR-SRV-5: <strong>batch inference</strong> inside the DAG: apply a <code>package</code> (fitted transform + <code>Predictor</code>) to a dataset and emit the predictions as an artifact — v0.1 (<code>std/predict.batch</code>, #57).</li>
@@ -2040,6 +2068,10 @@
 <tr>
 <td><code>mallops store verify &lt;ID&gt;</code></td>
 <td>Parses <code>&lt;ID&gt;</code> as an <code>ArtifactId</code>, checks backends, opens the configured store (for <code>kind: local</code>, fails with <code>store not found: &lt;path&gt;</code> without creating it if absent), and calls <code>ArtifactStore::verify</code>. Prints <code>ok: &lt;id&gt;</code> on stdout on success; exits <code>1</code> on invalid id, missing store/artifact, or corruption/tampering.</td>
+</tr>
+<tr>
+<td><code>mallops serve [PACKAGE_ID] [--host HOST] [--port PORT] [--trust-unsafe-flavors] [--max-body-bytes N] [--timeout SECS] [--max-concurrency N] [--auth-token-secret NAME]</code></td>
+<td>Serves a <code>package</code> artifact over HTTP/1.1 (<code>GET /health</code>, <code>POST /predict</code>) as a native process outside the batch DAG (requires a persistent store; logs at <code>INFO</code> by default). Precedence: CLI flags &gt; <code>serve:</code> in <code>mallops.yaml</code> &gt; defaults (<code>127.0.0.1:8080</code>, 10 MiB, 30 s, 64). Without <code>PACKAGE_ID</code>, resolves <code>serve.package</code> from <code>runs/latest.json</code> (matching <code>pipeline</code>; otherwise <code>error: no successful run: run \</code>mallops run` first<code>). Prints</code>serving <id> on http://<addr><code>, shuts down gracefully on</code>Ctrl-C<code>/</code>SIGTERM<code>, and hot-swaps via</code>runs/latest.json<code>on Unix</code>SIGHUP<code>(ignored with a warning when</code>PACKAGE_ID<code>is explicit). See [</code>mallops serve`](reference/serve.md).</td>
 </tr>
 </tbody>
 </table>

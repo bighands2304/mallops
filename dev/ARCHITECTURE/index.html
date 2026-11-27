@@ -1035,6 +1035,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../reference/serve/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    mallops serve
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../reference/predictor/" class="md-nav__link">
         
   
@@ -1754,6 +1782,11 @@
 <span class="p">}</span>
 </code></pre></div>
 <p>Consumers resolve a predictor through <code>PredictorRegistry</code>, which registers predictors by flavor atomically and enforces trust policy: flavors where <code>executes_code()</code> is <code>true</code> (such as <code>sklearn-pickle</code>) are rejected by <code>PredictorRegistry::get</code> with <code>Error::Config</code> unless <code>trust_unsafe_flavors</code> is explicitly passed (CLI: <code>--trust-unsafe-flavors</code>). See the full <a href="../reference/predictor/">Predictor contract reference</a>.</p>
+<p>Behind the <code>serve-http</code> feature, <code>mallops-std</code> provides <code>mallops_std::serve</code> (<code>ServeOptions</code>, <code>Server</code>, <code>ServeHandle</code>) over <code>axum</code> (HTTP/1.1):</p>
+<ul>
+<li><strong>Request flow:</strong> <code>GET /health</code> bypasses auth, timeout, and concurrency limits so probes stay responsive under load. <code>POST /predict</code> passes through metadata-only logging → timeout (<code>504</code>) → optional constant-time BLAKE3 bearer auth (<code>401</code>, before body read) → semaphore concurrency permit (<code>503</code>) → body size limit (<code>413</code>) → JSON decode → optional <code>FittedTransform::apply_json</code> → <code>LoadedPredictor</code>.</li>
+<li><strong>Zero-downtime hot-swap:</strong> <code>Server::handle()</code> yields a <code>Clone</code> <code>ServeHandle</code> with <code>async fn swap(store, id, predictors) -&gt; Result&lt;bool, Error&gt;</code>. Swaps are serialized with an async mutex; the replacement state (<code>Package::load</code> in a fresh tempdir, trust-gate check, transform, and <code>Predictor::load</code>) is built completely before atomically replacing the <code>Arc&lt;State&gt;</code> behind a <code>RwLock</code> (never held across <code>.await</code>). In-flight requests finish on the previous <code>Arc&lt;State&gt;</code>, dropping the old predictor and tempdir only after the last request completes; any load or trust error logs a <code>tracing</code> <code>warn</code> and keeps the active package untouched. <code>mallops-std</code> stays signal-agnostic: on Unix, <code>mallops-cli</code> installs a <code>SIGHUP</code> handler before initial load, re-reads <code>runs/latest.json</code>, and calls <code>ServeHandle::swap</code> (ignoring <code>SIGHUP</code> with a <code>warning: ...</code> line on stderr when an explicit <code>PACKAGE_ID</code> was given; the CLI does not depend on <code>tracing</code>). See the <a href="../reference/serve/"><code>mallops serve</code> reference</a>.</li>
+</ul>
 <h2 id="8-edge-and-federated-learning-v04">8. Edge and federated learning (v0.4)<a class="headerlink" href="#8-edge-and-federated-learning-v04" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>flowchart TB
     subgraph Cloud

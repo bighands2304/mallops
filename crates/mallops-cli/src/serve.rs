@@ -328,5 +328,16 @@ mod tests {
         let e = resolve(&args(&[]), &cfg("serve: { package: x.y }\n"), Some(&lj)).unwrap_err();
         assert!(e.to_string().contains("`x.y`"), "{e}");
         assert!(resolve(&args(&["nothex"]), &yaml, None).is_err());
+
+        // a `serve` entry placed under `blocks:` is rejected by the loader `serve` uses.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mallops.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nname: p\nblocks:\n  serve: { package: package.package, port: 8080 }\n",
+        )
+        .unwrap();
+        let e = crate::load(&file).unwrap_err().to_string();
+        assert!(e.contains("blocks.serve: unknown field `package`"), "{e}");
     }
 }

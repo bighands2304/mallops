@@ -12,3 +12,4 @@ std/ingest.parquet           0.1.0    ingest      -                             
 std/package                  0.1.0    package     model:model,preprocess?:transform,metrics?:metrics  package:package
 std/preprocess.tabular       0.1.0    preprocess  data:dataset                                        train:features,test:features,transform:transform
 std/train.smartcore          0.1.0    train       train:features                                      model:model
+std/validate.tabular         0.1.0    preprocess  data:dataset                                        data:dataset,report:metrics

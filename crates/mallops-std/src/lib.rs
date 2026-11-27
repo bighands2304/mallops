@@ -31,6 +31,8 @@ pub mod serve;
 mod smartcore_model;
 #[cfg(feature = "train-smartcore")]
 mod train;
+#[cfg(feature = "validate")]
+mod validate;
 
 #[cfg(feature = "package")]
 pub use package::Package;
@@ -44,7 +46,8 @@ use mallops_core::{BlockRegistry, Error};
 #[cfg(any(
     feature = "external",
     feature = "train-smartcore",
-    feature = "evaluate"
+    feature = "evaluate",
+    feature = "validate"
 ))]
 pub(crate) fn has_secret_ref(value: &impl serde::Serialize) -> bool {
     serde_json::to_string(value).is_ok_and(|json| json.contains("${secret:"))
@@ -84,6 +87,8 @@ pub fn register_std(registry: &mut BlockRegistry) -> Result<(), Error> {
     }
     #[cfg(feature = "package")]
     registry.register(Arc::new(package::PackageBlock::new()))?;
+    #[cfg(feature = "validate")]
+    registry.register(Arc::new(validate::ValidateTabular::new()))?;
     Ok(())
 }
 
@@ -106,6 +111,7 @@ mod tests {
         let eval_cls: BlockRef = "std/evaluate.classification".parse().unwrap();
         let eval_reg: BlockRef = "std/evaluate.regression".parse().unwrap();
         let package: BlockRef = "std/package".parse().unwrap();
+        let validate: BlockRef = "std/validate.tabular".parse().unwrap();
 
         assert_eq!(registry.contains(&csv), cfg!(feature = "ingest-csv"));
         assert_eq!(
@@ -124,6 +130,7 @@ mod tests {
         assert_eq!(registry.contains(&eval_cls), cfg!(feature = "evaluate"));
         assert_eq!(registry.contains(&eval_reg), cfg!(feature = "evaluate"));
         assert_eq!(registry.contains(&package), cfg!(feature = "package"));
+        assert_eq!(registry.contains(&validate), cfg!(feature = "validate"));
     }
 
     #[test]
@@ -138,7 +145,8 @@ mod tests {
             feature = "external",
             feature = "train-smartcore",
             feature = "evaluate",
-            feature = "package"
+            feature = "package",
+            feature = "validate"
         )) {
             assert!(matches!(second, Err(Error::Validation(_))), "{second:?}");
         } else {

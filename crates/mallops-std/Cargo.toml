@@ -25,6 +25,7 @@ train-smartcore = ["_ingest", "_read_parquet", "dep:arrow-cast", "dep:arrow-sele
 predictor = []
 package = []
 evaluate = ["predictor", "_ingest", "_read_parquet", "dep:arrow-select"]
+validate = ["_ingest", "_read_parquet", "dep:arrow-select"]
 predict-smartcore = ["predictor"]
 predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]
 # HTTP/JSON inference server (`serve` module); not a DAG block (ADR-0007 D5).

@@ -81,6 +81,7 @@ nav:
       - std/train.smartcore: reference/train-smartcore.md
       - std/evaluate: reference/evaluate.md
       - std/package: reference/package.md
+      - mallops serve: reference/serve.md
       - Predictor contract: reference/predictor.md
   - Contributing: contributing.md
   - API reference: https://docs.rs/mallops-core

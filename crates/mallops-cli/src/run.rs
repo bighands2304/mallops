@@ -13,7 +13,7 @@ use mallops_core::{
 };
 
 /// Store metadata key of the latest successful run pointer (SPEC §4.1, ARCHITECTURE §6.1).
-const LATEST_PATH: &str = "runs/latest.json";
+pub(crate) const LATEST_PATH: &str = "runs/latest.json";
 
 /// Schema version of `runs/latest.json`.
 const LATEST_DOC_VERSION: u32 = 1;
@@ -57,18 +57,35 @@ pub(crate) fn check_backends(cfg: &PipelineConfig) -> anyhow::Result<()> {
 }
 
 /// Directory containing `file`, defaulting to `.` when `file` has no parent component.
-fn base_dir(file: &Path) -> &Path {
+pub(crate) fn base_dir(file: &Path) -> &Path {
     match file.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     }
 }
 
-fn open_store(base: &Path, cfg: &PipelineConfig) -> anyhow::Result<Arc<dyn ArtifactStore>> {
+pub(crate) fn open_store(
+    base: &Path,
+    cfg: &PipelineConfig,
+) -> anyhow::Result<Arc<dyn ArtifactStore>> {
     match parse_store_kind(&cfg.store.kind)? {
         StoreKind::Local => Ok(Arc::new(LocalStore::new(base.join(&cfg.store.path))?)),
         StoreKind::Memory => Ok(Arc::new(MemoryStore::new())),
     }
+}
+
+/// Like [`open_store`], but a local store must already exist (it is never created).
+pub(crate) fn open_existing_store(
+    base: &Path,
+    cfg: &PipelineConfig,
+) -> anyhow::Result<Arc<dyn ArtifactStore>> {
+    if matches!(parse_store_kind(&cfg.store.kind)?, StoreKind::Local) {
+        let path = base.join(&cfg.store.path);
+        if !path.exists() {
+            anyhow::bail!("store not found: {}", path.display());
+        }
+    }
+    open_store(base, cfg)
 }
 
 fn build_lineage(
@@ -239,18 +256,10 @@ pub(crate) fn verify(file: &Path, id: &str) -> anyhow::Result<()> {
         .parse()
         .with_context(|| format!("invalid artifact id `{id}`"))?;
     let cfg = PipelineConfig::from_yaml_file(file, &|n| std::env::var(n).ok())?;
-    let kind = parse_store_kind(&cfg.store.kind)?;
+    parse_store_kind(&cfg.store.kind)?;
     parse_lineage_sinks(&cfg.lineage)?;
 
-    let base = base_dir(file);
-    if matches!(kind, StoreKind::Local) {
-        let path = base.join(&cfg.store.path);
-        if !path.exists() {
-            anyhow::bail!("store not found: {}", path.display());
-        }
-    }
-
-    let store = open_store(base, &cfg)?;
+    let store = open_existing_store(base_dir(file), &cfg)?;
     let rt = tokio::runtime::Runtime::new().context("cannot start tokio runtime")?;
     rt.block_on(store.verify(&artifact_id))?;
     println!("ok: {artifact_id}");

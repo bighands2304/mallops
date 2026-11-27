@@ -1162,6 +1162,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../reference/validate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/validate.tabular
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../reference/evaluate/" class="md-nav__link">
         
   
@@ -1831,7 +1859,11 @@
 <li>FR-PRE-3: fitted transforms are themselves artifacts (<code>kind: transform</code>, <code>format: json</code>, <code>payload/transform.json</code> = <code>{"v":1,"target":…,"input":[…],"steps":[…]}</code> serialized deterministically, <code>io_schema = { "input": […], "output": […] }</code> where <code>output</code> records the training output schema including <code>target</code>), capturing fitted steps (<code>select</code>, <code>impute</code>, <code>scale</code>, <code>ordinal</code>, <code>one_hot</code>; never <code>filter</code> or <code>split</code>). <code>mallops_std::FittedTransform</code> reloads the artifact (<code>from_dir</code>, rejecting versions other than <code>1</code>) and replays it so serving applies the exact same preprocessing:</li>
 <li><code>apply_batch</code>: projects the incoming <code>RecordBatch</code> onto <code>input</code> columns in <code>input</code> order (<code>target</code> optional, extra columns ignored) with strict Arrow type checks (<code>Error::Runtime</code> naming the column, expected, and found types) before applying the fitted steps.</li>
 <li><code>apply_json</code>: accepts a JSON array of row objects keyed by <code>input</code> columns (<code>target</code> optional, unknown keys ignored, explicit <code>null</code> allowed; a missing key for a non-target column fails with <code>Error::Runtime("…row {i}: missing column '{col}'")</code>; <code>int64</code> columns accept whole-number floats; type mismatches report row index and column name), builds the <code>RecordBatch</code>, and applies the exact same steps as <code>apply_batch</code>.</li>
-<li>FR-PRE-4: <strong>data validation</strong>: check a dataset against declared expectations (schema, row count, null fraction, range, allowed values, uniqueness) with the same quality gate as FR-EVL-2 (<code>on_fail: fail|skip</code>) — v0.1 (<code>std/validate.tabular</code>, #56).</li>
+<li>FR-PRE-4: <strong>data validation</strong>: check a tabular dataset against declared expectations before preprocessing or training — in v0.1, <code>mallops-std</code> provides <code>std/validate.tabular</code> (feature <code>validate</code>, not in <code>default</code>, enabled in <code>mallops-cli</code>; <code>Stage::Preprocess</code>, version <code>0.1.0</code>; see <a href="../reference/validate/"><code>std/validate.tabular</code></a>):</li>
+<li>Ports: required input <code>data</code> (<code>kind: dataset</code>, <code>format: parquet</code>); outputs <code>data</code> (<code>kind: dataset</code>, <code>format: parquet</code>, same payload and manifest as the input, with a new <code>ArtifactId</code> because the runtime sets <code>parents</code> to the input per <a href="../adr/0007-core-contracts-revision/">ADR-0007 D3</a>) and <code>report</code> (<code>kind: metrics</code>, <code>format: json</code>, <code>report.json</code>).</li>
+<li><code>with:</code> config (<code>deny_unknown_fields</code>, <code>${secret:</code> rejected): optional <code>schema</code> (list of <code>{ name, type }</code> in <code>bool | int64 | float64 | string | date32</code>), <code>allow_extra_columns</code> (default <code>true</code>), optional <code>min_rows</code>, optional per-column <code>checks</code> (<code>max_null_fraction</code>, <code>min</code>, <code>max</code>, <code>allowed</code>, <code>unique</code>), and <code>on_fail: fail | skip</code> (default <code>fail</code>, unlike FR-EVL-2's <code>skip</code>). Incoherent configs (<code>min &gt; max</code>, <code>max_null_fraction</code> outside <code>[0, 1]</code>, non-finite bounds, a column without an active check, empty or non-<code>string</code>/<code>int64</code>/<code>bool</code> <code>allowed</code>, <code>allow_extra_columns: false</code> without <code>schema</code>) fail with <code>Error::Config</code>.</li>
+<li>Evaluation &amp; report: all checks are evaluated and every data problem (missing column, wrong type, <code>min</code>/<code>max</code> on non-numeric column, <code>allowed</code> on <code>float64</code>) is recorded as a failed check rather than a runtime error. Nulls count only toward <code>max_null_fraction</code> (<code>0</code> rows ⇒ null fraction <code>0</code>; all-null columns pass <code>min</code>/<code>max</code>); <code>NaN</code> always fails <code>min</code>/<code>max</code>; <code>allowed</code> applies only to <code>string</code>/<code>int64</code>/<code>bool</code>. <code>report.json</code> is <code>{"v":1,"passed":…,"checks":[{"check", "column"?, "passed", "observed", "expected"}]}</code> in fixed deterministic order (<code>schema</code>, <code>min_rows</code>, columns alphabetically), serializing <code>NaN</code>/<code>±inf</code> as strings <code>"NaN"</code>/<code>"inf"</code>/<code>"-inf"</code> and reporting <code>allowed</code>/<code>unique</code> violations as count + up to 5 sorted distinct examples (<code>unique</code> count = occurrences beyond the first). The <code>report</code> manifest carries <code>metadata.passed</code>.</li>
+<li>Gate &amp; caching: <code>CachePolicy::Deterministic { extra_hash: None }</code>. On failure, <code>on_fail: fail</code> returns <code>Error::Validation</code> with one item per failed check, per offending column for <code>schema</code>, never carrying data values (report paths <code>schema.&lt;col&gt;</code>, <code>min_rows</code>, <code>checks.&lt;col&gt;.&lt;check&gt;</code>, not YAML paths); <code>on_fail: skip</code> returns <code>BlockOutcome::Skipped</code> (reason <code>validation failed: &lt;paths&gt;</code>; downstream nodes with required inputs are skipped, <code>report</code> reaches only optional inputs, <code>mallops run</code> leaves <code>runs/latest.json</code> unchanged and exits <code>0</code>). Statistical drift detection is deferred to v0.3 (<code>FR-MON-3</code>), and streaming/out-of-core validation to v0.2 (<code>NFR-8</code>).</li>
 </ul>
 <h3 id="34-training">3.4 Training<a class="headerlink" href="#34-training" title="Permanent link">&para;</a></h3>
 <ul>
@@ -2031,7 +2063,7 @@
 - Store and lineage backend mapping in the v0.1 CLI (<code>check_backends</code>, enforced by <code>validate</code>, <code>run</code>, and <code>store verify</code>):
   - <code>store.kind</code> accepts <code>local</code> (<code>LocalStore</code> at <code>&lt;yaml-dir&gt;/&lt;store.path&gt;</code>, where <code>&lt;yaml-dir&gt;</code> is the parent directory of the <code>mallops.yaml</code> path, defaulting to <code>.</code> when empty) and <code>memory</code> (<code>MemoryStore</code>). Any other <code>store.kind</code> fails with an error.
   - <code>lineage: off</code> disables lineage (<code>RuntimeConfig::lineage = vec![]</code>); otherwise every configured sink must have <code>sink: json</code> (<code>JsonSink</code> on the configured store). Any other sink name fails with an error.
-- Built-in blocks in <code>mallops-cli</code>: <code>core/noop</code> (version <code>1.0.0</code>, <code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload; test affordances <code>fail: "&lt;message&gt;"</code> and <code>skip: "&lt;reason&gt;"</code> in <code>with:</code>) plus all feature-enabled standard blocks registered via <code>mallops_std::register_std(&amp;mut registry)</code> (in v0.1 so far: <code>std/evaluate.classification</code>, <code>std/evaluate.regression</code>, <code>std/external</code>, <code>std/ingest.csv</code>, <code>std/ingest.parquet</code>, <code>std/package</code>, <code>std/preprocess.tabular</code>, <code>std/train.smartcore</code>).
+- Built-in blocks in <code>mallops-cli</code>: <code>core/noop</code> (version <code>1.0.0</code>, <code>Stage::Custom</code>, optional input <code>in: blob</code>, output <code>out: blob</code> with <code>format: noop</code> and empty payload; test affordances <code>fail: "&lt;message&gt;"</code> and <code>skip: "&lt;reason&gt;"</code> in <code>with:</code>) plus all feature-enabled standard blocks registered via <code>mallops_std::register_std(&amp;mut registry)</code> (in v0.1 so far: <code>std/evaluate.classification</code>, <code>std/evaluate.regression</code>, <code>std/external</code>, <code>std/ingest.csv</code>, <code>std/ingest.parquet</code>, <code>std/package</code>, <code>std/preprocess.tabular</code>, <code>std/train.smartcore</code>, <code>std/validate.tabular</code>).
 - Latest run pointer (<code>runs/latest.json</code>): after <code>mallops run</code>, if and only if every node is <code>Succeeded</code>, the CLI writes <code>runs/latest.json</code> via <code>ArtifactStore::put_meta</code> (<code>meta/runs/latest.json</code> on <code>LocalStore</code>) as <code>{"v":1,"pipeline":"&lt;name&gt;","run":"&lt;run-id&gt;","outputs":{"&lt;node&gt;":{"&lt;port&gt;":"&lt;artifact-id&gt;"}}}</code> (deterministic key order via <code>BTreeMap</code>), so <code>mallops serve</code> can resolve <code>serve.package</code> without an explicit id. If any node is <code>Skipped</code> (with no failed/cancelled nodes), <code>mallops run</code> leaves any previous <code>runs/latest.json</code> unchanged, prints <code>latest.json not updated: &lt;S&gt; skipped</code>, and exits <code>0</code>. A failed run leaves any previous <code>runs/latest.json</code> unchanged and exits <code>1</code> (<code>error: run failed</code>).
 - A JSON Schema for <code>mallops.yaml</code> can be generated via the optional <code>schema</code> feature (<code>schemars</code>) for editor completion.</p>
 <h3 id="51-cli-mallops">5.1 CLI (<code>mallops</code>)<a class="headerlink" href="#51-cli-mallops" title="Permanent link">&para;</a></h3>

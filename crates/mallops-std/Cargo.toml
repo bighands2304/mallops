@@ -19,12 +19,15 @@ default = ["ingest", "preprocess-tabular"]
 ingest = ["ingest-csv", "ingest-parquet"]
 ingest-csv = ["dep:arrow-csv", "_ingest"]
 ingest-parquet = ["_ingest"]
-preprocess-tabular = ["_ingest", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-select"]
+preprocess-tabular = ["_ingest", "_read_parquet", "dep:arrow-cast", "dep:arrow-ord", "dep:arrow-select"]
 external = ["dep:nix", "dep:tracing", "tokio/io-util", "tokio/process", "tokio/time"]
-train-smartcore = ["_ingest", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
+train-smartcore = ["_ingest", "_read_parquet", "dep:arrow-cast", "dep:arrow-select", "dep:smartcore"]
 predictor = []
+evaluate = ["predictor", "_ingest", "_read_parquet", "dep:arrow-select"]
 predict-smartcore = ["predictor"]
 predict-external = ["predictor", "tokio/process", "tokio/io-util", "tokio/time"]
+# Reading Parquet back into memory (preprocess, train, evaluate); not a public feature.
+_read_parquet = []
 # Shared Arrow/Parquet plumbing (Parquet writer, schema subset); not a public feature.
 _ingest = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 

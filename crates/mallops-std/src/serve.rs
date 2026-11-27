@@ -386,6 +386,8 @@ async fn predict(State(h): State<ServeHandle>, body: Result<Bytes, BytesRejectio
 }
 
 async fn answer(h: &ServeHandle, body: &[u8]) -> Result<Value, Fail> {
+    // Parsing untrusted input into a plain `Value` is safe: no type-driven or code-executing
+    // deserialization, size bounded by `max_body_bytes`, nesting by serde_json's recursion limit.
     let value: Value = serde_json::from_slice(body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
     let (rows, single) = match value {

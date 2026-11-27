@@ -131,8 +131,12 @@ fn serve_e2e_health_sighup_sigterm() {
         body
     };
     let body = health();
-    assert!(body.starts_with("HTTP/1.1 200"), "{body}");
-    assert!(body.contains(id), "{body}");
+    // The response is not echoed into the panic message (it is network input).
+    assert!(body.starts_with("HTTP/1.1 200"), "GET /health is not 200");
+    assert!(
+        body.contains(id),
+        "GET /health does not report the served package id"
+    );
 
     // A reload with an unchanged latest.json keeps the server up.
     std::thread::sleep(Duration::from_millis(300));

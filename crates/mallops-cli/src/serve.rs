@@ -9,7 +9,7 @@ use mallops_core::{ArtifactId, EnvSecretProvider, RelPath, SecretProvider as _};
 use mallops_std::predictor::{PredictorRegistry, register_std_predictors};
 use mallops_std::serve::{ServeOptions, Server};
 
-use crate::run::{LATEST_PATH, base_dir, open_store};
+use crate::run::{LATEST_PATH, base_dir, open_existing_store};
 
 const NO_RUN: &str = "no successful run: run `mallops run` first";
 
@@ -45,38 +45,26 @@ pub(crate) struct Args {
 #[derive(Debug, PartialEq)]
 enum Source {
     /// Given on the command line: `SIGHUP` is ignored.
-    Explicit(ArtifactId),
+    Explicit,
     /// Output `reference` (`<block>.<port>`) of the latest run of this pipeline.
     Latest { pipeline: String, reference: String },
 }
 
-/// Flags, `serve:` and defaults merged (flag > `serve:` > default).
-#[derive(Debug)]
-struct Settings {
-    source: Source,
-    host: String,
-    port: u16,
-    max_body_bytes: usize,
-    timeout: Duration,
-    max_concurrency: usize,
-    trust_unsafe_flavors: bool,
-    auth_token_secret: Option<String>,
-}
-
-/// Pure resolution of the settings; `latest` is the content of `runs/latest.json`, if any.
+/// Pure resolution of flags, `serve:` and defaults (flag > `serve:` > default) into the server
+/// options (without the auth token); `latest` is the content of `runs/latest.json`, if any.
 fn resolve(
     args: &Args,
     cfg: &PipelineConfig,
     latest: Option<&[u8]>,
-) -> anyhow::Result<(Settings, ArtifactId)> {
-    let d = ServeOptions::default();
+) -> anyhow::Result<(ServeOptions, Source, ArtifactId)> {
+    let mut o = ServeOptions::default();
     let from_yaml = cfg.serve.as_ref();
     let (source, id) = match &args.package_id {
         Some(s) => {
-            let id: ArtifactId = s
+            let id = s
                 .parse()
                 .with_context(|| format!("invalid artifact id `{s}`"))?;
-            (Source::Explicit(id), id)
+            (Source::Explicit, id)
         }
         None => {
             let serve = from_yaml.context(
@@ -90,21 +78,27 @@ fn resolve(
             (source, id)
         }
     };
-    let settings = Settings {
-        source,
-        host: args
-            .host
-            .clone()
-            .or_else(|| from_yaml.map(|s| s.host.clone()))
-            .unwrap_or(d.host),
-        port: args.port.or(from_yaml.map(|s| s.port)).unwrap_or(d.port),
-        max_body_bytes: args.max_body_bytes.unwrap_or(d.max_body_bytes),
-        timeout: args.timeout.map_or(d.timeout, Duration::from_secs),
-        max_concurrency: args.max_concurrency.unwrap_or(d.max_concurrency),
-        trust_unsafe_flavors: args.trust_unsafe_flavors,
-        auth_token_secret: args.auth_token_secret.clone(),
-    };
-    Ok((settings, id))
+    if let Some(host) = args
+        .host
+        .clone()
+        .or_else(|| from_yaml.map(|s| s.host.clone()))
+    {
+        o.host = host;
+    }
+    if let Some(port) = args.port.or(from_yaml.map(|s| s.port)) {
+        o.port = port;
+    }
+    if let Some(v) = args.max_body_bytes {
+        o.max_body_bytes = v;
+    }
+    if let Some(v) = args.timeout {
+        o.timeout = Duration::from_secs(v);
+    }
+    if let Some(v) = args.max_concurrency {
+        o.max_concurrency = v;
+    }
+    o.trust_unsafe_flavors = args.trust_unsafe_flavors;
+    Ok((o, source, id))
 }
 
 /// Reads output `reference` of `latest` (`runs/latest.json`) if it belongs to pipeline `name`.
@@ -171,7 +165,7 @@ pub(crate) fn serve(file: &Path, args: &Args) -> anyhow::Result<()> {
     if cfg.store.kind == "memory" {
         anyhow::bail!("serve needs a persistent store");
     }
-    let store = open_store(base_dir(file), cfg)?;
+    let store = open_existing_store(base_dir(file), cfg)?;
     let rt = tokio::runtime::Runtime::new().context("cannot start tokio runtime")?;
     rt.block_on(async {
         // Installed before the (slow) load: an early SIGHUP must not kill the process.
@@ -180,28 +174,21 @@ pub(crate) fn serve(file: &Path, args: &Args) -> anyhow::Result<()> {
 
         let latest_key = RelPath::parse(LATEST_PATH)?;
         let latest = store.get_meta(&latest_key).await?;
-        let (settings, id) = resolve(args, cfg, latest.as_deref())?;
-
-        let mut opts = ServeOptions::default();
-        opts.host.clone_from(&settings.host);
-        opts.port = settings.port;
-        opts.max_body_bytes = settings.max_body_bytes;
-        opts.timeout = settings.timeout;
-        opts.max_concurrency = settings.max_concurrency;
-        opts.trust_unsafe_flavors = settings.trust_unsafe_flavors;
-        opts.auth_token = settings
+        let (mut opts, source, id) = resolve(args, cfg, latest.as_deref())?;
+        opts.auth_token = args
             .auth_token_secret
             .as_deref()
             .map(|n| EnvSecretProvider.get(n))
             .transpose()?;
+        let (host, port) = (opts.host.clone(), opts.port);
 
         let mut predictors = PredictorRegistry::new();
         register_std_predictors(&mut predictors)?;
         let server = Server::load(&*store, &id, &predictors, opts).await?;
         let handle = server.handle();
-        let listener = tokio::net::TcpListener::bind((settings.host.as_str(), settings.port))
+        let listener = tokio::net::TcpListener::bind((host.as_str(), port))
             .await
-            .with_context(|| format!("cannot bind {}:{}", settings.host, settings.port))?;
+            .with_context(|| format!("cannot bind {host}:{port}"))?;
         println!("serving {id} on http://{}", listener.local_addr()?);
 
         let mut task = tokio::spawn(server.run(listener, shutdown));
@@ -210,7 +197,7 @@ pub(crate) fn serve(file: &Path, args: &Args) -> anyhow::Result<()> {
                 res = &mut task => break res,
                 Some(()) = hangup.recv() => {
                     // The reload runs inside this branch, so it is never cut off mid-swap.
-                    let Source::Latest { pipeline, reference } = &settings.source else {
+                    let Source::Latest { pipeline, reference } = &source else {
                         eprintln!("warning: SIGHUP ignored: package id given on the command line");
                         continue;
                     };
@@ -269,21 +256,21 @@ mod tests {
         let lj = latest("p");
 
         // serve: beats defaults; the package comes from latest.json.
-        let (s, id) = resolve(&args(&[]), &yaml, Some(&lj)).unwrap();
-        assert_eq!((s.host.as_str(), s.port), ("0.0.0.0", 9000));
+        let (o, source, id) = resolve(&args(&[]), &yaml, Some(&lj)).unwrap();
+        assert_eq!((o.host.as_str(), o.port), ("0.0.0.0", 9000));
         assert_eq!(id.to_string(), ID_A);
         assert_eq!(
-            s.source,
+            source,
             Source::Latest {
                 pipeline: "p".into(),
                 reference: "package.package".into()
             }
         );
         let d = ServeOptions::default();
-        assert_eq!(s.max_body_bytes, d.max_body_bytes);
-        assert_eq!(s.timeout, d.timeout);
-        assert_eq!(s.max_concurrency, d.max_concurrency);
-        assert!(!s.trust_unsafe_flavors && s.auth_token_secret.is_none());
+        assert_eq!(o.max_body_bytes, d.max_body_bytes);
+        assert_eq!(o.timeout, d.timeout);
+        assert_eq!(o.max_concurrency, d.max_concurrency);
+        assert!(!o.trust_unsafe_flavors);
 
         // flags beat serve:; an explicit id beats latest.json and is not reloadable.
         let a = args(&[
@@ -299,23 +286,20 @@ mod tests {
             "7",
             "--max-concurrency",
             "2",
-            "--auth-token-secret",
-            "TOK",
         ]);
-        let (s, id) = resolve(&a, &yaml, Some(&lj)).unwrap();
-        assert_eq!((s.host.as_str(), s.port), ("127.0.0.2", 0));
+        let (o, source, id) = resolve(&a, &yaml, Some(&lj)).unwrap();
+        assert_eq!((o.host.as_str(), o.port), ("127.0.0.2", 0));
         assert_eq!(id.to_string(), ID_B);
-        assert!(matches!(s.source, Source::Explicit(_)));
+        assert_eq!(source, Source::Explicit);
         assert_eq!(
-            (s.max_body_bytes, s.timeout, s.max_concurrency),
+            (o.max_body_bytes, o.timeout, o.max_concurrency),
             (5, Duration::from_secs(7), 2)
         );
-        assert!(s.trust_unsafe_flavors);
-        assert_eq!(s.auth_token_secret.as_deref(), Some("TOK"));
+        assert!(o.trust_unsafe_flavors);
 
         // an explicit id needs neither serve: nor latest.json; defaults apply.
-        let (s, _) = resolve(&args(&[ID_B]), &cfg(""), None).unwrap();
-        assert_eq!((s.host.as_str(), s.port), ("127.0.0.1", 8080));
+        let (o, ..) = resolve(&args(&[ID_B]), &cfg(""), None).unwrap();
+        assert_eq!((o.host.as_str(), o.port), ("127.0.0.1", 8080));
 
         // failures
         let no_run = format!("{:#}", resolve(&args(&[]), &yaml, None).unwrap_err());

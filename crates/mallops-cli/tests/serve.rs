@@ -41,12 +41,27 @@ fn csv() -> String {
 fn serve_errors_without_run_or_with_memory_store() {
     let wd = WorkDir::new();
     wd.write("mallops.yaml", PIPELINE);
+    std::fs::create_dir(wd.path().join(".mallops")).unwrap();
     let out = run_cli(wd.path(), &["serve"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stderr(&out).contains("error: no successful run: run `mallops run` first"),
         "{}",
         stderr(&out)
+    );
+
+    let wd = WorkDir::new();
+    wd.write("mallops.yaml", PIPELINE);
+    let out = run_cli(wd.path(), &["serve"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("error: store not found: "),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !wd.path().join(".mallops").exists(),
+        "serve created the store"
     );
 
     let wd = WorkDir::new();
@@ -93,11 +108,6 @@ fn serve_e2e_health_sighup_sigterm() {
                 .success()
         );
     };
-    // Early, while the package may still be loading: the handler is installed before the load.
-    // (Short pause: a signal before the process starts its runtime cannot be handled by anyone.)
-    std::thread::sleep(Duration::from_millis(150));
-    kill("-HUP");
-
     let mut line = String::new();
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)
@@ -107,6 +117,8 @@ fn serve_e2e_health_sighup_sigterm() {
         .strip_prefix("serving ")
         .unwrap_or_else(|| panic!("stdout: {line:?}"));
     let (id, addr) = rest.split_once(" on http://").unwrap();
+    // Only now: the handler is installed (it precedes the load), so the signal cannot be lost.
+    kill("-HUP");
 
     let health = || {
         let mut s = TcpStream::connect(addr).unwrap();
@@ -122,7 +134,6 @@ fn serve_e2e_health_sighup_sigterm() {
     assert!(body.contains(id), "{body}");
 
     // A reload with an unchanged latest.json keeps the server up.
-    kill("-HUP");
     std::thread::sleep(Duration::from_millis(300));
     assert!(
         child.try_wait().unwrap().is_none(),

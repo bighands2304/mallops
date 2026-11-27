@@ -306,10 +306,6 @@ fn error(status: StatusCode, msg: &str) -> Response {
 /// A failed `/predict`: status and client message.
 type Fail = (StatusCode, String);
 
-fn bad_request(msg: impl Into<String>) -> Fail {
-    (StatusCode::BAD_REQUEST, msg.into())
-}
-
 /// `500` with a generic message; the cause is logged at WARN.
 fn internal(e: Error) -> Fail {
     tracing::warn!(error = %e, "prediction failed");
@@ -390,13 +386,14 @@ async fn predict(State(h): State<ServeHandle>, body: Result<Bytes, BytesRejectio
 }
 
 async fn answer(h: &ServeHandle, body: &[u8]) -> Result<Value, Fail> {
-    let value: Value =
-        serde_json::from_slice(body).map_err(|e| bad_request(format!("invalid JSON: {e}")))?;
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
     let (rows, single) = match value {
         Value::Object(_) => (vec![value], true),
         Value::Array(items) if items.iter().all(Value::is_object) => (items, false),
         _ => {
-            return Err(bad_request("expected a JSON object or an array of objects"));
+            let msg = "expected a JSON object or an array of objects";
+            return Err((StatusCode::BAD_REQUEST, msg.into()));
         }
     };
     if rows.is_empty() {
@@ -412,13 +409,13 @@ async fn answer(h: &ServeHandle, body: &[u8]) -> Result<Value, Fail> {
             outputs.len()
         ))));
     }
-    let mut values = outputs
-        .into_iter()
-        .map(|o| match o {
-            PredictInput::Json(v) => Ok(v),
-            _ => Err(internal(Error::Runtime("non-JSON prediction".into()))),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut values = Vec::with_capacity(n);
+    for o in outputs {
+        let PredictInput::Json(v) = o else {
+            return Err(internal(Error::Runtime("non-JSON prediction".into())));
+        };
+        values.push(v);
+    }
     Ok(if single {
         values.swap_remove(0)
     } else {

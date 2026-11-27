@@ -155,7 +155,7 @@ All error responses — including `400` and `413` — are returned as JSON `{"er
 | `400 Bad Request` | Malformed JSON, payload is neither an object nor an array of objects, or fitted transform validation failed (`apply_json`). |
 | `401 Unauthorized` | Missing `Authorization` header, scheme other than `Bearer`, or invalid token. Includes `WWW-Authenticate: Bearer` and a generic error message. |
 | `413 Payload Too Large` | Request body exceeds `--max-body-bytes` (default 10 MiB). |
-| `500 Internal Server Error` | Predictor runtime error, or predictor returned non-JSON bytes (`PredictInput::Bytes` maps to `"non-JSON prediction"`). Returns a generic error message; never echoes the request body. |
+| `500 Internal Server Error` | Predictor runtime error, or predictor returned non-JSON bytes (`PredictInput::Bytes`; the detail `"non-JSON prediction"` goes to the `warn` log only). The client always receives `{"error":"prediction failed"}`; the request body is never echoed. |
 | `503 Service Unavailable` | Concurrency limit (`--max-concurrency`, default 64) reached. |
 | `504 Gateway Timeout` | Request exceeded `--timeout` (default 30 s). |
 
@@ -167,8 +167,8 @@ Pass `--auth-token-secret <NAME>` to require `Authorization: Bearer <token>` on 
 
 - The CLI reads the token from the `MALLOPS_SECRET_<NAME>` environment variable via
   `EnvSecretProvider`.
-- A missing environment variable or an empty/whitespace-only token fails at startup with
-  `Error::Config`.
+- A missing environment variable fails at startup with `Error::Secret`; an empty or
+  whitespace-only token fails with `Error::Config`.
 - The server hashes the token with BLAKE3 on load and retains only the `blake3::Hash` digest (not
   the raw `Secret`), comparing incoming tokens in constant time via `blake3::Hash` equality.
 - Missing header, non-`Bearer` scheme, and wrong token all return `401 Unauthorized` with
@@ -187,14 +187,16 @@ every hot-swap. See [SPEC §4.1 Trust model](../SPEC.md#41-trust-model) and
 
 ### Request logging (metadata only)
 
-Each HTTP request emits a single structured `tracing::info!` event containing metadata only:
-`method`, `path`, `status`, `latency_ms`, `req_bytes`, and `resp_bytes`.
+Each `POST /predict` request emits a single structured `tracing::info!` event containing metadata only:
+`method`, `path`, `status`, `latency_ms`, `req_bytes`, and `resp_bytes`. `GET /health` and unknown
+routes are not logged.
 
 - Request and response bodies are **never** logged.
 - `4xx` responses log only metadata (error details from JSON parsing or `apply_json` are not logged
   because they may contain input values).
 - `500` responses additionally log the internal predictor error at `warn` level (for external
-  predictors, this may include the worker's stderr tail).
+  predictors, this may include the worker's stderr tail). Without a `transform` in the package, a
+  predictor error may name a column sent by the client in that `warn` log (never the values).
 
 ## Retraining and hot-swap (`SIGHUP`)
 
@@ -231,17 +233,18 @@ kill -HUP <pid>
 - **Serialized swaps:** reloads are serialized through an async mutex so rapid `SIGHUP` signals do
   not load multiple packages concurrently.
 - **Failure keeps the old package:** if `latest.json` is unreadable, its `pipeline` does not match,
-  or loading the new package fails (including trust gate rejection), a `warn` is logged and the
-  server continues serving the previous package without interruption.
+  or loading the new package fails (including trust gate rejection), a warning is emitted (a
+  `warning: ...` line on stderr from the CLI for `latest.json` problems, a `tracing` `warn` from
+  `mallops-std` for load and trust failures) and the server continues serving the previous package without interruption.
 - **Schema change warning:** if the new package has a different `io_schema`, the swap completes and
-  logs a `warn`.
+  logs a `tracing` `warn` (`mallops-std`).
 - **Health update:** `GET /health` immediately reports the new `package` id and `flavor`.
 
 ### Operational notes for `SIGHUP`
 
 - **Explicit `PACKAGE_ID`:** when started as `mallops serve <PACKAGE_ID>`, the `SIGHUP` handler is
-  still installed so the signal does not kill the server, but reloads are ignored with a `warn`
-  log.
+  still installed so the signal does not kill the server, but reloads are ignored with a
+  `warning: ...` line on stderr.
 - **Unix only:** `SIGHUP` and `SIGTERM` handling exist only on Unix (`#[cfg(unix)]`). On Windows,
   only `Ctrl-C` is handled; reload requires restarting the process.
 - **Stopping the server:** because `SIGHUP` reloads instead of terminating on Unix, closing the

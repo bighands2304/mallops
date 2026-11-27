@@ -5,6 +5,7 @@
 mod inspect;
 mod noop;
 mod run;
+mod serve;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -46,6 +47,8 @@ enum Cmd {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Serve a packaged model over HTTP (Ctrl-C or SIGTERM stops; SIGHUP reloads on Unix).
+    Serve(serve::Args),
     /// Print the validated DAG without executing anything.
     Graph {
         #[arg(long, value_enum, default_value_t = GraphFormat::Mermaid)]
@@ -123,16 +126,18 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_max_level(if cli.verbose {
-            tracing_subscriber::filter::LevelFilter::DEBUG
-        } else {
-            tracing_subscriber::filter::LevelFilter::WARN
+        .with_max_level(match (cli.verbose, matches!(cli.cmd, Cmd::Serve(_))) {
+            (true, _) => tracing_subscriber::filter::LevelFilter::DEBUG,
+            // `serve` logs one INFO line per request.
+            (false, true) => tracing_subscriber::filter::LevelFilter::INFO,
+            (false, false) => tracing_subscriber::filter::LevelFilter::WARN,
         })
         .init();
     let res = match cli.cmd {
         Cmd::Init { dir } => inspect::init(dir.as_deref().unwrap_or(Path::new("."))),
         Cmd::Validate => inspect::validate(&cli.file),
         Cmd::Run { jobs, no_cache } => run::run(&cli.file, jobs, no_cache),
+        Cmd::Serve(args) => serve::serve(&cli.file, &args),
         Cmd::Graph { format } => inspect::graph(&cli.file, format),
         Cmd::Blocks {
             cmd: BlocksCmd::List,

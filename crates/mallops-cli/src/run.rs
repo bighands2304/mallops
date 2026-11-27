@@ -13,7 +13,7 @@ use mallops_core::{
 };
 
 /// Store metadata key of the latest successful run pointer (SPEC §4.1, ARCHITECTURE §6.1).
-const LATEST_PATH: &str = "runs/latest.json";
+pub(crate) const LATEST_PATH: &str = "runs/latest.json";
 
 /// Schema version of `runs/latest.json`.
 const LATEST_DOC_VERSION: u32 = 1;
@@ -57,14 +57,17 @@ pub(crate) fn check_backends(cfg: &PipelineConfig) -> anyhow::Result<()> {
 }
 
 /// Directory containing `file`, defaulting to `.` when `file` has no parent component.
-fn base_dir(file: &Path) -> &Path {
+pub(crate) fn base_dir(file: &Path) -> &Path {
     match file.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     }
 }
 
-fn open_store(base: &Path, cfg: &PipelineConfig) -> anyhow::Result<Arc<dyn ArtifactStore>> {
+pub(crate) fn open_store(
+    base: &Path,
+    cfg: &PipelineConfig,
+) -> anyhow::Result<Arc<dyn ArtifactStore>> {
     match parse_store_kind(&cfg.store.kind)? {
         StoreKind::Local => Ok(Arc::new(LocalStore::new(base.join(&cfg.store.path))?)),
         StoreKind::Memory => Ok(Arc::new(MemoryStore::new())),

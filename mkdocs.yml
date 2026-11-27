@@ -79,6 +79,7 @@ nav:
   - Reference:
       - std/external: reference/external.md
       - std/train.smartcore: reference/train-smartcore.md
+      - std/validate.tabular: reference/validate.md
       - std/evaluate: reference/evaluate.md
       - std/package: reference/package.md
       - mallops serve: reference/serve.md

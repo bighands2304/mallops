@@ -16,7 +16,7 @@
         <link rel="prev" href="../train-smartcore/">
       
       
-        <link rel="next" href="../predictor/">
+        <link rel="next" href="../package/">
       
       
         
@@ -1026,6 +1026,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../package/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    std/package
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../predictor/" class="md-nav__link">
         
   
@@ -1528,10 +1556,11 @@ computed metric names to finite <code>f64</code> values with keys sorted lexicog
 <li><strong>Failed with <code>on_fail: skip</code> (default):</strong></li>
 <li>Returns <code>BlockOutcome::Skipped { reason, outputs }</code> (e.g. <code>"gate failed: f1 = 0.75 &lt; min 0.8"</code>).
     The <code>metrics</code> artifact is still committed to the store so the failed evaluation can be inspected.</li>
-<li><strong>Downstream blocking:</strong> the runtime skips only downstream nodes that consume <code>eval.metrics</code> as
-    a <strong>required</strong> input. For example, <code>std/package</code> must wire <code>metrics: eval.metrics</code> (as in
-    <a href="../../SPEC/#5-pipeline-definition-mallopsyaml">SPEC §5</a>); a consumer without that required edge
-    still runs.</li>
+<li><strong>Downstream blocking:</strong> the runtime skips downstream nodes that consume <code>eval.metrics</code> as a
+    <strong>required</strong> input. In addition, <a href="../package/"><code>std/package</code></a> checks <code>metadata.gate.passed</code> on a
+    wired <code>metrics</code> input even though its <code>metrics</code> port is optional, so a package that wires
+    <code>metrics: eval.metrics</code> (as in <a href="../../SPEC/#5-pipeline-definition-mallopsyaml">SPEC §5</a>) is
+    <code>Skipped</code> when the gate failed; a package that omits <code>metrics</code> still runs.</li>
 <li><strong><code>runs/latest.json</code> and serving:</strong> when any node is <code>Skipped</code>, <code>mallops run</code> exits <code>0</code> but
     leaves <code>runs/latest.json</code> unchanged, so <code>mallops serve</code> continues serving the previous accepted
     package.</li>
@@ -1666,13 +1695,13 @@ computed metric names to finite <code>f64</code> values with keys sorted lexicog
         
         
           
-          <a href="../predictor/" class="md-footer__link md-footer__link--next" aria-label="Next: Predictor contract">
+          <a href="../package/" class="md-footer__link md-footer__link--next" aria-label="Next: std/package">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Predictor contract
+                std/package
               </div>
             </div>
             <div class="md-footer__button md-icon">
